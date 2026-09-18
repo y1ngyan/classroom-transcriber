@@ -1,0 +1,188 @@
+import SwiftUI
+
+struct TranscriptionView: View {
+    @Environment(AppState.self) private var appState
+    @State private var courseName = "未命名课程"
+    @State private var isImporting = false
+    @State private var attachmentImportError: String?
+
+    private var engine: TranscriptionEngine { appState.transcription }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                transcript
+            }
+
+            // 底部悬浮胶囊按钮
+            recordButton
+                .padding(.bottom, Theme.Spacing.xl)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background)
+    }
+
+    // MARK: - 标题区
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            Text("课堂转录")
+                .textStyle(Theme.Text.largeTitle)
+                .foregroundStyle(Theme.textPrimary)
+
+            HStack(spacing: Theme.Spacing.sm) {
+                Text(currentDate)
+                Text("·")
+                Text(courseName)
+                if engine.isRunning {
+                    Text("·")
+                    Text("转录中").foregroundStyle(Theme.accent)
+                }
+            }
+            .textStyle(Theme.Text.caption)
+            .foregroundStyle(Theme.textSecondary)
+
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.md) {
+                Text(engine.statusMessage)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(2)
+
+                Spacer()
+
+                PillButton(
+                    title: "上传云端",
+                    systemImage: "icloud.and.arrow.up",
+                    style: .quiet,
+                    isEnabled: engine.recordingURL != nil && appState.upload.isConfigured
+                ) {
+                    if let url = engine.recordingURL {
+                        appState.upload.enqueue(fileURL: url)
+                    }
+                }
+                .help(engine.recordingURL == nil
+                    ? "录完一段后才有音频可上传"
+                    : (appState.upload.isConfigured
+                        ? "上传 \(engine.recordingURL?.lastPathComponent ?? "")"
+                        : "COS 缺凭证：去「设置」填 cosSecretID + cosSecretKey（或填 cosSTSURL）"))
+
+                PillButton(
+                    title: "添加图片",
+                    systemImage: "photo.badge.plus",
+                    style: .quiet,
+                    isEnabled: !engine.isRunning && !engine.segments.isEmpty
+                ) {
+                    isImporting = true
+                }
+            }
+            .padding(.top, Theme.Spacing.xs)
+
+            // 区块之间用 80 的留白拉开，而不是加个卡片框（规格要求）
+            CaptureDiagnostics()
+                .padding(.top, Theme.Spacing.md)
+
+            if !appState.upload.items.isEmpty {
+                UploadQueuePanel()
+                    .padding(.top, Theme.Spacing.lg)
+            }
+        }
+        .fileImporter(
+            isPresented: $isImporting,
+            allowedContentTypes: [.image],
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                appState.attachments.add(
+                    urls: urls,
+                    atMillis: appState.attachments.currentTimestampMillis(from: engine.segments)
+                )
+            case .failure(let error):
+                attachmentImportError = error.localizedDescription
+            }
+        }
+        .alert(
+            "添加图片失败",
+            isPresented: Binding(
+                get: { attachmentImportError != nil },
+                set: { if !$0 { attachmentImportError = nil } }
+            )
+        ) {
+            Button("好", role: .cancel) { attachmentImportError = nil }
+        } message: {
+            Text(attachmentImportError ?? "")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Theme.pagePadding)
+        .padding(.top, Theme.Spacing.xl)
+        .padding(.bottom, Theme.Spacing.lg)
+    }
+
+    private var currentDate: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyy 年 M 月 d 日 EEEE"
+        return formatter.string(from: Date())
+    }
+
+    // MARK: - 转录列表
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: Theme.segmentSpacing) {
+                    if engine.segments.isEmpty {
+                        Text(engine.isRunning ? "正在聆听…" : "点击下方按钮开始录制")
+                            .textStyle(Theme.Text.body)
+                            .foregroundStyle(Theme.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 120)
+                    }
+
+                    ForEach(engine.segments) { segment in
+                        TranscriptLine(
+                            segment: segment,
+                            attachments: appState.attachments.attachments(for: segment),
+                            onRemoveAttachment: { appState.attachments.remove($0) }
+                        )
+                        .id(segment.id)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Theme.pagePadding)
+                .padding(.top, Theme.Spacing.sm)
+                // 给悬浮按钮留出空间，避免遮住最后一段
+                .padding(.bottom, 120)
+            }
+            .onChange(of: engine.segments.count) {
+                guard let last = engine.segments.last else { return }
+                withAnimation(.easeOut(duration: 0.25)) {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
+            }
+        }
+    }
+
+    // MARK: - 录制按钮
+
+    /// 规格要求不使用阴影。这个按钮原本靠阴影从滚动的文字上"浮"起来，
+    /// 去掉之后改用实心填充 + 留白来拉开层次——它下面那 120pt 的留白
+    /// 就是干这个的。
+    private var recordButton: some View {
+        PillButton(
+            title: engine.isRunning ? "停止录制" : "开始录制",
+            dotColor: engine.isRunning ? .white : Theme.error,
+            style: .filled
+        ) {
+            Task {
+                if engine.isRunning {
+                    engine.stop()
+                } else {
+                    await appState.startTranscription()
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: engine.isRunning)
+    }
+}

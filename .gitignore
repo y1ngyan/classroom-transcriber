@@ -1,0 +1,4 @@
+# 构建产物。build.sh 每次都先 rm -rf 再重建，里面全是生成物
+build/
+
+.DS_Store
