@@ -193,6 +193,19 @@ struct TranscriptLine: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            // 质量自评：小图标 + 颜色（和提问标记同一套状态语言），不加底色块。
+            // good 不标——满屏都是「可信」标记，等于没有标记；只有需要用户
+            // 警惕的段落才占一行
+            if let grade = segment.qualityGrade, grade != .good {
+                StatusMark(
+                    kind: grade == .poor ? .error : .warning,
+                    text: grade == .poor
+                        ? "此段转录不可信，可能是识别失败"
+                        : "此段转录存疑，可能有错字"
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             Text(TextHighlight.styled(segment.text))
                 .textStyle(Theme.Text.body)
                 // 未定稿的段落压暗一档：识别结果还会变，视觉上先区分开

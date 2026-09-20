@@ -180,7 +180,12 @@ final class TranscriptionEngine {
         //    带 Alternatives 的两个预设只在音频定稿时才吐结果，直播场景下
         //    会长时间空屏，所以留给文件转录（FileTranscription）用。
         transcribers = usableLocales.map { locale in
-            SpeechTranscriber(locale: locale, preset: preset.preset)
+            // preset 的 attributeOptions 默认不含逐字符置信度——它是质量自评
+            // 的唯一可信信号（识别器自己知道每个字有多可信），必须显式打开。
+            // Preset 是值类型，拷贝出来加一项不影响那个静态实例
+            var presetWithConfidence = preset.preset
+            presetWithConfidence.attributeOptions.insert(.transcriptionConfidence)
+            return SpeechTranscriber(locale: locale, preset: presetWithConfidence)
         }
 
         // 3. 确保设备端模型已下载
@@ -648,13 +653,19 @@ final class TranscriptionEngine {
 
                     let startMillis = Int(result.range.start.seconds * 1000)
                     let endMillis = Int((result.range.start + result.range.duration).seconds * 1000)
+                    // 逐字符置信度跟着结果一起走：`String(result.text.characters)`
+                    // 会把 ConfidenceAttribute 整个丢掉，必须在这里就抽出来
+                    let quality = TranscriptQualityAssessor.grade(
+                        confidences: TranscriptQualityAssessor.confidences(from: result.text)
+                    )
 
                     await self?.upsert(
                         text: text,
                         startMillis: startMillis,
                         endMillis: endMillis,
                         isFinal: result.isFinal,
-                        language: language
+                        language: language,
+                        qualityGrade: quality
                     )
                 }
             } catch {
@@ -668,7 +679,8 @@ final class TranscriptionEngine {
         startMillis: Int,
         endMillis: Int,
         isFinal: Bool,
-        language: String
+        language: String,
+        qualityGrade: TranscriptGrade?
     ) {
         // 同一个语言模型在同一时间点会反复吐 refine 后的结果，用 (起始时间, 语言) 去重
         let key = SegmentKey(startMillis: startMillis, language: language)
@@ -680,18 +692,22 @@ final class TranscriptionEngine {
             segments[existing].isFinal = isFinal
             // 定稿的那一刻通知下游（事实核查），避免重复提交
             if isFinal && !wasFinal {
+                segments[existing].qualityGrade = qualityGrade
                 applyQuestionDetection(at: existing)
                 onFinalSegment?(segments[existing])
             }
         } else {
             segmentIndex[key] = segments.count
-            let created = TranscriptSegment(
+            var created = TranscriptSegment(
                 text: text,
                 isFinal: isFinal,
                 startTimeMillis: startMillis,
                 endTimeMillis: endMillis,
                 languages: [language]
             )
+            if isFinal {
+                created.qualityGrade = qualityGrade
+            }
             segments.append(created)
             if isFinal {
                 applyQuestionDetection(at: segments.count - 1)
@@ -845,6 +861,9 @@ final class TranscriptionEngine {
         for index in segments.indices {
             guard let text = byID[segments[index].id], text != segments[index].text else { continue }
             segments[index].text = text
+            // 校正后的文本和识别器的逐字符置信度对不上了（置信度标的是
+            // 校正前那些字），但校正只修术语拼写，段落整体可信度仍由
+            // 音频质量决定——保留原评分，不清空也不重算
             changed += 1
         }
 

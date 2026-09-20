@@ -63,9 +63,13 @@ enum FileTranscription {
         }
         print("🌐 挂载语言模型: \(usable.map(\.identifier).joined(separator: " + "))")
 
-        // 2. 构建 transcriber
+        // 2. 构建 transcriber。attributeOptions 加逐字符置信度：
+        //    质量自评的唯一可信信号，也是这条命令的端到端验证手段
+        //    （--quality-selftest 只测分档纯函数，置信度本身准不准要在这里看）
         let transcribers = usable.map { locale in
-            SpeechTranscriber(locale: locale, preset: presetChoice.preset)
+            var presetWithConfidence = presetChoice.preset
+            presetWithConfidence.attributeOptions.insert(.transcriptionConfidence)
+            return SpeechTranscriber(locale: locale, preset: presetWithConfidence)
         }
 
         // 3. 下载设备端模型
@@ -129,9 +133,18 @@ enum FileTranscription {
 
                             let start = result.range.start.seconds
                             let end = (result.range.start + result.range.duration).seconds
+                            // 每段报平均置信度和分档：质量自评的端到端验证
+                            // 就靠这行——好音频该看到 0.9+，崩坏音频 0.6 上下
+                            let confidences = TranscriptQualityAssessor.confidences(from: result.text)
+                            let grade = TranscriptQualityAssessor.grade(confidences: confidences)
+                            let confidenceNote = confidences.isEmpty ? "无置信度" : String(
+                                format: "置信度 %.3f · %@",
+                                confidences.reduce(0, +) / Double(confidences.count),
+                                grade?.label ?? "未评"
+                            )
                             print(String(
-                                format: "[%@] %6.2f → %6.2f  %@",
-                                label, start, end, text
+                                format: "[%@] %6.2f → %6.2f  %@（%@）",
+                                label, start, end, text, confidenceNote
                             ))
                         }
                     } catch {

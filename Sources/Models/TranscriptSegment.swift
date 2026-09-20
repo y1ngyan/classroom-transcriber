@@ -23,6 +23,11 @@ struct TranscriptSegment: Identifiable, Equatable {
 
     var isQuestion: Bool { questionLevel > 0 }
 
+    /// 转录质量自评，由识别器的逐字符置信度（transcriptionConfidence）
+    /// 算出，只在定稿时取一次——未定稿结果还会被反复改写。
+    /// nil 表示没评（识别器没给置信度 / 还没定稿）。
+    var qualityGrade: TranscriptGrade?
+
     init(
         id: UUID = UUID(),
         text: String,

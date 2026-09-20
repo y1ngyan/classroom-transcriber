@@ -14,6 +14,19 @@ struct TranscriptionView: View {
         engine.segments.filter(\.isQuestion)
     }
 
+    /// 质量自评的汇总计数。只数已定稿且评过分的段
+    private var qualitySummary: (poor: Int, fair: Int) {
+        var poor = 0, fair = 0
+        for segment in engine.segments {
+            switch segment.qualityGrade {
+            case .poor: poor += 1
+            case .fair: fair += 1
+            default: break
+            }
+        }
+        return (poor, fair)
+    }
+
     var body: some View {
         ZStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 0) {
@@ -102,6 +115,19 @@ struct TranscriptionView: View {
                     .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
+                .padding(.top, Theme.Spacing.sm)
+            }
+
+            // 质量汇总：整场转录可不可信，用户不该靠逐段翻标记去数。
+            // 全 good 时不显示——没有可疑段才是常态，不该为它占一行
+            let quality = qualitySummary
+            if quality.poor > 0 || quality.fair > 0 {
+                StatusMark(
+                    kind: quality.poor > 0 ? .warning : .neutral,
+                    text: quality.poor > 0
+                        ? "本次转录 \(quality.poor) 段不可信、\(quality.fair) 段存疑（共 \(engine.segments.count) 段）"
+                        : "本次转录 \(quality.fair) 段存疑（共 \(engine.segments.count) 段）"
+                )
                 .padding(.top, Theme.Spacing.sm)
             }
 

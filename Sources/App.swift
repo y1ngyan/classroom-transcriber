@@ -262,6 +262,14 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头转录质量自评自检：--quality-selftest（真实样本回归，不依赖任何设备）
+        if CommandLine.arguments.contains("--quality-selftest") {
+            for line in TranscriptQualityAssessor.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 无头术语提词：--extract-terms（走真实模型，验证整条提词链路）
         //
         // 和 --glossary 一样直接调 Service 不走 Store：Store 是 @MainActor 的，
