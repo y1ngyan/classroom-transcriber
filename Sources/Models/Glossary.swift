@@ -7,7 +7,9 @@ import Foundation
 /// 于是英文术语会被按读音转写成拉丁字母——实测 "machine learning" 转成
 /// "Machin learning"、"gradient descent" 转成 "gredion destent"。
 /// 靠一轮 LLM 校正把这些词拉回来，术语表就是校正的锚点。
-struct GlossaryEntry: Identifiable, Codable, Equatable {
+/// `Sendable`：`CoursePresets.all` 是 `static let`，Swift 6 下非 Sendable
+/// 类型的全局常量会直接编译不过。所有存储属性都是值类型，承诺成立。
+struct GlossaryEntry: Identifiable, Codable, Equatable, Sendable {
     var id: UUID
     /// 正确写法
     var term: String
@@ -45,51 +47,16 @@ struct GlossaryOutcome {
     var changedCount: Int { corrections.count }
 }
 
-/// 首次启动时的默认术语表。
+/// 首次启动时种进 `glossary.json` 的那一包词。
 ///
-/// 种子取自实测里真实被转错的词，不是凭空编的教学大纲。
+/// 内容搬去了 `CoursePresets.machineLearning`——默认词表只是「课程预设」里
+/// 被标为 default 的那一个，没有独立的第二份数据，否则两边会漂移。
+/// 这里留一层壳是因为 `GlossaryStore.load()` 按名字引它。
 ///
 /// **aliases 只放「同一个词的错误拼写」，不要放中文译名。**
 /// 把「梯度下降」写进 `gradient descent` 的 aliases，模型会把转录里
 /// 本来正确的中文改写成英文——那不是校正，是破坏。中文怎么说就让它
 /// 怎么说，术语表只管把转错的拉丁字母拉回来。
 enum GlossaryDefaults {
-    static let entries: [GlossaryEntry] = [
-        GlossaryEntry(
-            term: "machine learning",
-            aliases: ["Machin learning", "machine lerning", "machin learning"],
-            note: "机器学习"
-        ),
-        GlossaryEntry(
-            term: "gradient descent",
-            aliases: ["gredion destent", "gradient decent", "gradient desent"],
-            note: "梯度下降"
-        ),
-        GlossaryEntry(
-            term: "stochastic gradient descent",
-            aliases: ["stochastic gradient decent", "stochastic gradient desent"],
-            note: "随机梯度下降，缩写 SGD 也算正确写法"
-        ),
-        GlossaryEntry(
-            term: "learning rate",
-            aliases: ["learning reit", "lerning rate", "learning late"],
-            note: "学习率，训练时的超参数"
-        ),
-        GlossaryEntry(
-            term: "loss function",
-            aliases: ["lost function", "loss funtion"],
-            note: "损失函数"
-        ),
-        GlossaryEntry(
-            term: "backpropagation",
-            aliases: ["back propagation", "backpropogation", "back propagasion"],
-            note: "反向传播"
-        ),
-        GlossaryEntry(
-            term: "epoch",
-            aliases: ["epok", "epochs"],
-            note: "训练轮次；复数 epochs 视上下文可保留"
-        ),
-        GlossaryEntry(term: "MNIST", aliases: ["minist", "M NIST"], note: "手写数字数据集"),
-    ]
+    static var entries: [GlossaryEntry] { CoursePresets.default.entries }
 }

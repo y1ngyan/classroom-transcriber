@@ -145,4 +145,134 @@ enum GlossaryService {
 
         return GlossaryOutcome(segments: corrected, corrections: corrections)
     }
+
+    // MARK: - 从转录内容里提词
+
+    /// 提词时喂给模型的转录文本上限（字符）。
+    ///
+    /// 超长的课要截断，但不能只取开头——一门课的主题词是**均匀分布**在
+    /// 整堂课里的，只看前几分钟会漏掉后半程才引入的术语。
+    /// 所以按等间隔抽段，覆盖全程，而不是从头截。
+    static let extractionBudget = 6000
+
+    /// 从等间隔抽出的片段拼出提词用的正文。
+    static func sample(_ segments: [TranscriptSegment], budget: Int = extractionBudget) -> String {
+        let bodies = segments
+            .map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !bodies.isEmpty else { return "" }
+
+        let total = bodies.reduce(0) { $0 + $1.count }
+        guard total > budget else { return bodies.joined(separator: "\n") }
+
+        // 每隔 step 段取一段，直到把预算用完。step 至少为 1。
+        let step = max(1, total / budget)
+        var picked: [String] = []
+        var used = 0
+        var index = 0
+        while index < bodies.count, used < budget {
+            picked.append(bodies[index])
+            used += bodies[index].count
+            index += step
+        }
+        return picked.joined(separator: "\n")
+    }
+
+    /// 从一段转录里提取课程术语。
+    ///
+    /// **这个结果救不了它自己那场课。** `contextualStrings` 是开录前喂给
+    /// 识别器的先验，音频过完就已经改不了了——提取出来的词只能用于
+    /// 1) 同一场课的事后校正，2) 下一场同类课开录前的词表。
+    /// UI 上必须说清楚，否则用户会以为点一下就能把刚录坏的那场修好。
+    ///
+    /// 第二列是「原文里出现过的错误写法」，这是有实测价值的一列：
+    /// 模型能看着 "cludelod Clod" 反推出 Claude，用户采纳后就变成一条
+    /// 带真实证据的 alias，正好符合别名「实测误转写」的定义。
+    static func extractTerms(from segments: [TranscriptSegment]) async throws -> [GlossaryEntry] {
+        let body = sample(segments)
+        guard !body.isEmpty else { throw GlossaryError.noSegments }
+
+        let systemPrompt = """
+        下面是一段中英混合的课堂转录。识别器只挂了中文模型，英文术语会被按读音 \
+        转写成走样的拉丁字母。
+
+        请找出这堂课里**反复出现、且属于专业术语或专有名词**的英文词，给出它们的正确写法。
+
+        硬性要求：
+        - 只提**英文或拉丁字母**的词（Claude、Kubernetes、eigenvalue 这种）。
+          中文词一律不要提。
+        - 必须是正文里**真实出现过**的词，不许补充这堂课没讲到的相关术语。
+        - 不要提常见词（the、data、model、problem、example 这类）。
+        - 挑最值得校正的，最多 40 条，多了反而稀释效果。
+        - 每行输出一条，格式固定为三列，用 `|` 分隔：
+          `正确写法|正文里出现过的错误写法（没有就留空）|一句话说明`
+        - 不要编号，不要表头，不要解释，不要代码块围栏。
+        """
+
+        let response = try await ModelText.deepSeekChat(
+            systemPrompt: systemPrompt,
+            userPrompt: body,
+            temperature: 0,
+            timeout: 180
+        )
+
+        return parseTerms(response)
+    }
+
+    /// 解析提词返回的行。
+    ///
+    /// 和 `parse` 一样走宽容策略：解析不出来的行直接丢，不因为模型多吐了
+    /// 一句解释就整体失败。
+    ///
+    /// 列数决定语义，不靠内容猜：`词|误转写|说明` 三列，
+    /// `词|说明` 两列，光一个词也能收。
+    static func parseTerms(_ response: String, limit: Int = 40) -> [GlossaryEntry] {
+        var entries: [GlossaryEntry] = []
+        var seen = Set<String>()
+
+        func accept(term rawTerm: String, aliases: [String], note: String) {
+            // 有的返回会写成 `1. Claude|...`，把行首编号剥掉
+            let term = rawTerm
+                .replacingOccurrences(of: #"^\d+[.、)]\s*"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            guard !term.isEmpty, term.count <= 60 else { return }
+            // 只要拉丁字母的词：模型偶尔会把中文术语也列进来，那不是我们要的
+            guard term.contains(where: { $0.isLetter && $0.isASCII }) else { return }
+            guard seen.insert(term.lowercased()).inserted else { return }
+
+            entries.append(
+                GlossaryEntry(
+                    term: term,
+                    aliases: aliases.filter { !$0.isEmpty && $0.lowercased() != term.lowercased() },
+                    note: note
+                )
+            )
+        }
+
+        for rawLine in response.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix("```") else { continue }
+
+            let columns = line
+                .components(separatedBy: "|")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+
+            switch columns.count {
+            case 1:
+                // 模型没按格式吐、只给了一个词。限制得死一点，
+                // 免得把「以上就是这堂课的重点词汇」这种整句话当成术语收进来。
+                let bare = columns[0]
+                guard bare.count <= 40, bare.split(separator: " ").count <= 3 else { continue }
+                accept(term: bare, aliases: [], note: "")
+            case 2:
+                accept(term: columns[0], aliases: [], note: columns[1])
+            default:
+                accept(term: columns[0], aliases: [columns[1]], note: columns[2])
+            }
+
+            if entries.count >= limit { break }
+        }
+
+        return entries
+    }
 }

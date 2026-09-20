@@ -35,27 +35,13 @@ struct PillButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: Theme.Spacing.sm) {
-                if let dotColor {
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 9, height: 9)
-                }
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(foreground)
-                } else if let systemImage {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 13))
-                }
-                Text(title)
-                    .font(.system(size: 15, weight: .medium))
-            }
-            .padding(.horizontal, Theme.Spacing.lg)
-            .padding(.vertical, 10)
-            .background(Capsule().fill(background))
-            .foregroundStyle(foreground)
+            PillLabel(
+                title: title,
+                systemImage: systemImage,
+                dotColor: dotColor,
+                isLoading: isLoading,
+                style: style
+            )
         }
         .buttonStyle(.plain)
         .opacity(isInteractive ? 1 : 0.35)
@@ -63,6 +49,49 @@ struct PillButton: View {
         // 悬停反馈取代阴影：规格不要阴影，但按钮总得能看出是可点的
         .brightness(isHovering && isInteractive ? 0.06 : 0)
         .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - PillLabel
+
+/// 胶囊按钮的样子。`PillButton` 和 `PillMenu` 共用一份——
+/// 各画一份的话，改一次内边距就得记得改两处，早晚会漂移。
+struct PillLabel: View {
+
+    let title: String
+    var systemImage: String?
+    var dotColor: Color?
+    var trailingSystemImage: String?
+    var isLoading = false
+    var style: PillButton.Style = .filled
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            if let dotColor {
+                Circle()
+                    .fill(dotColor)
+                    .frame(width: 9, height: 9)
+            }
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(foreground)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13))
+            }
+            Text(title)
+                .font(.system(size: 15, weight: .medium))
+            if let trailingSystemImage {
+                Image(systemName: trailingSystemImage)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(foreground.opacity(0.7))
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.lg)
+        .padding(.vertical, 10)
+        .background(Capsule().fill(background))
+        .foregroundStyle(foreground)
     }
 
     private var background: Color {
@@ -77,6 +106,46 @@ struct PillButton: View {
         case .filled: return .white
         case .quiet: return Theme.textPrimary
         }
+    }
+}
+
+// MARK: - PillMenu
+
+/// 胶囊外观的下拉菜单。
+///
+/// 用在「从一组预设里挑一个」这类动作上：做成 Button 就得自己弹 sheet
+/// 再把列表画一遍，而系统 Menu 已经把键盘导航、暗色模式、点外关闭都做完了。
+struct PillMenu<Content: View>: View {
+
+    let title: String
+    var systemImage: String?
+    var style: PillButton.Style = .quiet
+    var isEnabled = true
+    @ViewBuilder let content: Content
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Menu {
+            content
+        } label: {
+            PillLabel(
+                title: title,
+                systemImage: systemImage,
+                trailingSystemImage: "chevron.down",
+                style: style
+            )
+        }
+        // .borderlessButton 是让自定义 label 完全接管外观的那档；
+        // .menuIndicator(.hidden) 去掉系统另画的那个箭头，用 label 里自己的
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .buttonStyle(.plain)
+        .fixedSize()
+        .opacity(isEnabled ? 1 : 0.35)
+        .disabled(!isEnabled)
+        .brightness(isHovering && isEnabled ? 0.06 : 0)
+        .onHover { isHovering = $0 }
     }
 }
 
@@ -108,6 +177,22 @@ struct TranscriptLine: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
+            // 提问标记：小图标 + 颜色（规格的状态表达方式），不加底色块。
+            // L2 是确认的提问，L1 只是点名/祈使预警——颜色和措辞都分开，
+            // 混在一起用户会以为每条「谁来回答一下」都是一道完整的问题
+            if segment.isQuestion {
+                HStack(spacing: 5) {
+                    Image(systemName: segment.questionLevel >= 2
+                        ? "questionmark.bubble.fill"
+                        : "hand.raised.fill")
+                        .font(.system(size: 11))
+                    Text(segment.questionLevel >= 2 ? "提问" : "点名")
+                        .textStyle(Theme.Text.caption)
+                }
+                .foregroundStyle(segment.questionLevel >= 2 ? Theme.accent : Theme.warning)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             Text(TextHighlight.styled(segment.text))
                 .textStyle(Theme.Text.body)
                 // 未定稿的段落压暗一档：识别结果还会变，视觉上先区分开

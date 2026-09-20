@@ -14,6 +14,12 @@ final class GlossaryStore {
     private(set) var isRunning = false
     private(set) var statusMessage = ""
 
+    /// 从转录里提出来的候选术语，等用户逐条挑。
+    /// 不直接进 `entries`——提取是模型猜的，而 `entries` 会直接灌进识别器，
+    /// 猜错一个词就是把识别器往错的方向推一整场课。必须过一道人眼。
+    private(set) var candidates: [GlossaryEntry] = []
+    private(set) var isExtracting = false
+
     /// 校正后的片段，等用户确认再写回引擎。
     /// 不直接改引擎是因为模型偶尔会顺手改对的地方，得让人看一眼。
     private(set) var pending: [TranscriptSegment]?
@@ -61,6 +67,92 @@ final class GlossaryStore {
         entries = GlossaryDefaults.entries
         persist()
         statusMessage = "已恢复默认术语表（\(entries.count) 个）"
+    }
+
+    /// 载入一个课程预设。
+    ///
+    /// **合并而不是替换。** 用户手加的条目、上一个预设里改过的条目都是
+    /// 他的劳动成果，换一包词就整个抹掉太粗暴；而按 term 去重之后，
+    /// 合并的结果是可预期的：不会重复，也不会丢东西。
+    /// 真要清空走「恢复默认」，那是一个用户主动选择的动作。
+    func apply(_ preset: CoursePreset) {
+        let existing = Set(entries.map { $0.term.lowercased() })
+        let fresh = preset.entries.filter { !existing.contains($0.term.lowercased()) }
+
+        entries.append(contentsOf: fresh)
+        persist()
+
+        // 把预设的说明也念一遍：菜单里只能塞下名字，
+        // 载入之后得让用户确认自己选的这包词到底覆盖什么
+        let skipped = preset.entries.count - fresh.count
+        let tail = skipped == 0
+            ? "新增 \(fresh.count) 个术语"
+            : "新增 \(fresh.count) 个，跳过 \(skipped) 个已有"
+        statusMessage = "已载入「\(preset.name)」（\(preset.summary)）· \(tail)"
+    }
+
+    // MARK: - 从转录内容提词
+
+    /// 从当前转录里提候选术语。
+    ///
+    /// 这条路是为「没有对应预设的课」准备的兜底，**不是默认路径**：
+    /// 提取发生在录完之后，而术语表要在开录前就位，所以提出来的词
+    /// 救不了它自己那场课的识别阶段（能救事后校正，能救下一场同类课）。
+    /// 界面上必须把这句话说出来，否则用户会以为点一下就把录坏的修好了。
+    func extract(segments: [TranscriptSegment]) async {
+        guard !isExtracting else { return }
+        guard isConfigured else {
+            statusMessage = "❌ DeepSeek 密钥未配置"
+            return
+        }
+        guard !segments.isEmpty else {
+            statusMessage = "❌ 还没有转录内容"
+            return
+        }
+
+        isExtracting = true
+        statusMessage = "正在从转录里提取术语…"
+        defer { isExtracting = false }
+
+        do {
+            let found = try await GlossaryService.extractTerms(from: segments)
+            let existing = Set(entries.map { $0.term.lowercased() })
+            candidates = found.filter { !existing.contains($0.term.lowercased()) }
+
+            if candidates.isEmpty {
+                statusMessage = "提取完成 · 没有发现词表里没有的术语"
+            } else {
+                statusMessage = "提取完成 · \(candidates.count) 个候选待确认"
+            }
+        } catch {
+            candidates = []
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    /// 采纳一条候选
+    func accept(_ candidate: GlossaryEntry) {
+        candidates.removeAll { $0.id == candidate.id }
+        guard !entries.contains(where: {
+            $0.term.lowercased() == candidate.term.lowercased()
+        }) else { return }
+
+        entries.append(candidate)
+        persist()
+    }
+
+    func acceptAllCandidates() {
+        let existing = Set(entries.map { $0.term.lowercased() })
+        let fresh = candidates.filter { !existing.contains($0.term.lowercased()) }
+        entries.append(contentsOf: fresh)
+        candidates = []
+        persist()
+        statusMessage = "已采纳 \(fresh.count) 个术语"
+    }
+
+    func dismissCandidates() {
+        candidates = []
+        statusMessage = "已忽略本次提取结果"
     }
 
     /// 视图里用 `ForEach($store.entries)` 直接改数组，改完调这里落盘
