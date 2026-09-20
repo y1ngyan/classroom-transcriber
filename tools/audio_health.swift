@@ -2,17 +2,16 @@
 //
 // 录音体检：逐时间窗看底噪、动态范围、语音帧占比。
 //
-// 为什么需要它：一场录音「转录得准不准」和「录得响不响」几乎无关。
-// 电平表只能回答后者——这恰恰是排查转录准确率时最容易走进的死胡同
-// （电平正常、帧数正常、什么都不报错，但转出来全是错的）。
+// 为什么需要它：电平表只能回答「录得响不响」，而排查采集链路时
+// 更常见的问题是「同一场录音内部稳不稳」——前 20 秒好好的、中间塌了
+// 又恢复，只看整段平均会把这个塌陷完全平均掉。所以它按时间窗出读数。
 //
-// 真正决定成败的是**动态范围**：语音电平和底噪之间差多少。
-// 安静时底噪 0.0002、说话时 0.05，差 48 dB，模型轻松；
-// 底噪被抬到 0.008，差 17 dB，模型就只能连蒙带猜。
-//
-// 而且**必须分时间窗看**。这次就是靠它定位的：同一场 191 秒的录音，
-// 前 20 秒 48 dB（转录完美），20–60 秒塌到 17 dB（转录崩坏），
-// 60 秒后又恢复。只看整段的平均数，这个塌陷会被完全平均掉。
+// **这个指标不预测转录准确率。** 曾经以为它预测（底噪抬到离语音 17 dB
+// 时「模型只能连蒙带猜」），后来用 tools/dsp_lab.swift 做剂量-反应实测，
+// 结论是反的：白噪声压到 15 dB SNR 转录仍然近乎完美，而唯一真正致命的是
+// 混响（RT60 ≥1s 开始出音素混淆，与底噪无关）。动态范围仍然值得看——
+// 它描述音频本身的质量，也确实是采集链出问题的信号——但**不要拿它
+// 推断「这场转录准不准」**，那条因果链没有实测支撑。
 //
 // 用法：
 //   swift tools/audio_health.swift <文件.wav> [...]
@@ -24,25 +23,67 @@ import Foundation
 
 // MARK: - 读数
 
+/// 一个窗口的动态范围读数能不能用。
+///
+/// 动态范围的算法是拿两个分位数相减（p90 当语音、p5 当底噪），
+/// 这只有在**窗口里既有说话的帧、也有安静的帧**时才成立。
+/// 两头都不成立，而且是两种不同的失败，读数都仍然是一个漂亮的
+/// 十几二十 dB 的数字——所以必须分别识别出来，不能让它冒充结论。
+enum RangeQuality: Equatable {
+    /// p5 真的是底噪、p90 真的是语音，相减有意义
+    case ok
+    /// 整窗都在说话（连续朗读、有声书）：p5 取到的还是语音电平，
+    /// 算出来的「范围」只是语音自身的起伏。实测拿干净的合成语音就误报过。
+    case noPause
+    /// 几乎没人在说话：p90 取到的是噪声的上尾，不是语音。
+    /// 实测 095806 的 60–75s（语音帧占比 5.6%）就这么报出了 17.5 dB，
+    /// 看着像塌陷，其实那 15 秒里本来就没人出声。
+    case noSpeech
+}
+
 struct Window {
     let start: Double
-    let floor: Double      // p10，代表底噪
+    let floor: Double      // p5，代表底噪
     let median: Double
     let speech: Double     // p90，代表语音
     let speechRatio: Double
     let centroid: Double   // 频谱质心，Hz
 
+    /// 语音帧占比的下限：低于它，p90 就落在噪声里了。
+    ///
+    /// 推导而不是拍的：排序后 p90 取的是 `frames[count * 9 / 10]`，
+    /// 当语音帧占比为 r 时，这个下标落在语音区里当且仅当 `1 - r < 0.9`，
+    /// 即 `r > 0.10`。低于这个值，「语音电平」量到的根本不是语音。
+    static let minimumSpeechRatio = 0.10
+
+    /// 语音帧占比的上限：高于它，p5 就落在语音里了。
+    ///
+    /// 严格算 p5 落在底噪里的条件是 `r < 0.95`，但这里卡在 0.80——
+    /// 留下 0.15 的余量，因为「安静帧」未必是底噪，可能只是轻声、
+    /// 呼吸、翻页。宁可少给一行读数，也不要给一行看着像塌陷的假数。
+    static let maximumSpeechRatio = 0.80
+
     var range: Double {
         20 * log10(max(speech, 1e-7) / max(floor, 1e-7))
     }
 
-    /// 这个窗口里量到的「底噪」是不是真的底噪。
-    ///
-    /// 动态范围只在窗口内有停顿、有安静帧时才成立。要是整窗都在说话
-    /// （连续朗读、有声书），p10 取到的仍然是语音电平，算出来的「范围」
-    /// 就只剩语音自身的起伏——十几 dB，看着像塌陷，其实什么事都没有。
-    /// 实测拿一段干净的合成语音试，它就误报过。
-    var floorIsReal: Bool { speechRatio < 0.80 }
+    var rangeQuality: RangeQuality {
+        if speechRatio < Self.minimumSpeechRatio { return .noSpeech }
+        if speechRatio > Self.maximumSpeechRatio { return .noPause }
+        return .ok
+    }
+
+    var isMeasurable: Bool { rangeQuality == .ok }
+
+    /// 读数不可用时，一句话说明为什么——表格里直接印出来，
+    /// 免得看图的人自己猜「这个 17 dB 到底算不算塌陷」
+    var qualityNote: String? {
+        switch rangeQuality {
+        case .ok: return nil
+        case .noPause: return "整窗都在说话，量不到底噪"
+        case .noSpeech: return "几乎没人说话，量不到语音"
+        }
+    }
 }
 
 func loadSamples(_ path: String) -> (samples: [Float], sampleRate: Double, channels: Int)? {
@@ -150,22 +191,45 @@ func windows(_ samples: [Float], sampleRate: Double) -> [Window] {
 
 // MARK: - 判定
 
-/// 塌陷 = 某窗口的动态范围明显低于这段录音自己的水平。
-/// 用「和自身比」而不是绝对阈值：教室、录音棚、耳机麦的绝对电平差得远，
+/// 相对落差阈值：比这段录音自己的最好水平低这么多，才算「明显低于自身」。
+///
+/// 「和自身比」是这个工具的立足点：教室、录音棚、耳机麦的绝对电平差得远，
 /// 但同一场录音内部应该是稳定的——内部不稳，就是链路的问题。
+/// 但**光靠它不够**，见下面那个绝对下限。
+let collapseRelativeDropDB = 12.0
+
+/// 绝对下限：低于这个数才谈得上「塌陷」。
+///
+/// 加它是因为只看相对落差会把「整体很好、只是内部有起伏」的录音也报成塌陷。
+/// 和 `report()` 里「整体偏低」那一档共用同一个数，改的时候一起改——
+/// 两处对「多少 dB 算低」的说法必须一致，否则报告自己跟自己打架。
+let collapseAbsoluteFloorDB = 30.0
+
+/// 塌陷 = 某窗口的动态范围**既**明显低于这段录音自己的水平，
+/// **又**低到绝对不健康。两个条件都满足才报。
 func collapseVerdict(_ list: [Window]) -> String? {
-    // 只用「量到了真底噪」的窗口判：全在说话的窗口算出来的范围是假的
-    let usable = list.filter(\.floorIsReal)
+    // 只用两个分位数都真的落在它们该落的地方的窗口判。
+    // 全在说话的窗口、几乎没说话的窗口，算出来的范围都是假的
+    // （见 `RangeQuality`），拉进来做基准或者做低谷都会得出错的区间。
+    let usable = list.filter(\.isMeasurable)
     guard usable.count >= 3 else { return nil }
 
     let ranges = usable.map(\.range).sorted()
     let best = ranges.last!
-    let worst = ranges.first!
-    guard best - worst > 12 else { return nil }
+
+    // **两个条件缺一不可**：既明显低于这段录音自己的水平，又低到绝对不健康。
+    //
+    // 少了绝对下限就会误报：实测 095806 最好 55.5 dB、最差 37.0 dB，
+    // 37 dB 本身相当健康，却因为比最好值低 18 dB 被判成「塌陷」。
+    // 少了相对落差又会丢掉这个工具存在的理由——教室、录音棚、耳机麦的
+    // 绝对电平差得远，同一场录音内部稳不稳才是链路问题的信号。
+    let bad = usable.filter {
+        $0.range < best - collapseRelativeDropDB && $0.range < collapseAbsoluteFloorDB
+    }
+    guard let worst = bad.map(\.range).min() else { return nil }
 
     // 把连续的低谷并成区间。逐个列出「20s, 30s, 40s…」等于没总结——
     // 要看的是「从哪到哪塌了」，不是有多少个 10 秒窗不合格
-    let bad = usable.filter { $0.range < best - 12 }
     let step = list.count > 1 ? list[1].start - list[0].start : 10
     var spans: [(Double, Double)] = []
     for w in bad {
@@ -202,37 +266,47 @@ func report(path: String) {
 
     let span = windowSpan(for: samples, sampleRate: sr)
     print("")
-    print("    时间窗     底噪(p10)   中位        语音(p90)   动态范围   语音帧   质心")
+    print("    时间窗     底噪(p5)    中位        语音(p90)   动态范围   语音帧   质心")
     for w in list {
-        let flag = !w.floorIsReal ? "  （整窗都在说话，量不到底噪）"
-            : (w.range < 25 ? "  ← 偏低" : "")
+        // 两种不可测的情况分别写清楚原因：读数照印（它是真的量出来的），
+        // 但后面跟一句为什么这个读数不能当结论用
+        let flag = w.qualityNote.map { "  （\($0)，此行读数不可用）" }
+            ?? (w.range < 25 ? "  ← 偏低" : "")
         print(String(format: "   %4.0f–%-4.0fs  %.5f    %.5f    %.5f   %6.1f dB  %5.1f%%  %5.0fHz%@",
                      w.start, w.start + span,
                      w.floor, w.median, w.speech, w.range, w.speechRatio * 100, w.centroid, flag))
     }
 
-    let usable = list.filter(\.floorIsReal)
+    let usable = list.filter(\.isMeasurable)
+    let skipped = list.count - usable.count
     guard !usable.isEmpty else {
         print("")
-        print("   （全程连续说话，没有停顿可量底噪——这种情况看识别结果就行）")
+        print("   （\(list.count) 个窗口没有一个是「又有人在说话、又有停顿」的，"
+              + "量不出动态范围——这种情况直接看转录结果，不要看这份读数）")
         return
     }
 
     let ranges = usable.map(\.range)
     let avg = ranges.reduce(0, +) / Double(ranges.count)
     print("")
-    print(String(format: "   平均动态范围 %.1f dB（最好 %.1f / 最差 %.1f，%d/%d 个窗口可测）",
-                 avg, ranges.max()!, ranges.min()!, usable.count, list.count))
+    print(String(format: "   平均动态范围 %.1f dB（最好 %.1f / 最差 %.1f，%d/%d 个窗口可测%@）",
+                 avg, ranges.max()!, ranges.min()!, usable.count, list.count,
+                 skipped > 0 ? "，\(skipped) 个不可测已排除" : ""))
 
     if let verdict = collapseVerdict(list) {
         print("   \(verdict)")
     } else if avg >= 40 {
-        print("   ✅ 全程稳定，这样的录音识别器能处理得很好")
-    } else if avg >= 30 {
-        print("   ⚠️ 整体偏低，识别会明显变差（离麦远、或房间底噪大）")
+        print("   ✅ 全程稳定，语音和底噪分得开")
+    } else if avg >= collapseAbsoluteFloorDB {
+        print("   ⚠️ 整体偏低，底噪离语音比较近")
     } else {
-        print("   ❌ 动态范围太小，语音和噪声差不多响，识别基本没戏")
+        print("   ⚠️ 动态范围小，语音和底噪差不多响")
     }
+
+    // 这段是刻意留的：「动态范围 → 转录准确率」这条因果链没有实测支撑，
+    // 而这个工具的输出很容易被当成那个结论来用（曾经就是这么用的）
+    print("   注：动态范围描述的是音频本身，不预测转录准确率——"
+          + "实测噪声压到 15dB SNR 转录仍然近乎完美，真正致命的是混响。")
 }
 
 /// 频带分布。用于确认「高频是不是被砍掉了」这类问题——

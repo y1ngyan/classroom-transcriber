@@ -125,6 +125,16 @@ struct CaptureDiagnostics: View {
             counter("转换", stats.converted)
             counter("帧", stats.frames)
 
+            // 增益读数。自动档报平均值：每帧的增益都在动，抽一帧没有意义。
+            // 用户改了这一档之后，唯一的确认方式就是这里
+            if let mode = stats.gainMode {
+                if mode == .auto, let average = stats.averageGain {
+                    counter("增益", String(format: "%.2f×", average))
+                } else {
+                    counter("增益", mode.shortLabel)
+                }
+            }
+
             if stats.silentConversions > 0 {
                 Text("⚠️ 静音 \(stats.silentConversions)")
                     .font(.system(size: 10, design: .monospaced))
@@ -134,12 +144,15 @@ struct CaptureDiagnostics: View {
         }
     }
 
-    private func counter(_ label: String, _ value: Int) -> some View {
+    /// 计数与读数共用同一套样式。`value` 收 `CustomStringConvertible`
+    /// 而不是 `Int`：增益那一栏要显示「2.31×」这种带单位的串，
+    /// 为它单开一个几乎一样的函数，早晚会和这个漂移。
+    private func counter(_ label: String, _ value: some CustomStringConvertible) -> some View {
         HStack(spacing: 3) {
             Text(label)
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.textTertiary)
-            Text("\(value)")
+            Text(value.description)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(Theme.textSecondary)
         }
