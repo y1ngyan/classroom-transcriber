@@ -71,6 +71,14 @@ final class TranscriptionEngine {
     /// 事实核查挂在这里，而不是让视图去 diff segments 数组。
     var onFinalSegment: (@MainActor (TranscriptSegment) -> Void)?
 
+    /// 段落定稿且被判定为课堂提问时回调一次。在 `onFinalSegment` 之前触发，
+    /// 回调拿到的 segment 已经带好 questionLevel / coreQuestion。
+    var onQuestion: (@MainActor (TranscriptSegment, QuestionDetection) -> Void)?
+
+    /// 课堂提问检测灵敏度。只在段落**定稿**的那一刻跑一次——
+    /// 未定稿的文本还会被反复改写，对半成品跑规则只会得到一会有一会没的假信号。
+    var questionSensitivity: QuestionSensitivity = .normal
+
     /// 要挂载的语言模型。
     ///
     /// 实测结论（见阶段 2 报告）：中文课堂挂单个 `zh-CN` 最优——它会把英文术语
@@ -84,6 +92,16 @@ final class TranscriptionEngine {
     /// 识别出来的先验，把「Machin learning」这类历史误拼塞进去等于教它往
     /// 错的方向偏。中文同理——理由见 GlossaryDefaults 的注释。
     var contextualTerms: [String] = []
+
+    /// 送进识别器之前的软件增益档。
+    ///
+    /// **只作用于送入识别器的那一份，存档永远是未加增益的原始音频。**
+    /// 理由见 `MicTap.handle` 里的顺序说明。
+    ///
+    /// 和 `useVoiceProcessing` 是两回事：那一档是系统语音处理链路（AEC +
+    /// 噪声抑制 + 它的 AGC），实测会在 20 秒后毁掉音频，默认关；这一档是
+    /// 我们自己写的、纯软件、只看帧 RMS，带噪声门，不碰音频设备。
+    var micGain: MicGainMode = .auto
 
     /// 实时转录预设。
     ///
@@ -264,7 +282,10 @@ final class TranscriptionEngine {
             try await analyzer.start(inputSequence: stream)
             isRunning = true
             let noise = voiceProcessingActive ? "降噪开" : "降噪关"
-            statusMessage = "转录中 · \(usable.joined(separator: " + ")) · \(noise)"
+            // 增益档要报出来：它默认是开的，而「开着的」和「关着的」在
+            // 转录结果上不一定当场分得出——用户改了这一档，得能确认它生效了
+            statusMessage = "转录中 · \(usable.joined(separator: " + "))"
+                + " · \(noise) · 增益 \(micGain.shortLabel)"
         } catch {
             statusMessage = "❌ 启动失败: \(error.localizedDescription)"
             stop()
@@ -294,12 +315,20 @@ final class TranscriptionEngine {
             statusMessage = "⚠️ 录音存档创建失败，本次只转录不落盘"
         }
 
+        // 软件增益。**每段录音新建一个**，而不是让引擎长期持有一个：
+        // AGC 的平滑状态是跟着这一路信号收敛出来的，跨录音复用会把上一段
+        // 末尾的增益当成新一段的起点——上一段结尾要是正好在大声说话，
+        // 新一段开头就会带着一个 4.5 倍的增益冲进去。
+        let preamp = AudioPreamp(mode: micGain)
+        preamp.reset()
+
         let tap = MicTap(
             sourceFormat: monoFormat,
             converter: converter,
             targetFormat: targetFormat,
             continuation: continuation,
-            recorder: recorder
+            recorder: recorder,
+            preamp: preamp
         ) { [weak self] level in
             // 电平表（仅 UI 用）：从音频线程跳回主 actor
             Task { @MainActor in self?.audioLevel = level }
@@ -358,6 +387,32 @@ final class TranscriptionEngine {
         private let onLevel: @Sendable (Float) -> Void
         /// 录音存档。为 nil 表示这次不落盘
         private let recorder: WAVRecorder?
+        /// 软件增益（AGC / 固定倍数）。只作用在送进识别器的那一份上
+        private let preamp: AudioPreamp
+
+        /// 存档的低频清理截止频率。成年男声基频最低到 85Hz，再往上切会削元音，
+        /// 所以卡在 80——理由写在 `HighPassFilter` 的文档里。
+        private static let highPassCutoffHz = 80.0
+
+        /// 存档用的低频清理，见 `HighPassFilter`。
+        ///
+        /// 只从音频线程访问，`MicTap` 已经是 `@unchecked Sendable`，
+        /// 不再单独标注。构造不出来（采样率异常）时为 nil，整级跳过——
+        /// 少一级滤波不影响功能，构造出一个错的才会。
+        private let highPass: HighPassFilter?
+        /// 和 `highPass` 同生共死，只为了让 UI 能说清这一级到底在不在
+        private let highPassCutoff: Double?
+
+        /// 抽声道用的复用缓冲。
+        ///
+        /// 原来这一块**每次回调都在实时音频线程上 new 一次**（约 12 次/秒）。
+        /// 单次分配不大，但实时线程上的堆分配可能撞上优先级倒置或缺页，
+        /// 而那一次卡顿就是采集丢帧。容量不够时（引擎改了回调块长）才重建。
+        ///
+        /// 只复用它、**不复用转换输出缓冲**：mono 缓冲的生命周期完全在这次
+        /// 回调之内（高通 / 增益 / 存档 / 转换全是同步消费），而转换输出
+        /// 被 yield 给 analyzer 后是异步读的，复用就是数据竞争。
+        private var monoBuffer: AVAudioPCMBuffer?
 
         init(
             sourceFormat: AVAudioFormat,
@@ -365,6 +420,7 @@ final class TranscriptionEngine {
             targetFormat: AVAudioFormat,
             continuation: AsyncStream<AnalyzerInput>.Continuation,
             recorder: WAVRecorder?,
+            preamp: AudioPreamp,
             onLevel: @escaping @Sendable (Float) -> Void
         ) {
             self.sourceFormat = sourceFormat
@@ -372,6 +428,13 @@ final class TranscriptionEngine {
             self.targetFormat = targetFormat
             self.continuation = continuation
             self.recorder = recorder
+            self.preamp = preamp
+            let filter = HighPassFilter(
+                sampleRate: sourceFormat.sampleRate,
+                cutoff: Self.highPassCutoffHz
+            )
+            self.highPass = filter
+            self.highPassCutoff = filter == nil ? nil : Self.highPassCutoffHz
             self.onLevel = onLevel
         }
 
@@ -380,6 +443,8 @@ final class TranscriptionEngine {
         private var convertedCount = 0
         private var frameCount = 0
         private var silentConversionCount = 0
+        private var gainSum: Double = 0
+        private var gainSamples = 0
 
         /// 音频链路计数，自检 / 排障用
         var stats: (tapped: Int, converted: Int, frames: Int) {
@@ -387,15 +452,50 @@ final class TranscriptionEngine {
             return (tappedCount, convertedCount, frameCount)
         }
 
-        func handle(_ buffer: AVAudioPCMBuffer) {
-            let source = buffer.format.isEqual(sourceFormat)
-                ? buffer
-                : firstChannelAsMono(buffer, format: sourceFormat)
-            let converted = source.flatMap { convert($0, using: converter, to: targetFormat) }
+        /// 本段录音里软件增益的平均值。读数是给界面用的：
+        /// 只看输入电平，用户没法判断 AGC 到底在不在干活。
+        var averageGain: Float? {
+            lock.lock(); defer { lock.unlock() }
+            guard gainSamples > 0 else { return nil }
+            return Float(gainSum / Double(gainSamples))
+        }
 
-            // 存档走抽好声道的单声道源，不走 converted：
-            // converted 是 analyzer 要的格式（可能 16kHz），存下来音质白丢一截
+        func handle(_ buffer: AVAudioPCMBuffer) {
+            // **永远拿一份自己拥有的缓冲**，不复用引擎的 buffer。
+            //
+            // 原来这里有一句 `buffer.format.isEqual(sourceFormat) ? buffer : ...`，
+            // 省掉一次拷贝。但那意味着下面这级高通要原地改引擎的内存——
+            // 引擎的缓冲我们只有读的权利，写它属于未定义行为。
+            // `firstChannelAsMono` 在格式一致时做的正好就是「把第 0 声道拷出来」，
+            // 内容和原缓冲逐样本相同，只是换成了我们的内存。
+            let source = firstChannelAsMono(buffer, format: sourceFormat, reusing: &monoBuffer)
+
+            // 高通在抽完声道之后做：多声道时先抽再滤，滤波器只需要维护一份状态。
+            // 存档和识别走的是同一个 source，所以两边都过这一级——
+            // 实测（dsp_lab 的 --hp）这条高通对转录结果没有可观察的影响，
+            // 不存在「为了存档音质把识别搞坏」的取舍。
+            if let source { highPass?.process(source) }
+
+            // **存档必须排在软件增益之前。** 这三行的顺序是一条硬约束，
+            // 和上面 stop() 里「先定稿再取消」是一类东西——调换之后不会
+            // 报错，只会把结果悄悄改掉。
+            //
+            // 增益是给识别器的补偿：它是「这一帧有多小声」的一次性判断，
+            // 下一帧可能完全不同。把它烧进存档，等于把当时那套 AGC 状态
+            // 永久焊在文件里——事后拿这条录音重转、做 A/B、量动态范围，
+            // 量到的都是加过工的信号，而原始电平已经不存在了，救不回来。
+            // 界面上的「上传云端」传的就是这条存档，用户以为存的是课上
+            // 实际发生的声音。
+            //
+            // 存档走抽好声道的单声道源，不走 converted：converted 是
+            // analyzer 要的格式（可能 16kHz），存下来音质白丢一截
             if let source { recorder?.append(source) }
+
+            // 增益只影响送进识别器的那一份（原地改 source，上面已经存过档了）
+            var gain: Float = 1
+            if let source { gain = preamp.process(source) }
+
+            let converted = source.flatMap { convert($0, using: converter, to: targetFormat) }
 
             // 兜底：源有信号、转换后却是全零，说明又踩到「静音下混」那类坑了。
             // 静默失败的代价太大（整场转录全是空气），宁可显式报出来。
@@ -410,17 +510,50 @@ final class TranscriptionEngine {
                 frameCount += Int(converted.frameLength)
             }
             if suspicious { silentConversionCount += 1 }
+            gainSum += Double(gain)
+            gainSamples += 1
             lock.unlock()
 
             guard let converted else { return }
             continuation.yield(AnalyzerInput(buffer: converted))
-            onLevel(inputLevel)
+            reportLevel(inputLevel)
+        }
+
+        /// 电平表节流的最后发送记录（仅音频线程访问）
+        private var lastReportedLevel: Float = -1
+        private var lastReportTime: CFAbsoluteTime = 0
+
+        /// 电平表更新。
+        ///
+        /// 直接每回调都 `onLevel` 的话，每次都要在音频线程上分配一个跳回
+        /// 主 actor 的 Task（约 12 次/秒），而静音期电平几乎不动，这些跳转
+        /// 全是浪费。所以变化小于阈值且距上次不足 100ms 就跳过——电平表
+        /// 是个 10Hz 就够读的 UI，识别链路不缺这一下。
+        private func reportLevel(_ level: Float) {
+            let now = CFAbsoluteTimeGetCurrent()
+            let settled = abs(level - lastReportedLevel) < 0.01
+            let recent = now - lastReportTime < 0.1
+            if settled && recent { return }
+            lastReportedLevel = level
+            lastReportTime = now
+            onLevel(level)
         }
 
         var silentConversions: Int {
             lock.lock(); defer { lock.unlock() }
             return silentConversionCount
         }
+
+        /// 存档那一级高通到底有没有生效。
+        ///
+        /// 报出来是因为「没生效」和「生效了」从波形和转录结果上都看不出来——
+        /// 唯一能看出来的地方是频谱最底下那一条，而没人会为了一句
+        /// 「低音干净了点」去翻频谱。构造失败（采样率异常）时这里是 nil，
+        /// 不做的事就说不做，别让它静默地什么都不干。
+        var activeHighPassCutoff: Double? { highPassCutoff }
+
+        /// 本次录音的软件增益档
+        var gainMode: MicGainMode { preamp.mode }
     }
 
     /// 音频链路计数，用于确认音频到底走到哪一步断了
@@ -428,9 +561,20 @@ final class TranscriptionEngine {
         guard let tap = micTap else { return "无 tap" }
         let s = tap.stats
         var line = "tap 回调 \(s.tapped) 次 · 转换成功 \(s.converted) 次 · 送入 analyzer \(s.frames) 帧"
+        if let cutoff = tap.activeHighPassCutoff {
+            line += " · 存档高通 \(Int(cutoff))Hz"
+        } else {
+            line += " · ⚠️ 存档高通未生效（采样率异常）"
+        }
         let silent = tap.silentConversions
         if silent > 0 {
             line += " · ⚠️ \(silent) 次转换成了静音（源有信号但输出全零）"
+        }
+        // 增益报的是**平均值**：AGC 每帧的增益都在动，抽一帧出来看没有意义，
+        // 而平均值正好回答「这一场里它到底放大了多少」
+        line += " · 增益 \(tap.gainMode.label)"
+        if let average = tap.averageGain, tap.gainMode == .auto {
+            line += String(format: " 均 %.2f×", average)
         }
         return line
     }
@@ -445,6 +589,10 @@ final class TranscriptionEngine {
         var converted = 0
         var frames = 0
         var silentConversions = 0
+        /// 本次录音的软件增益档。没开始录时是 nil
+        var gainMode: MicGainMode?
+        /// AUTO 档下的平均增益。其余档位没有意义（是固定值）
+        var averageGain: Float?
 
         /// 「转换成功」占「回调」的比例。中断在中间时这个数会明显小于 1
         var convertRatio: Double {
@@ -460,7 +608,9 @@ final class TranscriptionEngine {
             tapped: s.tapped,
             converted: s.converted,
             frames: s.frames,
-            silentConversions: tap.silentConversions
+            silentConversions: tap.silentConversions,
+            gainMode: tap.gainMode,
+            averageGain: tap.averageGain
         )
     }
 
@@ -530,6 +680,7 @@ final class TranscriptionEngine {
             segments[existing].isFinal = isFinal
             // 定稿的那一刻通知下游（事实核查），避免重复提交
             if isFinal && !wasFinal {
+                applyQuestionDetection(at: existing)
                 onFinalSegment?(segments[existing])
             }
         } else {
@@ -543,21 +694,43 @@ final class TranscriptionEngine {
             )
             segments.append(created)
             if isFinal {
-                onFinalSegment?(created)
+                applyQuestionDetection(at: segments.count - 1)
+                onFinalSegment?(segments[segments.count - 1])
             }
-            segments.sort { $0.startTimeMillis < $1.startTimeMillis }
-            // 排序后索引失效，重建
-            segmentIndex = Dictionary(
-                uniqueKeysWithValues: segments.enumerated().compactMap { idx, seg in
-                    guard let lang = seg.languages.first else { return nil }
-                    return (SegmentKey(startMillis: seg.startTimeMillis, language: lang), idx)
-                }
-            )
+            // 流式结果几乎总是按时间顺序到达，追加本身不破坏有序性——
+            // 这种时候全量 sort + 重建索引是纯浪费（一节课上千段就是 O(n²)）。
+            // 只有真的来了「更早」的段（乱序）才付出这次代价。
+            let count = segments.count
+            let staysSorted = count < 2
+                || segments[count - 2].startTimeMillis <= segments[count - 1].startTimeMillis
+            if !staysSorted {
+                segments.sort { $0.startTimeMillis < $1.startTimeMillis }
+                // 排序后索引失效，重建
+                segmentIndex = Dictionary(
+                    uniqueKeysWithValues: segments.enumerated().compactMap { idx, seg in
+                        guard let lang = seg.languages.first else { return nil }
+                        return (SegmentKey(startMillis: seg.startTimeMillis, language: lang), idx)
+                    }
+                )
+            }
         }
     }
 
     private func reportResultError(_ error: Error, language: String) {
         statusMessage = "⚠️ \(language) 转录中断: \(error.localizedDescription)"
+    }
+
+    /// 段落定稿时跑一次提问检测，命中则回写到 segment 上。
+    ///
+    /// 检测是纯规则的本地计算（微秒级），放在主 actor 上做没有问题；
+    /// 放这里而不是视图里，是因为「这句是不是提问」是数据属性，不是呈现细节。
+    private func applyQuestionDetection(at index: Int) {
+        guard questionSensitivity != .off, segments.indices.contains(index) else { return }
+        let detector = QuestionDetector(sensitivity: questionSensitivity)
+        guard let hit = detector.detect(segments[index].text) else { return }
+        segments[index].questionLevel = hit.level
+        segments[index].coreQuestion = hit.coreQuestion
+        onQuestion?(segments[index], hit)
     }
 
     // MARK: - 自定义词表
@@ -684,6 +857,11 @@ final class TranscriptionEngine {
     // MARK: - 音频工具
 
     /// AVAudioConverter 是同步的、且不是线程安全的，转换在音频线程完成
+    ///
+    /// 输出缓冲**不复用、每次新分配**，这不是浪费：这块内存 yield 给
+    /// SpeechAnalyzer 之后是被异步消费的，复用等于在 analyzer 还在读的时候
+    /// 拿下一帧覆盖它——数据竞争，而且是「转录偶尔出乱码」这种没法归因的
+    /// 故障。每帧一次的分配开销换确定性，值。
     private nonisolated static func convert(
         _ buffer: AVAudioPCMBuffer,
         using converter: AVAudioConverter,
@@ -883,7 +1061,23 @@ final class TranscriptionEngine {
         _ buffer: AVAudioPCMBuffer,
         format monoFormat: AVAudioFormat
     ) -> AVAudioPCMBuffer? {
-        guard let mono = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameLength),
+        var cache: AVAudioPCMBuffer?
+        return firstChannelAsMono(buffer, format: monoFormat, reusing: &cache)
+    }
+
+    /// 带复用的版本：`cache` 容量够就直接写它，不为每帧回调各分配一块新缓冲。
+    /// 容量不够（引擎改了回调块长）或格式变了才重建。调用方必须保证 cache
+    /// 不被第二处同时读写——实时链路上只有音频线程会碰到它。
+    private nonisolated static func firstChannelAsMono(
+        _ buffer: AVAudioPCMBuffer,
+        format monoFormat: AVAudioFormat,
+        reusing cache: inout AVAudioPCMBuffer?
+    ) -> AVAudioPCMBuffer? {
+        if cache == nil || cache!.frameCapacity < buffer.frameLength
+            || !cache!.format.isEqual(monoFormat) {
+            cache = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameLength)
+        }
+        guard let mono = cache,
               let destination = mono.floatChannelData?[0] else {
             return nil
         }

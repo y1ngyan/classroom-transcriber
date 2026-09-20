@@ -22,6 +22,16 @@ enum AppConfig {
         /// 永久密钥。只填 cosSecretID + cosSecretKey 也能跑，见下方注释。
         var cosSecretID: String?
         var cosSecretKey: String?
+
+        // ---- 偏好设置 ----
+        //
+        // 不是密钥，但和密钥住在同一个文件里。给两个下拉框单开一个
+        // 偏好文件，只会让「我的设置到底存在哪」这个问题多一个答案，
+        // 而那个答案对用户没有任何用。
+        /// 麦克风软件增益档（auto / off / x2 / x3 / x5）
+        var micGain: String?
+        /// 课堂提问检测灵敏度（high / normal / low / off）
+        var questionSensitivity: String?
     }
 
     private static let configURL: URL = {
@@ -176,6 +186,19 @@ enum AppConfig {
         cosEndpoint != nil && (cosSTSURL != nil || usesCOSDirectKeys)
     }
 
+    /// 麦克风软件增益档。认不出来的值回落 AUTO（见 `MicGainMode.of`）。
+    ///
+    /// 允许环境变量覆盖，是为了无头自检能指定档位跑——
+    /// 例如 `MIC_GAIN=off ClassroomTranscriber --mic-selftest`。
+    static var micGain: MicGainMode {
+        MicGainMode.of(value(env: "MIC_GAIN", file: box.current.micGain))
+    }
+
+    /// 课堂提问检测灵敏度。认不出来的值回落 NORMAL（见 `QuestionSensitivity.of`）。
+    static var questionSensitivity: QuestionSensitivity {
+        QuestionSensitivity.of(value(env: "QUESTION_SENSITIVITY", file: box.current.questionSensitivity))
+    }
+
     static var configFilePath: String { configURL.path }
 
     /// 供 UI 提示用：哪些能力当前可用
@@ -240,6 +263,10 @@ enum AppConfig {
         seed.cosSecretID = "AKIDSENTINEL"
         seed.cosSecretKey = "sentinel-secret-key"
         seed.cosKeyPrefix = "sentinel-prefix"
+        // 偏好也要一起验：它和密钥走的是同一条落盘路径，
+        // 「填了、点了保存、下次打开又回到默认」在这两个字段上一样致命
+        seed.micGain = "x3"
+        seed.questionSensitivity = "low"
 
         do {
             try save(seed)
@@ -271,9 +298,14 @@ enum AppConfig {
             ("cosSecretID", onDisk.cosSecretID == seed.cosSecretID),
             ("cosSecretKey", onDisk.cosSecretKey == seed.cosSecretKey),
             ("cosKeyPrefix", onDisk.cosKeyPrefix == seed.cosKeyPrefix),
+            ("micGain", onDisk.micGain == seed.micGain),
+            ("questionSensitivity", onDisk.questionSensitivity == seed.questionSensitivity),
         ]
         let lost = fields.filter { !$0.1 }.map(\.0)
-        lines.append("  \(lost.isEmpty ? "✅" : "❌") 9 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
+        lines.append("  \(lost.isEmpty ? "✅" : "❌") \(fields.count) 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
+
+        // 档位名认不出来时必须回落 AUTO，而不是变成一个「没有增益」的默认值
+        lines.append("  \(MicGainMode.of("x3") == .x3 && MicGainMode.of("笔误") == .auto && MicGainMode.of(nil) == .auto ? "✅" : "❌") 增益档解析：x3 → x3，无效值 / 缺省 → auto")
 
         // 4. 权限：这文件里有密钥，同机其他账户不该读得到
         let mode = (try? FileManager.default.attributesOfItem(atPath: configURL.path))?[.posixPermissions] as? NSNumber
@@ -312,7 +344,9 @@ enum AppConfig {
           "cosSecretKey": "",
           "cosSTSURL": "",
           "cosEndpoint": "",
-          "cosKeyPrefix": "recordings"
+          "cosKeyPrefix": "recordings",
+          "micGain": "auto",
+          "questionSensitivity": "normal"
         }
         """
         try? FileManager.default.createDirectory(

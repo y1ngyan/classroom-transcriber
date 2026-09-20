@@ -31,6 +31,11 @@ final class AppState {
     /// 也不该漏掉这一步。
     func startTranscription() async {
         transcription.contextualTerms = glossary.contextualTerms
+        // 增益档在起录这一刻定下来：引擎按它建一个前级，整段录音用同一个。
+        // 放在这里而不是让引擎直接读配置，是为了「起录时是什么档」这件事
+        // 只有一个来源——设置页改了没保存、保存了没起录，都不会串
+        transcription.micGain = settings.micGain
+        transcription.questionSensitivity = settings.questionSensitivity
         await transcription.requestPermissions()
         await transcription.start()
     }

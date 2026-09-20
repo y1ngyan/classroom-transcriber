@@ -134,6 +134,13 @@ struct ClassroomTranscriberApp: App {
                    let parsed = FileTranscription.PresetChoice(rawValue: CommandLine.arguments[i + 1]) {
                     await MainActor.run { engine.preset = parsed }
                 }
+                // 增益档要能指定，否则没法把「同一段话、开与关」跑成 A/B——
+                // 而这一级到底有没有用，只有 A/B 说了算
+                if let i = CommandLine.arguments.firstIndex(of: "--gain"),
+                   i + 1 < CommandLine.arguments.count,
+                   let parsed = MicGainMode(rawValue: CommandLine.arguments[i + 1]) {
+                    await MainActor.run { engine.micGain = parsed }
+                }
                 var seconds = 8
                 if let i = CommandLine.arguments.firstIndex(of: "--seconds"),
                    i + 1 < CommandLine.arguments.count,
@@ -168,6 +175,9 @@ struct ClassroomTranscriberApp: App {
                 print("   音频链路: \(micStats)")
                 for segment in segments {
                     print("     · [\(segment.formattedTimestamp)] \(segment.text)")
+                    if segment.isQuestion {
+                        print("       ⤷ 提问 L\(segment.questionLevel): \(segment.coreQuestion ?? segment.text)")
+                    }
                 }
 
                 await engine.stop()
@@ -224,6 +234,99 @@ struct ClassroomTranscriberApp: App {
         if CommandLine.arguments.contains("--wav-selftest") {
             for line in WAVRecorder.selfTest() {
                 print(line)
+            }
+            exit(0)
+        }
+
+        // 无头高通自检：--hp-selftest（量幅频响应，和解析解对照，不用麦克风）
+        if CommandLine.arguments.contains("--hp-selftest") {
+            for line in HighPassFilter.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
+        // 无头音频前级自检：--preamp-selftest（量增益与噪声门，不用麦克风）
+        if CommandLine.arguments.contains("--preamp-selftest") {
+            for line in AudioPreamp.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
+        // 无头提问检测自检：--question-selftest（纯规则，不依赖任何设备）
+        if CommandLine.arguments.contains("--question-selftest") {
+            for line in QuestionDetector.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
+        // 无头术语提词：--extract-terms（走真实模型，验证整条提词链路）
+        //
+        // 和 --glossary 一样直接调 Service 不走 Store：Store 是 @MainActor 的，
+        // 主线程要阻塞在 semaphore 上等结果，从 detached task 碰 MainActor 必死锁。
+        if CommandLine.arguments.contains("--extract-terms") {
+            setvbuf(stdout, nil, _IONBF, 0)
+
+            // 刻意混三样东西：真实录音里被转错的词（cludelod Clod）、
+            // 本来就写对的词（Kimi）、以及不该被收进来的东西
+            // （中文词、常见英文词）——一次性看清提取器的边界
+            let sample: [(Int, String)] = [
+                (0, "上次我们讲了怎么用 cludelod Clod 来改作业，今天讲另一个工具。"),
+                (8_000, "Kimi 在处理长文档的时候表现不错，但是要注意它的上下文窗口。"),
+                (19_000, "写 prompt 的时候，temperature 这个参数设得太高，输出就会很不稳定。"),
+                (31_000, "我建议大家把课堂笔记做成一个 RAG 的检索库，后面查起来方便。"),
+                (44_000, "这个作业你们用 ChatGPT 或者 DeepSeek 都可以，但是要自己检查。"),
+                (56_000, "好，那今天的内容就讲到这里，下课。"),
+            ]
+            let segments = sample.map {
+                TranscriptSegment(
+                    text: $1,
+                    isFinal: true,
+                    startTimeMillis: $0,
+                    endTimeMillis: $0 + 7_000,
+                    languages: ["zh-CN"]
+                )
+            }
+
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do {
+                    let entries = try await GlossaryService.extractTerms(from: segments)
+                    print("从 \(segments.count) 段转录里提取到 \(entries.count) 个术语：")
+                    for entry in entries {
+                        let aliases = entry.aliases.isEmpty ? "—" : entry.aliases.joined(separator: "、")
+                        print("  \(entry.term)  |  误转写: \(aliases)  |  \(entry.note)")
+                    }
+                } catch {
+                    print("❌ \(error.localizedDescription)")
+                }
+                semaphore.signal()
+            }
+            semaphore.wait()
+            exit(0)
+        }
+
+        // 无头术语提词解析自检：--terms-parser
+        // 提词的返回值是模型自由生成的，解析器必须能扛住格式漂移。
+        // 这里把见过和没见过的几种写法都喂一遍，不需要联网。
+        if CommandLine.arguments.contains("--terms-parser") {
+            let sample = """
+            1. Claude|cludelod Clod|Anthropic 的模型
+            Kubernetes|Kubenetes|容器编排
+            eigenvalue||特征值
+            RAG
+            以上就是这堂课里出现的专业术语
+            中文术语|不该被收进来
+            Claude|重复的，应该被去重|重复
+            API|应用程序接口
+            """
+            let parsed = GlossaryService.parseTerms(sample)
+            print("解析出 \(parsed.count) 条：")
+            for entry in parsed {
+                let aliases = entry.aliases.isEmpty ? "—" : entry.aliases.joined(separator: "、")
+                print("  \(entry.term) | \(aliases) | \(entry.note)")
             }
             exit(0)
         }

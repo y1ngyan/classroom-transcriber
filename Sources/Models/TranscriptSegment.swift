@@ -14,6 +14,15 @@ struct TranscriptSegment: Identifiable, Equatable {
     var timestamp: Date
     var languages: [String]
 
+    /// 课堂提问检测的命中等级：0 = 不是提问，1 = 点名/祈使预警，2 = 确认的提问。
+    /// 只在段落定稿时判定一次（见 TranscriptionEngine.upsert）——未定稿的文本
+    /// 还在被反复改写，对半成品跑规则只会报出一会有一会没的假信号。
+    var questionLevel = 0
+    /// 剥掉课堂口头禅和称呼之后的问题本体。level > 0 时有值
+    var coreQuestion: String?
+
+    var isQuestion: Bool { questionLevel > 0 }
+
     init(
         id: UUID = UUID(),
         text: String,

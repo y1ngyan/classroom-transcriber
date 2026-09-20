@@ -22,6 +22,14 @@ final class SettingsStore {
     var cosSecretKey = ""
     var cosKeyPrefix = "recordings"
 
+    /// 麦克风软件增益档。默认 AUTO——老师小声、坐得远是常态，
+    /// 而这一档正是为那个场景准备的，还得带噪声门才不会连底噪一起放大。
+    var micGain: MicGainMode = .auto
+
+    /// 课堂提问检测灵敏度。默认 NORMAL：强疑问结构直接判，弱疑问词要旁证——
+    /// 讲课陈述里全是「什么」「怎么」，没有这道门槛提问列表会被讲课淹没。
+    var questionSensitivity: QuestionSensitivity = .normal
+
     // MARK: - 状态
 
     private(set) var saveMessage = ""
@@ -55,6 +63,8 @@ final class SettingsStore {
         cosSecretID = config.cosSecretID ?? ""
         cosSecretKey = config.cosSecretKey ?? ""
         cosKeyPrefix = config.cosKeyPrefix ?? "recordings"
+        micGain = MicGainMode.of(config.micGain)
+        questionSensitivity = QuestionSensitivity.of(config.questionSensitivity)
     }
 
     var configFilePath: String { AppConfig.configFilePath }
@@ -74,6 +84,10 @@ final class SettingsStore {
         config.cosSecretID = trimmed(cosSecretID)
         config.cosSecretKey = trimmed(cosSecretKey)
         config.cosKeyPrefix = trimmed(cosKeyPrefix) ?? "recordings"
+        // 档位一律写出显式值（含 auto），不靠「缺省即默认」——
+        // 配置文件是给人看的，留空之后没人知道空代表哪一档
+        config.micGain = micGain.rawValue
+        config.questionSensitivity = questionSensitivity.rawValue
 
         do {
             try AppConfig.save(config)
@@ -93,7 +107,11 @@ final class SettingsStore {
 
     var hasUnsavedChanges: Bool {
         let config = AppConfig.current
-        return trimmed(deepSeekAPIKey) != config.deepSeekAPIKey
+        // 档位按解析后的值比，不按字符串比：文件里是 nil 和文件里写着 "auto"
+        // 是同一个档，用字符串比会把一个没改过的设置报成「有未保存的改动」
+        return micGain != MicGainMode.of(config.micGain)
+            || questionSensitivity != QuestionSensitivity.of(config.questionSensitivity)
+            || trimmed(deepSeekAPIKey) != config.deepSeekAPIKey
             || trimmed(searchAPIKey) != config.searchAPIKey
             || trimmed(cosBucket) != config.cosBucket
             || trimmed(cosRegion) != config.cosRegion

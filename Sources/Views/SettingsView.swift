@@ -12,6 +12,7 @@ struct SettingsView: View {
             // 区块之间靠 80 的留白分开，不放卡片框（规格要求）
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
+                audioSection()
                 deepSeekSection()
                 searchSection()
                 cosSection()
@@ -62,6 +63,65 @@ struct SettingsView: View {
                 Text(store.saveMessage)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(store.saveMessage.hasPrefix("✅") ? Theme.success : Theme.error)
+            }
+        }
+    }
+
+    // MARK: - 录音与识别
+
+    /// 这一节和页面其他部分不同：它不需要配置任何东西，默认就是可用的。
+    /// 放在最前面是因为它是唯一一个直接决定「录下来能不能认出来」的开关，
+    /// 而其余几节配不配只影响附加能力。
+    private func audioSection() -> some View {
+        @Bindable var store = appState.settings
+        return SettingsSection(
+            title: "录音与识别",
+            subtitle: "送进识别器之前给麦克风信号做一级软件增益。老师离得远、说话偏小的时候，小声识别率会明显变好。"
+                + "录音存档存的是未加增益的原始音频，不受这一级影响。",
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                LabeledField(label: "麦克风增益") {
+                    Picker("", selection: $store.micGain) {
+                        ForEach(MicGainMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 360)
+                }
+
+                // 选中的那一档到底做什么，写在下面而不是让用户去猜档位名。
+                // 「自动」和「5 倍」听上去都像「会放大」，区别全在噪声门上，
+                // 而那个区别从名字上一点也看不出来
+                Text(store.micGain.hint)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
+                note(
+                    "改动从下一段录音开始生效。增益档决定的是整段录音的处理方式，"
+                        + "中途换档会让同一段录音的前后两截用上不同的增益曲线。"
+                )
+
+                LabeledField(label: "提问检测") {
+                    Picker("", selection: $store.questionSensitivity) {
+                        ForEach(QuestionSensitivity.allCases) { level in
+                            Text(level.label).tag(level)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 360)
+                }
+
+                Text(store.questionSensitivity.hint)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
+                note(
+                    "检测的是「老师是不是在向全班提问」，命中的段落会在转录里标出来。"
+                        + "纯本地规则判定，不联网、不调模型。"
+                )
             }
         }
     }
@@ -241,7 +301,9 @@ struct SettingsView: View {
 private struct SettingsSection<Content: View>: View {
     let title: String
     let subtitle: String
-    let steps: [String]
+    /// 「去哪儿拿这个值」的步骤。需要用户先去别的网站申请东西的区块才有，
+    /// 空数组表示这一节没什么前置动作好讲（默认就是空的）
+    var steps: [String] = []
     @ViewBuilder var content: Content
 
     @State private var showsSteps = true
@@ -257,10 +319,14 @@ private struct SettingsSection<Content: View>: View {
 
                 Spacer()
 
-                Button(showsSteps ? "隐藏步骤" : "显示步骤") { showsSteps.toggle() }
-                    .buttonStyle(.plain)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                // 没有步骤就不给这个开关：一个点开之后什么都没有的「显示步骤」，
+                // 比没有它更让人怀疑自己点错了地方
+                if !steps.isEmpty {
+                    Button(showsSteps ? "隐藏步骤" : "显示步骤") { showsSteps.toggle() }
+                        .buttonStyle(.plain)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                }
             }
 
             Text(subtitle)
@@ -268,7 +334,7 @@ private struct SettingsSection<Content: View>: View {
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            if showsSteps {
+            if showsSteps && !steps.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
