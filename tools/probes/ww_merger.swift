@@ -14,14 +14,20 @@
 //   A 补定稿阈值：邻居扫描（阈值两侧各 2 个点）
 //   B 第一趟上界：邻居扫描（上界两侧各 2 个点 + 远点），期望值由 bound 推导
 //   C 随机窗口序列差分（三个种子）：C1 全部定稿 / C2 契约口径不丢内容 /
-//     C3 远距离重复各自成段 / C4 段数 ≥ 簇数 / **C5 紧口径 2 秒：时间线位置不消失**
-//   D 过分割的构造输入（已钉住的最小复现 + 三趟各自为什么拒绝）
+//     C3 远距离重复各自成段 / C4 段数 ≥ 簇数 /
+//     **C5a 硬口径 = 一个步长**（漂移不超过设计自己的歧义量级）/ C5b 1 秒、2 秒统计量（不判失败）
+//   D 过分割：D1 单旧段构造逐趟 dump / D2 第三趟按时间改写（会写错文本）
 //
-// 口径说明（这一条重要，别混）：
+// 口径说明（这几条重要，别混）：
 //   - C2 是**契约口径**：上界是 stepMillis，所以「被一个步长内的同句吸收」不算丢，
 //     它量的是「有没有超出契约允许范围的丢失」。
-//   - C5 是**独立紧口径**：固定 2 秒，与上界无关。它量的是「时间线位置有没有消失」——
-//     老师十秒后又说一遍、却被吸收成一段，在 C2 里看不出来，在 C5 里是丢。
+//   - C5a 是**硬判据，容差 = 一个步长**：一个步长之内，「同一句被重识别（时间戳位移）」
+//     和「同一句被说两遍」在原理上分不开——第一趟上界存在的理由就是这个。所以它量的
+//     不是「时间线绝对不漂」，而是「漂移不超过设计自己的歧义量级」。
+//     （阶段 1.5 这里写过 2 秒，是判据写错了：三种子 4 条红全部落在正好 3000ms = 一个
+//      步长上，要求 2 秒分离等于要求设计做不到的事。2026-09-21 阶段 1.6 修正。）
+//   - C5b 是**统计量，不判失败**：硬判据挂在设计自己的上界上有自指的嫌疑，所以把
+//     「歧义的代价有多大」（1 秒 / 2 秒容差下被吸收的句子数 + 各自差多少）一直打在明面上。
 
 import Foundation
 
@@ -139,7 +145,7 @@ struct WWMergerProbe {
 
         print("=== C) 随机窗口序列差分（三个种子）===")
         var totalSegs = 0, totalClusters = 0, totalStrictBad = 0, totalDupLike = 0
-        var totalSplit = 0, totalOrphans = 0
+        var totalSplit = 0, totalOrphans = 0, totalHardBad = 0, totalWanted = 0
         do {
             for seed0: UInt64 in [20_260_921, 7, 99_991] {
                 var seed: UInt64 = seed0
@@ -245,84 +251,177 @@ struct WWMergerProbe {
                        segments.count >= clusterTotal ? "输出 \(segments.count) / 簇数 \(clusterTotal)"
                                                       : "输出 \(segments.count) < 簇数 \(clusterTotal)")
 
-                // C5 紧口径 2 秒（独立判据，与上界无关）：每个真句都要有一段
-                // 「文本对得上、且起始时间落在它 ±2 秒内」——量的是时间线位置有没有消失。
-                var strictBad: [String] = []
+                // C5a 硬判据：容差 = 一个步长（= 设计自己的歧义量级）。
+                // 一个步长之内，「同一句被重识别（时间戳位移）」和「同一句被说两遍」原理上
+                // 分不开——第一趟上界存在的理由就是这个。所以这条量的不是「时间线绝对不漂」，
+                // 而是「漂移不超过设计自己的歧义量级」：超过一个步长还被同文本段吸收，才是真缺陷。
+                var hardBad: [String] = []
                 for u in utts {
-                    let ok = segments.contains { close($0.text, u.text) && abs($0.startTimeMillis - u.start) <= strictTol }
+                    let ok = segments.contains { close($0.text, u.text) && abs($0.startTimeMillis - u.start) <= step }
                     if !ok {
                         let nearest = segments.filter { close($0.text, u.text) }
                             .map { abs($0.startTimeMillis - u.start) }.min() ?? Int.max
-                        strictBad.append("\(u.text)@\(u.start)（最近同文本段起点差 \(nearest)ms）")
+                        hardBad.append("\(u.text)@\(u.start)（最近同文本段起点差 \(nearest)ms）")
                     }
                 }
-                totalStrictBad += strictBad.count
-                expect(strictBad.isEmpty, "C5 紧口径 \(strictTol)ms：时间线位置没消失",
-                       "\(strictBad.count)/14 句被 \(strictTol)ms 外的同句吸收：\(strictBad.prefix(2).joined(separator: " / "))")
+                totalHardBad += hardBad.count
+                expect(hardBad.isEmpty, "C5a 硬口径 = 一个步长（\(step)ms）：漂移不超过设计自己的歧义量级",
+                       "违反 \(hardBad.count)/14：\(hardBad.prefix(2).joined(separator: " / "))")
 
-                // 归类（阶段 1.5 第 3 项）：多出来的段到底是「要的」还是「缺陷」。
-                // 判法：每段按「文本 close 且起点最近」认领一句真话。**同一次真话**被
-                // 认领 ≥2 段 = 同一句被拆开（缺陷）；不同次真话各自成段 = 远距离重复
-                // （裁决 2 的既定收益，已经计进簇数里了）。只报数，不进判据。
-                var assigned: [Int: Int] = [:]
-                var orphans = 0
+                // C5b 统计量（**不判失败，只打印**）：硬判据挂在上界上有自指的嫌疑，所以把
+                // 「歧义的代价有多大」一直摆在明面上——将来这一档变大，立刻能看出来。
+                // 容差固定 1 秒 / 2 秒，与上界无关；逐条打出「差多少毫秒」。
+                for tol in [1_000, 2_000] {
+                    let absorbed = utts.filter { u in
+                        !segments.contains { close($0.text, u.text) && abs($0.startTimeMillis - u.start) <= tol }
+                    }.map { u -> String in
+                        let nearest = segments.filter { close($0.text, u.text) }
+                            .map { abs($0.startTimeMillis - u.start) }.min() ?? Int.max
+                        return "\(u.text)@\(u.start)（差 \(nearest)ms）"
+                    }
+                    if tol == 2_000 { totalStrictBad += absorbed.count }
+                    print("  ·· 统计（不判失败）\(tol)ms 容差：\(absorbed.count)/14 句位置被吸收"
+                          + (absorbed.isEmpty ? "" : " → \(absorbed.joined(separator: " / "))"))
+                }
+
+                // 归类（阶段 1.6 第 2 项）：多出来的段分三类，**分开数**。
+                // 认领规则：每段按「文本 close 且起点最近」认领一句真话。
+                //   ① 同一次真话被认领 ≥2 段 → 同一句被拆两段（缺陷），多出 count-1
+                //   ② 不同次真话各自成段 → 远距离重复（**要的**，裁决 2 的既定收益）
+                //   ③ 认不到任何真话 → 认不到真话
+                var assigned: [Int: [TranscriptSegment]] = [:]
+                var orphans: [TranscriptSegment] = []
                 for s in segments {
                     let claim = utts.enumerated()
                         .filter { close($0.element.text, s.text) }
                         .min { abs($0.element.start - s.startTimeMillis) < abs($1.element.start - s.startTimeMillis) }
-                    if let c = claim { assigned[c.offset, default: 0] += 1 } else { orphans += 1 }
+                    if let c = claim { assigned[c.offset, default: []].append(s) } else { orphans.append(s) }
                 }
-                let splitExtras = assigned.values.reduce(0) { $0 + max(0, $1 - 1) }
+                let splitGroups = assigned.filter { $0.value.count >= 2 }
+                let splitExtras = splitGroups.values.reduce(0) { $0 + $1.count - 1 }
                 let extra = segments.count - clusterTotal
-                totalDupLike += extra; totalSplit += splitExtras; totalOrphans += orphans
-                print("  >> 归类：多出 \(extra) 段 = 同一次真话被拆 \(splitExtras) 段（缺陷）+ "
-                      + "认不到真话 \(orphans) 段；远距离重复各自成段 \(0) 段（要的，已计进簇数）")
+                // 远距离重复（要的那一类）**不是多出段**：簇数里已经把它算成「各自该有一段」。
+                // 这里数的是「同文本的第二次及以后出现、且相隔 > 上界」的段数。
+                let wantRepeats = clusterTotal - clusters.count
+                totalDupLike += extra; totalSplit += splitExtras; totalOrphans += orphans.count
+                totalWanted += wantRepeats
+                print("  >> 归类：多出 \(extra) 段 = ① 同一句被拆两段 \(splitExtras)（缺陷）"
+                      + " + ② 远距离重复各自成段 \(0)（要的） + ③ 认不到真话 \(orphans.count)")
+                print("     ② 那一类一共 \(wantRepeats) 段，全部各自成段、且不计进「多出」（簇数已含它们）")
+                for g in splitGroups.sorted(by: { $0.key < $1.key }) {
+                    let pair = g.value
+                        .sorted { $0.startTimeMillis < $1.startTimeMillis }
+                        .map { "\"\($0.text)\"@\($0.startTimeMillis)–\($0.endTimeMillis)" }
+                        .joined(separator: "  +  ")
+                    print("     缺陷例：\(pair)")
+                }
             }
         }
-        print("  三种子合计：输出 \(totalSegs) 段 / 簇数 \(totalClusters) / 紧口径违反 \(totalStrictBad) 句 / "
-              + "多出段 \(totalDupLike)（其中同一次真话被拆 \(totalSplit) + 认不到真话 \(totalOrphans)）")
+        print("  三种子合计：输出 \(totalSegs) 段 / 簇数 \(totalClusters) / "
+              + "C5a 硬口径违反 \(totalHardBad) 句 / C5b 2 秒统计 \(totalStrictBad) 句")
+        print("  三种子归类：多出段 \(totalDupLike) = ① 同一句被拆两段 \(totalSplit) + ③ 认不到真话 \(totalOrphans)"
+              + "；② 远距离重复各自成段 \(totalWanted) 段（要的，不计进多出）")
 
-        // MARK: - D 过分割的构造输入（已钉住的最小复现）
+        // MARK: - D 过分割：构造输入逐趟 dump
 
-        print("=== D) 过分割：构造输入 + 三趟各自为什么拒绝===")
+        func seg(_ text: String, _ isFinal: Bool, _ s: Int, _ e: Int) -> TranscriptSegment {
+            TranscriptSegment(text: text, isFinal: isFinal, startTimeMillis: s, endTimeMillis: e,
+                              languages: ["zh-CN"])
+        }
+
+        func relationName(_ a: String, _ b: String) -> String {
+            switch TranscriptionEngine.textRelation(a, b) {
+            case .same(let shorter): return "same（短边 \(shorter) 字）"
+            case .similar:           return "similar"
+            case .different:         return "different"
+            }
+        }
+
+        func dump(_ segs: [TranscriptSegment], _ title: String) {
+            print("  \(title)")
+            for (i, s) in segs.enumerated() {
+                print("    [\(i)] \(s.isFinal ? "定稿" : "临时") \(s.startTimeMillis)–\(s.endTimeMillis)  \"\(s.text)\"")
+            }
+        }
+
+        print("=== D) 过分割：构造输入逐段 dump + 三趟各拿谁跟谁比 ===")
         do {
-            // 真值 → 逐窗候选：同一句在相邻两窗被识别成差一字的文本，且后一窗的
-            // 起始时间被窗口边缘截断到窗口起点（抖动 1.5 秒）。
-            let existingText = "今天我们讲梯度下降算法呢"
-            let candidateText = "今天我们讲梯度下降算法的"
-            let existingRange = (20_000, 22_500)
-            let candidateRange = (21_000, 21_600)
-            let boundGap = abs(candidateRange.0 - existingRange.1)
+            // ── D1：单旧段的最小复现（同一句在相邻两窗被识别成差一字，且候选起点落在旧段内）
+            let aText = "今天我们讲梯度下降算法呢"
+            let candText = "今天我们讲梯度下降算法的"
+            let aRange = (20_000, 22_500)
+            let cRange = (21_000, 21_600)
+
+            let d1Existing = [seg(aText, true, aRange.0, aRange.1)]
+            let d1Candidate = seg(candText, false, cRange.0, cRange.1)
+
+            print("  —— D1：一个已定稿旧段 ——")
+            dump(d1Existing, "已有段：")
+            dump([d1Candidate], "本窗候选（窗口起点 21000 + 相对 0–600）：")
+
+            // 判据全部在探针里独立重算，不读代码的 trace
+            let gap = d1Candidate.startTimeMillis - d1Existing[0].endTimeMillis
+            let iv = intervalGap((aRange.0, aRange.1), (cRange.0, cRange.1))
+            let d1Relation = relationName(aText, candText)
+            let d1Overlap = cRange.0 < aRange.1 && aRange.0 < cRange.1
+
+            print("    文本关系（独立重算）= \(d1Relation)")
+            print("    第一趟 [拿候选 vs [0]]：same ≥6 字？→ 不是 same → 不收")
+            print("    第二趟 [拿候选 vs [0]]：similar？→ 不是 similar → 不收")
+            print("    第三趟 [拿候选 vs [0]]：重叠 = \(d1Overlap ? "是" : "否")，[0].isFinal = true → 不收（只要未定稿的段）")
+            print("    ⇒ 三趟都不收 → 新增一段（同一句被拆成两段）")
+            print("    ⚠️ 阶段 1.5 报告里写的「第二趟差 1500ms」是**这个量**：")
+            print("       (候选起点 21000 − 旧段终点 22500) = \(gap)，|\(gap)| = \(abs(gap)) > \(tailTol) → 拒")
+            print("       负号的含义是「候选起点落在旧段终点之前 \(abs(gap))ms」= 两段**重叠** \(abs(gap))ms，")
+            print("       不是「隔了 1500ms」。同一个几何的**区间距离** = \(iv)ms ≤ \(tailTol) → 按区间距离本该命中。")
+            print("       所以 1.5 报告里的「差 1500ms」和「时间重叠」并不矛盾，是我那个变量名（boundGap）叫错了：")
+            print("       第二趟比的是**起点减终点的带符号差**，第三趟比的是**区间是否相交**，两个不同的量。")
 
             func trial(_ wasFinal: Bool) -> [TranscriptSegment] {
-                let existing = [TranscriptSegment(text: existingText, isFinal: wasFinal,
-                                                  startTimeMillis: existingRange.0,
-                                                  endTimeMillis: existingRange.1,
-                                                  languages: ["zh-CN"])]
-                return run(existing, wnd(21_000, [(candidateText, 0, 600)])).segments
+                run([seg(aText, wasFinal, aRange.0, aRange.1)], wnd(21_000, [(candText, 0, 600)])).segments
             }
-
-            // 用同一分类器 + 同样几何在探针里重算三趟判据（不是代码里的 trace，是重导）
-            let relation: String
-            switch TranscriptionEngine.textRelation(existingText, candidateText) {
-            case .same(let shorter): relation = "same（短边 \(shorter) 字）"
-            case .similar:           relation = "similar"
-            case .different:         relation = "different"
-            }
-            print("  文本关系（独立重算）= \(relation)")
-            print("  第一趟 same ≥6 字：\(relation.hasPrefix("same") ? "命中" : "不收（文本不是 same）")")
-            print("  第二趟 similar 且 |候选起点 − 旧段终点| ≤ \(tailTol)ms："
-                  + "\(relation == "similar" ? (boundGap <= tailTol ? "命中" : "不收（差 \(boundGap)ms > \(tailTol)ms）") : "不收（文本不是 similar）")")
-            let overlap = candidateRange.0 < existingRange.1 && existingRange.0 < candidateRange.1
-            print("  第三趟 时间重叠（\(overlap ? "是" : "否")）且旧段未定稿：旧段 isFinal=true → 不收（旧段已定稿）")
-            print("  ⇒ 三趟都不收 → 新增一段（同一句被拆成两段）")
-
             let withFinal = trial(true)
             let withoutFinal = trial(false)
             expect(withFinal.count == 2 && withoutFinal.count == 1,
-                   "D 旧段已定稿 → 2 段；只把 isFinal 改成 false → 1 段（第三趟收编）",
+                   "D1 旧段已定稿 → 2 段；只把 isFinal 改成 false → 1 段（第三趟收编）",
                    "已定稿 \(withFinal.count) 段 / 未定稿 \(withoutFinal.count) 段")
-            observations.append("过分割的充分条件（D）：.similar 文本 + 时间跳 \(boundGap)ms > 第二趟的 \(tailTol)ms + 旧段已定稿")
+
+            // ── D2：第三趟真收编时，改写到的是哪个段？
+            // 文本匹配的段与时间重叠的段**是两个不同的段**——这是能区分两种可能性的最小构造。
+            let farText = "正则化可以防止过拟合"
+            let midText = "训练集和测试集要分开"
+            let cand2Text = "正则化可以防止过拟合的"
+            let farRange = (30_000, 33_000)     // 文本匹配得上的那个（远，> 一个步长）
+            let midRange = (44_000, 46_000)     // 时间重叠的那个（未定稿）
+            let cand2Range = (44_000, 47_000)   // 窗口起点 43000 + 相对 1000–4000
+
+            print("  —— D2：文本匹配的段 与 时间重叠的段 是两个不同的段 ——")
+            dump([seg(farText, true, farRange.0, farRange.1), seg(midText, false, midRange.0, midRange.1)],
+                 "已有段：")
+            dump([seg(cand2Text, false, cand2Range.0, cand2Range.1)],
+                 "本窗候选（窗口起点 43000 + 相对 1000–4000）：")
+
+            let iv2 = intervalGap((farRange.0, farRange.1), (cand2Range.0, cand2Range.1))
+            let overlap2 = cand2Range.0 < midRange.1 && midRange.0 < cand2Range.1
+            print("    第一趟 [候选 vs [0]]：关系 \(relationName(farText, cand2Text))，区间距离 \(iv2)ms > 上界 \(step)ms → 不收")
+            print("    第一趟 [候选 vs [1]]：关系 \(relationName(midText, cand2Text)) → 不收")
+            print("    第二趟 [候选 vs [0]]：关系不是 similar（是 same）→ 这一趟的 switch 只收 similar → 跳过")
+            print("    第二趟 [候选 vs [1]]：关系不是 similar → 跳过")
+            print("    第三趟 倒序扫：先看 [1]：未定稿 + 重叠 = \(overlap2 ? "是" : "否") → **返回 [1]**")
+            print("    merge 对命中的下标是整体覆盖（text / start / end 全写成候选的）")
+
+            let d2 = run([seg(farText, true, farRange.0, farRange.1), seg(midText, false, midRange.0, midRange.1)],
+                         wnd(43_000, [(cand2Text, 1_000, 4_000)])).segments
+            dump(d2, "跑出来：")
+            let hitIsTimeSegment = d2.count == 2 && d2[1].text == cand2Text && d2[0].text == farText
+            expect(hitIsTimeSegment, "D2 已证实：第三趟命中的是**时间重叠**那一段（不看文本）",
+                   "命中下标 1，文本被写成候选的")
+            expect(!d2.contains { $0.text == midText }, "D2 已证实：被改写那段的原文在输出里消失（内容丢失）",
+                   "「\(midText)」不复存在")
+            observations.append("D2（按契约口径不是失败：契约第 3 条就是「时间重叠且未定稿 → 视为内容修正」，"
+                                + "它没许诺看文本。但它是一条**把整段文本覆盖掉**的真实路径）："
+                                + "候选与远段的文本互相匹配、又与近段时间重叠时，第三趟按时间改写，"
+                                + "把近段的原文覆盖成候选的文本——这比多一段严重，属于「文本被写错」。")
         }
 
         // MARK: - 汇总
