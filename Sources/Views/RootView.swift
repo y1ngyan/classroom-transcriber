@@ -5,6 +5,7 @@ struct RootView: View {
 
     enum Tab: String, CaseIterable {
         case transcription = "转录"
+        case recordings = "录音"
         case factCheck = "事实核查"
         case notes = "笔记"
         case glossary = "术语表"
@@ -21,6 +22,8 @@ struct RootView: View {
                 switch tab {
                 case .transcription:
                     TranscriptionView()
+                case .recordings:
+                    RecordingsView()
                 case .factCheck:
                     FactCheckView()
                 case .notes:
