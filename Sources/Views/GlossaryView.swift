@@ -6,6 +6,7 @@ struct GlossaryView: View {
     var body: some View {
         GlossaryContent(
             store: appState.glossary,
+            presets: appState.presets,
             punctuation: appState.punctuation,
             engine: appState.transcription
         )
@@ -14,8 +15,15 @@ struct GlossaryView: View {
 
 private struct GlossaryContent: View {
     @Bindable var store: GlossaryStore
+    let presets: CoursePresetStore
     let punctuation: PunctuationStore
     let engine: TranscriptionEngine
+
+    /// 联网生成词表的输入（课程名）。放视图状态就够：它是一次性输入，
+    /// 不需要跨标签页保留——要留下的是生成结果，那个进了词表/自建词库。
+    /// 顺带它也是「存为我的词库」那一包的**名字来源**，所以按钮上会把
+    /// 这个名字显示出来，用户看得见自己会存成什么名字。
+    @State private var courseInput = ""
 
     var body: some View {
         ScrollView {
@@ -131,6 +139,22 @@ private struct GlossaryContent: View {
                             store.apply(preset)
                         }
                     }
+                    // 用户自建的词库（联网生成之后存下来的）。
+                    // 删除单独列一段：放在载入项上做长按/右键都不好发现
+                    if !presets.custom.isEmpty {
+                        Divider()
+                        ForEach(presets.custom) { preset in
+                            Button("我的 · \(preset.name)（\(preset.entries.count) 词）") {
+                                store.apply(preset)
+                            }
+                        }
+                        Divider()
+                        ForEach(presets.custom) { preset in
+                            Button("删除「\(preset.name)」", role: .destructive) {
+                                presets.remove(id: preset.id)
+                            }
+                        }
+                    }
                 }
 
                 // 次要动作退化成一个文字链，不再多一个胶囊
@@ -148,8 +172,78 @@ private struct GlossaryContent: View {
 
                 Spacer()
             }
+
+            // 内置预设对不上这门课时，用联网生成一包。
+            //
+            // 这一段的语义是「课前备课」，所以在文案上必须和上面那句
+            // 「术语表是喂给识别器的先验」连起来——用户最容易的误解就是
+            // 以为录到一半点一下能让识别变准。
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Text("没有对得上的预设？填课程名，联网生成一包")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+
+                HStack(spacing: Theme.Spacing.sm) {
+                    TextField("课程名（例如：生物化学）", text: $courseInput)
+                        .textFieldStyle(.plain)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textPrimary)
+                        .frame(maxWidth: 220)
+                        .onSubmit { generateFromWeb() }
+
+                    // 这一行的主动作，只放这一个胶囊
+                    PillButton(
+                        title: "联网生成词表",
+                        systemImage: "globe",
+                        isLoading: store.isSuggesting,
+                        isEnabled: !GlossarySuggestionService.cleanCourseName(courseInput).isEmpty
+                    ) {
+                        generateFromWeb()
+                    }
+
+                    // 次要动作是文字链，不再多一个胶囊
+                    if !store.entries.isEmpty {
+                        Button("存为我的词库「\(GlossarySuggestionService.cleanCourseName(courseInput))」") {
+                            presets.save(
+                                name: GlossarySuggestionService.cleanCourseName(courseInput),
+                                entries: store.entries
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(GlossarySuggestionService.cleanCourseName(courseInput).isEmpty
+                            ? Theme.textTertiary : Theme.accent)
+                        .disabled(GlossarySuggestionService.cleanCourseName(courseInput).isEmpty)
+                    }
+
+                    Spacer()
+                }
+
+                // 实际用了哪些检索式。结果不对时，用户第一眼看的就是这一行
+                if store.candidateSource == .web, !store.lastQueries.isEmpty {
+                    Text("检索式：" + store.lastQueries.joined(separator: " / "))
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !presets.statusMessage.isEmpty {
+                    Text(presets.statusMessage)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(presets.statusMessage.hasPrefix("❌")
+                            ? Theme.error : Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 联网生成。逻辑全在 store 里，这里只负责把输入递过去。
+    private func generateFromWeb() {
+        let course = GlossarySuggestionService.cleanCourseName(courseInput)
+        guard !course.isEmpty else { return }
+        Task { await store.suggestFromWeb(course: course) }
     }
 
     // MARK: - LLM 补标点
@@ -202,11 +296,21 @@ private struct GlossaryContent: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             StatusMark(
                 kind: .neutral,
-                text: "从这场课里提出 \(store.candidates.count) 个术语，采纳后才进词表"
+                text: store.candidateSource == .web
+                    ? "联网生成 \(store.candidates.count) 个候选术语，采纳后才进词表"
+                    : "从这场课里提出 \(store.candidates.count) 个术语，采纳后才进词表"
             )
 
-            Text("提取发生在录完之后，所以改不了已经录好的这场——它救的是下一场同类课，"
-                 + "以及马上要跑的术语校正。模型猜的词不一定对，逐条看一眼再采纳。")
+            // 两种来源的**含义完全不同**，文案不能共用：
+            // 提取拿的是「这场课真的讲过什么」（有实测价值），
+            // 联网拿的是「这门课一般会讲什么」（只有先验价值，可能一个都不在
+            // 这堂课里出现）。而且提取只能救下一场，联网生成必须赶在开录前。
+            Text(store.candidateSource == .web
+                 ? "这些词来自网上检索到的术语表，是这门课的通用术语，不一定出现在老师这堂课里。"
+                   + "现在采纳，效力在还没录的课——术语表是识别器的先验，录完的那场已经改不了了。"
+                   + "模型从资料里挑的词不一定对，逐条看一眼再采纳。"
+                 : "提取发生在录完之后，所以改不了已经录好的这场——它救的是下一场同类课，"
+                   + "以及马上要跑的术语校正。模型猜的词不一定对，逐条看一眼再采纳。")
                 .textStyle(Theme.Text.caption)
                 .foregroundStyle(Theme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

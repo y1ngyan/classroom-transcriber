@@ -11,7 +11,10 @@ import Foundation
 /// `contextualStrings` 是喂给识别器的先验，音频流一旦开始就改不了了。
 /// 所以预设只能是**先验知识**（用户选、或从系统里带出来），
 /// 不可能由本次课的内容推出来——那条路只能走事后提取，见 `extractTerms`。
-struct CoursePreset: Identifiable, Sendable {
+///
+/// `Codable` 是给用户自建的词库用的（`CoursePresetStore`）：
+/// 内置的这 6 包是代码里的常量，不落盘；用户存下来的那些要写进 `presets.json`。
+struct CoursePreset: Identifiable, Codable, Sendable {
     let id: String
     let name: String
     /// 一句话说明这包词是干什么的，出现在菜单里

@@ -77,7 +77,12 @@ BIN="$OUT_DIR/$NAME"
 
 # 注意：中文紧跟 $变量 时会被 bash 当成变量名的一部分（多字节字符），必须用 ${} 括起来
 echo "▶ 编译 ${NAME}（链接 ${#SOURCES[@]} 个源码文件）…"
-swiftc -sdk "$SDK" -target arm64-apple-macos26.0 -swift-version 6 \
+# 把输出落到日志再判退出码。
+# 不要写成 `swiftc ... | grep -E "error:" && { 失败 }`——grep 没匹配到就以 1 退出，
+# 而它在 && 列表里，set -e 不会中止，脚本会继续去跑一个根本没生成的二进制，
+# 报出来的错是 "No such file or directory"，把真正的编译错误盖掉（踩过）。
+LOG="$OUT_DIR/$NAME.build.log"
+if ! swiftc -sdk "$SDK" -target arm64-apple-macos26.0 -swift-version 6 \
   -parse-as-library -O \
   -framework Speech -framework AVFoundation \
   -Xcc -fmodule-map-file=build/whisper.modulemap \
@@ -86,8 +91,11 @@ swiftc -sdk "$SDK" -target arm64-apple-macos26.0 -swift-version 6 \
   -L /opt/homebrew/lib -lwhisper -lggml -lggml-base \
   -Xlinker -rpath -Xlinker /opt/homebrew/lib \
   "$SRC" "${SOURCES[@]}" \
-  -o "$BIN" 2>&1 | grep -E "\.swift:[0-9]+:[0-9]+: error:" && {
-    echo "❌ 编译失败"; exit 1; }
+  -o "$BIN" > "$LOG" 2>&1; then
+  grep -E "error:" "$LOG" | head -20
+  echo "❌ 编译失败（完整日志：${LOG}）"
+  exit 1
+fi
 
 echo "▶ 模型: $CLASSROOM_WHISPER_MODEL"
 echo "▶ 运行…"

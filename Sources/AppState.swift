@@ -11,6 +11,9 @@ final class AppState {
     let notes = NotesStore()
     let attachments = AttachmentStore()
     let glossary = GlossaryStore()
+    /// 用户自建的课程词库（联网生成后存下来的那些）。和 `glossary` 分开：
+    /// 前者是「备着以后用的」，后者是「这节课要用的」
+    let presets = CoursePresetStore()
     let punctuation = PunctuationStore()
     let upload = UploadStore()
     let recordings = RecordingsStore()

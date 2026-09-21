@@ -20,6 +20,23 @@ final class GlossaryStore {
     private(set) var candidates: [GlossaryEntry] = []
     private(set) var isExtracting = false
 
+    /// 候选是从哪来的。两种来源共用同一套「逐条采纳」交互，但说明文字不能共用：
+    /// - `.extracted` 是**这场课真正讲到**的词，录完之后才能拿到；
+    /// - `.web` 是**这门课通用**的术语，联网检索来的，只能在开录前用
+    ///   （它是先验）。两者对用户的含义完全不同，界面必须分开讲。
+    enum CandidateSource: Equatable {
+        case extracted
+        case web
+    }
+    private(set) var candidateSource: CandidateSource = .extracted
+
+    /// 联网生成词表这一段的状态。和 `isExtracting` 分开，
+    /// 因为两者的前置条件与耗时完全不同（联网要检索 + 两次模型调用）
+    private(set) var isSuggesting = false
+    /// 上一次联网生成实际用了哪些检索式。给用户看「它到底搜了什么」——
+    /// 结果不对时，第一眼看的就是这个
+    private(set) var lastQueries: [String] = []
+
     /// 校正后的片段，等用户确认再写回引擎。
     /// 不直接改引擎是因为模型偶尔会顺手改对的地方，得让人看一眼。
     private(set) var pending: [TranscriptSegment]?
@@ -111,6 +128,7 @@ final class GlossaryStore {
         }
 
         isExtracting = true
+        candidateSource = .extracted
         statusMessage = "正在从转录里提取术语…"
         defer { isExtracting = false }
 
@@ -123,6 +141,67 @@ final class GlossaryStore {
                 statusMessage = "提取完成 · 没有发现词表里没有的术语"
             } else {
                 statusMessage = "提取完成 · \(candidates.count) 个候选待确认"
+            }
+        } catch {
+            candidates = []
+            statusMessage = "❌ \(error.localizedDescription)"
+        }
+    }
+
+    /// 联网生成这门课的术语候选：规划检索式 → 检索 → 抽成条目。
+    ///
+    /// **编排放在 store 而不是 service 里**：每一阶段的进度都要写进
+    /// `statusMessage`，而那是 MainActor 上的状态。放进 service 就得跨隔离
+    /// 传闭包，得不偿失。service 那边保持「纯函数 + 三段 async 原语」。
+    ///
+    /// 这是**备课动作**：术语表是喂给识别器的先验，音频流一开始就改不了。
+    /// 所以它和「从转录提取」的差别不是实现，而是**生效时机**——界面上的
+    /// 说明文字必须把这件事讲清楚（见 `candidateSource`）。
+    func suggestFromWeb(course: String) async {
+        guard !isSuggesting else { return }
+        guard isConfigured else {
+            statusMessage = "❌ DeepSeek 密钥未配置"
+            return
+        }
+        guard AppConfig.searchAPIKey != nil else {
+            statusMessage = "❌ 搜索 API 密钥未配置——联网生成要用它检索"
+            return
+        }
+
+        let cleaned = GlossarySuggestionService.cleanCourseName(course)
+        guard !cleaned.isEmpty else {
+            statusMessage = "❌ 先填一个课程名"
+            return
+        }
+
+        isSuggesting = true
+        candidateSource = .web
+        lastQueries = []
+        defer { isSuggesting = false }
+
+        do {
+            statusMessage = "正在规划检索式…"
+            let queries = try await GlossarySuggestionService.planQueries(course: cleaned)
+            lastQueries = queries
+
+            statusMessage = "正在联网检索（\(queries.count) 条检索式）…"
+            let hits = await GlossarySuggestionService.search(queries)
+            guard !hits.isEmpty else {
+                throw GlossarySuggestionService.SuggestionError.noSearchResults
+            }
+
+            statusMessage = "正在从 \(hits.count) 条资料里提取术语…"
+            let found = try await GlossarySuggestionService.extract(
+                hits: hits,
+                course: cleaned,
+                existingTerms: entries.map(\.term)
+            )
+
+            candidates = found
+            if candidates.isEmpty {
+                statusMessage = "「\(cleaned)」没提取到词表里没有的术语（检索到 \(hits.count) 条资料）"
+            } else {
+                statusMessage = "「\(cleaned)」生成 \(candidates.count) 个候选 · 逐条看一眼再采纳"
             }
         } catch {
             candidates = []
