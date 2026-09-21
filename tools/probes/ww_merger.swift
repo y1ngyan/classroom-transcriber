@@ -16,7 +16,8 @@
 //   C 随机窗口序列差分（三个种子）：C1 全部定稿 / C2 契约口径不丢内容 /
 //     C3 远距离重复各自成段 / C4 段数 ≥ 簇数 /
 //     **C5a 硬口径 = 一个步长**（漂移不超过设计自己的歧义量级）/ C5b 1 秒、2 秒统计量（不判失败）
-//   D 过分割：D1 单旧段构造逐趟 dump / D2 第三趟按时间改写（会写错文本）
+//   D 构造输入逐趟 dump（**硬断言**）：D1 第二趟的区间距离（重叠不因错位被当成很远）/
+//     D2 第三趟的文本守卫（候选的文本归属在别处时，不许按时间改写、也不许搬时间戳）
 //
 // 口径说明（这几条重要，别混）：
 //   - C2 是**契约口径**：上界是 stepMillis，所以「被一个步长内的同句吸收」不算丢，
@@ -146,6 +147,7 @@ struct WWMergerProbe {
         print("=== C) 随机窗口序列差分（三个种子）===")
         var totalSegs = 0, totalClusters = 0, totalStrictBad = 0, totalDupLike = 0
         var totalSplit = 0, totalOrphans = 0, totalHardBad = 0, totalWanted = 0
+        var totalGuardTrips = 0
         do {
             for seed0: UInt64 in [20_260_921, 7, 99_991] {
                 var seed: UInt64 = seed0
@@ -177,6 +179,7 @@ struct WWMergerProbe {
                 var tail: [WhisperSegment] = []
                 var prevStart = 0
                 var k = 0
+                var seedGuardTrips = 0
                 while k * step <= utts.last!.end + winLen {
                     let wStart = k * step
                     var segs: [(String, Int, Int)] = []
@@ -188,6 +191,7 @@ struct WWMergerProbe {
                         segs.append((t, rs, min(re, winLen)))
                     }
                     let r = run(segments, wnd(wStart, segs), tail, prevStart)
+                    seedGuardTrips += r.changes.filter { $0.hasPrefix("新增（文本归属在别处") }.count
                     segments = r.segments; tail = r.pendingTail; prevStart = wStart
                     k += 1
                 }
@@ -212,8 +216,10 @@ struct WWMergerProbe {
                 }
                 let clusterTotal = clusters.reduce(0) { $0 + $1.count }
 
-                print("  —— 种子 \(seed0)：14 句真话 / \(k) 个窗口 → 输出 \(segments.count) 段（簇数 \(clusterTotal)）——")
+                print("  —— 种子 \(seed0)：14 句真话 / \(k) 个窗口 → 输出 \(segments.count) 段（簇数 \(clusterTotal)"
+                      + "；第三趟守卫触发 \(seedGuardTrips) 次）——")
                 totalSegs += segments.count; totalClusters += clusterTotal
+                totalGuardTrips += seedGuardTrips
 
                 // C1 每一段最终都定稿
                 let stuck = segments.filter { !$0.isFinal }
@@ -321,6 +327,7 @@ struct WWMergerProbe {
               + "C5a 硬口径违反 \(totalHardBad) 句 / C5b 2 秒统计 \(totalStrictBad) 句")
         print("  三种子归类：多出段 \(totalDupLike) = ① 同一句被拆两段 \(totalSplit) + ③ 认不到真话 \(totalOrphans)"
               + "；② 远距离重复各自成段 \(totalWanted) 段（要的，不计进多出）")
+        print("  三种子第三趟守卫触发（「文本归属在别处，不按时间改写」）：\(totalGuardTrips) 次")
 
         // MARK: - D 过分割：构造输入逐趟 dump
 
@@ -355,47 +362,48 @@ struct WWMergerProbe {
             let d1Existing = [seg(aText, true, aRange.0, aRange.1)]
             let d1Candidate = seg(candText, false, cRange.0, cRange.1)
 
-            print("  —— D1：一个已定稿旧段 ——")
+            print("  —— D1：一个已定稿旧段（阶段 1.5 报告里那条「自相矛盾」的构造）——")
             dump(d1Existing, "已有段：")
             dump([d1Candidate], "本窗候选（窗口起点 21000 + 相对 0–600）：")
 
             // 判据全部在探针里独立重算，不读代码的 trace
-            let gap = d1Candidate.startTimeMillis - d1Existing[0].endTimeMillis
+            let signedDiff = d1Candidate.startTimeMillis - d1Existing[0].endTimeMillis
             let iv = intervalGap((aRange.0, aRange.1), (cRange.0, cRange.1))
             let d1Relation = relationName(aText, candText)
             let d1Overlap = cRange.0 < aRange.1 && aRange.0 < cRange.1
 
             print("    文本关系（独立重算）= \(d1Relation)")
             print("    第一趟 [拿候选 vs [0]]：same ≥6 字？→ 不是 same → 不收")
-            print("    第二趟 [拿候选 vs [0]]：similar？→ 不是 similar → 不收")
-            print("    第三趟 [拿候选 vs [0]]：重叠 = \(d1Overlap ? "是" : "否")，[0].isFinal = true → 不收（只要未定稿的段）")
-            print("    ⇒ 三趟都不收 → 新增一段（同一句被拆成两段）")
-            print("    ⚠️ 阶段 1.5 报告里写的「第二趟差 1500ms」是**这个量**：")
-            print("       (候选起点 21000 − 旧段终点 22500) = \(gap)，|\(gap)| = \(abs(gap)) > \(tailTol) → 拒")
-            print("       负号的含义是「候选起点落在旧段终点之前 \(abs(gap))ms」= 两段**重叠** \(abs(gap))ms，")
-            print("       不是「隔了 1500ms」。同一个几何的**区间距离** = \(iv)ms ≤ \(tailTol) → 按区间距离本该命中。")
-            print("       所以 1.5 报告里的「差 1500ms」和「时间重叠」并不矛盾，是我那个变量名（boundGap）叫错了：")
-            print("       第二趟比的是**起点减终点的带符号差**，第三趟比的是**区间是否相交**，两个不同的量。")
+            print("    第二趟 [拿候选 vs [0]]：similar？→ 是；**区间距离** = \(iv)ms ≤ \(tailTol)ms → 命中")
+            print("    ⚠️ 阶段 1.5 报告里写的「第二趟差 1500ms」是**重叠深度**，不是距离：")
+            print("       (候选起点 21000 − 旧段终点 22500) = \(signedDiff)，负号 = 候选起点落在旧段终点之前，")
+            print("       也就是两段**重叠** \(abs(signedDiff))ms。它和第三趟的「时间重叠」不矛盾——")
+            print("       同一个几何的两种量，当时是我那个变量名（boundGap）叫错了，不是数据矛盾。")
+            print("       阶段 1.7 把第二趟改成区间距离后，这个构造走第二趟正常合并。")
 
             func trial(_ wasFinal: Bool) -> [TranscriptSegment] {
                 run([seg(aText, wasFinal, aRange.0, aRange.1)], wnd(21_000, [(candText, 0, 600)])).segments
             }
             let withFinal = trial(true)
             let withoutFinal = trial(false)
-            expect(withFinal.count == 2 && withoutFinal.count == 1,
-                   "D1 旧段已定稿 → 2 段；只把 isFinal 改成 false → 1 段（第三趟收编）",
+            expect(withFinal.count == 1 && withoutFinal.count == 1,
+                   "D1 旧段已定稿 / 未定稿 → 都合并成 1 段（第二趟不看 isFinal）",
                    "已定稿 \(withFinal.count) 段 / 未定稿 \(withoutFinal.count) 段")
+            expect(withFinal.count == 1 && withFinal[0].text == candText
+                   && withFinal[0].startTimeMillis == cRange.0 && withFinal[0].endTimeMillis == cRange.1,
+                   "D1 合并后留下的是**重识别那一版**文本与时间戳",
+                   "\(withFinal[0].startTimeMillis)–\(withFinal[0].endTimeMillis) \"\(withFinal[0].text)\"")
 
-            // ── D2：第三趟真收编时，改写到的是哪个段？
+            // ── D2：第三趟的文本守卫——候选的文本归属在别处时不许按时间改写
             // 文本匹配的段与时间重叠的段**是两个不同的段**——这是能区分两种可能性的最小构造。
             let farText = "正则化可以防止过拟合"
             let midText = "训练集和测试集要分开"
             let cand2Text = "正则化可以防止过拟合的"
             let farRange = (30_000, 33_000)     // 文本匹配得上的那个（远，> 一个步长）
-            let midRange = (44_000, 46_000)     // 时间重叠的那个（未定稿）
+            let midRange = (44_500, 46_500)     // 时间重叠的那个（未定稿；终点 > 窗口起点+步长，不触发补定稿）
             let cand2Range = (44_000, 47_000)   // 窗口起点 43000 + 相对 1000–4000
 
-            print("  —— D2：文本匹配的段 与 时间重叠的段 是两个不同的段 ——")
+            print("  —— D2：文本匹配的段 与 时间重叠的段 是两个不同的段（守卫）——")
             dump([seg(farText, true, farRange.0, farRange.1), seg(midText, false, midRange.0, midRange.1)],
                  "已有段：")
             dump([seg(cand2Text, false, cand2Range.0, cand2Range.1)],
@@ -403,25 +411,32 @@ struct WWMergerProbe {
 
             let iv2 = intervalGap((farRange.0, farRange.1), (cand2Range.0, cand2Range.1))
             let overlap2 = cand2Range.0 < midRange.1 && midRange.0 < cand2Range.1
-            print("    第一趟 [候选 vs [0]]：关系 \(relationName(farText, cand2Text))，区间距离 \(iv2)ms > 上界 \(step)ms → 不收")
+            print("    第一趟 [候选 vs [0]]：关系 \(relationName(farText, cand2Text))，区间距离 \(iv2)ms > 上界 \(step)ms → 正确拒绝（保护生效）")
             print("    第一趟 [候选 vs [1]]：关系 \(relationName(midText, cand2Text)) → 不收")
             print("    第二趟 [候选 vs [0]]：关系不是 similar（是 same）→ 这一趟的 switch 只收 similar → 跳过")
             print("    第二趟 [候选 vs [1]]：关系不是 similar → 跳过")
-            print("    第三趟 倒序扫：先看 [1]：未定稿 + 重叠 = \(overlap2 ? "是" : "否") → **返回 [1]**")
-            print("    merge 对命中的下标是整体覆盖（text / start / end 全写成候选的）")
+            print("    第三趟 倒序扫：先看 [1]：未定稿 + 重叠 = \(overlap2 ? "是" : "否")，"
+                  + "但守卫发现候选的文本归属在 [0]（same ≥6）→ **不按时间改写** → 候选新增")
 
-            let d2 = run([seg(farText, true, farRange.0, farRange.1), seg(midText, false, midRange.0, midRange.1)],
-                         wnd(43_000, [(cand2Text, 1_000, 4_000)])).segments
+            let d2Result = run([seg(farText, true, farRange.0, farRange.1), seg(midText, false, midRange.0, midRange.1)],
+                               wnd(43_000, [(cand2Text, 1_000, 4_000)]))
+            let d2 = d2Result.segments
             dump(d2, "跑出来：")
-            let hitIsTimeSegment = d2.count == 2 && d2[1].text == cand2Text && d2[0].text == farText
-            expect(hitIsTimeSegment, "D2 已证实：第三趟命中的是**时间重叠**那一段（不看文本）",
-                   "命中下标 1，文本被写成候选的")
-            expect(!d2.contains { $0.text == midText }, "D2 已证实：被改写那段的原文在输出里消失（内容丢失）",
-                   "「\(midText)」不复存在")
-            observations.append("D2（按契约口径不是失败：契约第 3 条就是「时间重叠且未定稿 → 视为内容修正」，"
-                                + "它没许诺看文本。但它是一条**把整段文本覆盖掉**的真实路径）："
-                                + "候选与远段的文本互相匹配、又与近段时间重叠时，第三趟按时间改写，"
-                                + "把近段的原文覆盖成候选的文本——这比多一段严重，属于「文本被写错」。")
+            expect(d2.count == 3 && d2[2].text == cand2Text
+                   && d2[2].startTimeMillis == cand2Range.0 && d2[2].endTimeMillis == cand2Range.1,
+                   "D2 候选新增成一段（文本 / 起止 = 候选自己的）",
+                   "段数 \(d2.count)")
+            expect(d2.count == 3 && d2[1].text == midText
+                   && d2[1].startTimeMillis == midRange.0 && d2[1].endTimeMillis == midRange.1
+                   && !d2[1].isFinal,
+                   "D2 时间重叠那段的文本 · 起止 · isFinal 全部原样不动",
+                   "\(d2[1].startTimeMillis)–\(d2[1].endTimeMillis) \(d2[1].isFinal ? "定稿" : "临时") \"\(d2[1].text)\"")
+            expect(d2.count == 3 && d2[0].text == farText
+                   && d2[0].startTimeMillis == farRange.0 && d2[0].endTimeMillis == farRange.1,
+                   "D2 也没有并进远处那个文本双胞胎（不搬时间戳）",
+                   "\(d2[0].startTimeMillis)–\(d2[0].endTimeMillis) \"\(d2[0].text)\"")
+            expect(d2Result.changes.contains { $0.hasPrefix("新增（文本归属在别处") },
+                   "D2 守卫触发在 changes 里有可数的标签", d2Result.changes.joined(separator: " / "))
         }
 
         // MARK: - 汇总

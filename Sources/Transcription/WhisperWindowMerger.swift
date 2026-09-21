@@ -119,11 +119,15 @@ enum WhisperWindowMerger {
         let pendingTail = input.window.segments.filter { $0.endMillis > input.stepMillis }
 
         for candidate in candidates {
+            // 第三趟的文本守卫触发次数（每个候选至多 1 次）。带出来只为在 changes 里留个
+            // 区别于普通「新增」的标签——真实录音上要靠它量化「文本归属在别处」多常见。
+            var guardTrips = 0
             if let index = matchIndex(
                 in: segments,
                 candidate: candidate,
                 scanBackLimit: scanBackLimit,
-                maxIntervalGapMillis: input.stepMillis
+                maxIntervalGapMillis: input.stepMillis,
+                guardTrips: &guardTrips
             ) {
                 let shouldStabilize = !segments[index].isFinal
                     && isStable(candidate: candidate, previousTail: previousTailGlobal)
@@ -140,7 +144,11 @@ enum WhisperWindowMerger {
                 }
             } else {
                 segments.append(candidate)
-                changes.append("新增：\(candidate.text.prefix(30))")
+                // 守卫触发导致的「新增」用不同标签：下游要靠它数「文本归属在别处」的频次，
+                // 与真正的第一次出现区分开。
+                changes.append(guardTrips > 0
+                    ? "新增（文本归属在别处，不按时间改写）：\(candidate.text.prefix(30))"
+                    : "新增：\(candidate.text.prefix(30))")
             }
         }
 
@@ -169,7 +177,8 @@ enum WhisperWindowMerger {
         in existing: [TranscriptSegment],
         candidate: TranscriptSegment,
         scanBackLimit: Int,
-        maxIntervalGapMillis: Int
+        maxIntervalGapMillis: Int,
+        guardTrips: inout Int
     ) -> Int? {
         guard !existing.isEmpty else { return nil }
         let lower = max(0, existing.count - scanBackLimit)
@@ -191,14 +200,25 @@ enum WhisperWindowMerger {
             }
         }
 
-        // 第二趟：similar，且时间重叠或相邻（≤ 1 秒）。
+        // 第二趟：similar，且**区间距离** ≤ 1 秒。
         // 滑窗里同一句的时间戳可能因上下文变化而整体平移几百毫秒，
         // 但 different 的相邻句不该被合并。
+        //
+        // 2026-09-22（阶段 1.7）：判据从「候选起点 − 旧段终点的带符号差」改成
+        // `intervalGapMillis`。那个带符号差其实是**重叠深度**，不是距离：两段重叠 1500ms
+        // 时它算出 1500 而拒绝，可它们的真实间隔是 0——而「同一句被重识别成重叠但错位
+        // 的一版」正是滑窗里最常见的形态。模块里 `intervalGapMillis` 的注释一直写着
+        // 「用区间距离而不是起点之差」，那句话此前只对第一趟成立。
+        // 三种子实测（探针）：过分割 7 → 0，段数 49 → 42（正好等于真句数），
+        // 代价是「时间线位置被吸收的句子」4 → 5——合并必然牺牲时间线位置，契约写明的取舍。
+        //
+        // 为什么不顺手把容差也放成一个步长：那会把**相隔最多 3 秒的两句 similar** 也并掉
+        // （正间隔一律按真实间隔算，没有「重叠」这个下限兜着），放宽幅度超过需要。
+        // 这里要的只是把距离算对，1 秒这个数不动。
         for index in range.reversed() {
             switch TranscriptionEngine.textRelation(existing[index].text, candidate.text) {
             case .similar:
-                let gap = candidate.startTimeMillis - existing[index].endTimeMillis
-                guard abs(gap) <= 1_000 else { continue }
+                guard intervalGapMillis(existing[index], candidate) <= 1_000 else { continue }
                 return index
             default:
                 continue
@@ -212,15 +232,61 @@ enum WhisperWindowMerger {
         //
         // 注意：只认「重叠」，不认「相邻」。相邻但文本 different 的段更可能
         // 是老师真的换了一句话，合并会把两句真话吞成一句。
+        //
+        // 文本守卫（2026-09-22，阶段 1.7）：命中一个「重叠 + 未定稿」的段之前，先看候选的
+        // **文本归属**在不在别处——若存在另一个已有段与候选同文本（.same ≥6）或近似
+        // （.similar），就不许按时间改写这个段。理由：这种情况下第一趟刚刚因为上界
+        // **正确地**拒绝过这次归属（远距离重复各自成段，裁决 2），第三趟按时间收编等于把
+        // 那个拒绝推翻——而且命中的是**另一个**段，整句原文会被候选的文本覆盖掉
+        // （实测：「训练集和测试集要分开」整段消失，属于内容丢失级）。
+        // 守卫触发时返回 nil：候选走「新增一段」的正常路径，既不改写时间重叠的那段，
+        // 也**不**并到远处那个文本双胞胎里（并过去就是「搬时间戳」，正是裁决 2 修掉的 bug）。
+        //
+        // 守卫为什么只能用文本判断：能走到这一趟的段必然与候选时间重叠，而重叠 ⇒ 区间距离
+        // 恒为 0 ⇒ 「找一段距离更小的」永远不可满足。
+        //
+        // 为什么收 .similar（它是弱判据、编辑距离 ≤20% 无下限）：代价不对称——多触发一次
+        // 的代价是「多一段」（显示瑕疵），漏触发一次的代价是「整句原文被覆盖」（内容丢失）。
+        // 三种子实测两者**没有差别**（都是 42 段 / 0 过分割、守卫触发 0 次），所以这个选择
+        // 是按代价不对称定的，不是按合成数据定的；真实录音上的触发频次要靠 changes 里
+        // 「文本归属在别处」这个标签去数。若将来发现它把第三趟该做的修正挡掉了，收窄成
+        // `.same(≥6)` 是一行的事。
         for index in range.reversed() {
             let seg = existing[index]
             guard !seg.isFinal else { continue }
             guard candidate.startTimeMillis < seg.endTimeMillis
                 && candidate.endTimeMillis > seg.startTimeMillis else { continue }
+            if hasTextAffinityElsewhere(in: existing, range: range, candidate: candidate, excluding: index) {
+                guardTrips += 1
+                return nil
+            }
             return index
         }
 
         return nil
+    }
+
+    /// 候选的文本是否明确属于**别的**段（`.same(≥6)` 或 `.similar`）——第三趟的守卫用它。
+    ///
+    /// 单独抽出来是为了让它能被单独说清：它判的是**文本归属**，与时间无关。
+    /// 与候选时间重叠的那一段经 `excluding` 排除在外。
+    private static func hasTextAffinityElsewhere(
+        in existing: [TranscriptSegment],
+        range: Range<Int>,
+        candidate: TranscriptSegment,
+        excluding index: Int
+    ) -> Bool {
+        for other in range where other != index {
+            switch TranscriptionEngine.textRelation(existing[other].text, candidate.text) {
+            case .same(let shorter) where shorter >= 6:
+                return true
+            case .similar:
+                return true
+            default:
+                continue
+            }
+        }
+        return false
     }
 
     /// 两段时间区间之间隔了多远（毫秒），重叠或相接算 0。
@@ -809,6 +875,88 @@ extension WhisperWindowMerger {
                   stuck.isEmpty,
                   "仍临时 \(stuck.count) 段：\(stuck.map(\.text).joined(separator: " / "))")
             check("同一句反复出现不产生重复段", segments.count == 2, "段数 \(segments.count)")
+        }
+
+        // MARK: 用例 14：第二趟的距离是「区间距离」——重叠不因错位而被当成很远
+        //
+        // 2026-09-22（阶段 1.7）。这是探针 D1 抓到的形状（三种子多出的 7 段全是它）：
+        // 同一句在相邻窗口被重识别成差一个虚词的一版，候选起点落在旧段**内部**，
+        // 旧段已定稿。改动前第二趟算的是「起点减终点」= 负数 = 重叠深度，1500 > 1000
+        // 直接拒绝，于是同一句被拆成两段。
+        do {
+            let oldText = "今天我们讲梯度下降算法呢"
+            let newText = "今天我们讲梯度下降算法的"
+
+            func trial(_ candidateStart: Int) -> [TranscriptSegment] {
+                let existing = [
+                    TranscriptSegment(text: oldText, isFinal: true, startTimeMillis: 20_000,
+                                      endTimeMillis: 22_500, languages: ["zh-CN"])
+                ]
+                return merge(WhisperMergeInput(
+                    existing: existing,
+                    window: window(candidateStart, windowMillis,
+                                   [seg(newText, 0, 600)]),
+                    previousTail: [], previousWindowStartMillis: 0, stepMillis: stepMillis
+                )).segments
+            }
+
+            // 重叠：候选起点 21000 落在旧段 [20000,22500] 内部，重叠 1500ms（区间距离 0）
+            let overlapping = trial(21_000)
+            check("第二趟：similar 且区间距离 0（重叠 1500ms）→ 合并为一段，不拆成两段",
+                  overlapping.count == 1, "段数 \(overlapping.count)")
+            check("合并后留下的是重识别那一版文本与时间戳",
+                  overlapping.count == 1 && overlapping[0].text == newText
+                  && overlapping[0].startTimeMillis == 21_000 && overlapping[0].endTimeMillis == 21_600,
+                  overlapping[0].formattedTimestamp + " " + overlapping[0].text)
+
+            // 反面对照：真正相隔 1500ms（不重叠）——容差仍是 1 秒，不许合并。
+            // 这一条是防「顺便把容差也放大」的：改距离定义 ≠ 放宽容差。
+            let apart = trial(24_000)
+            check("第二趟：真间隔 1500ms > 容差 1 秒 → 各自成段（容差没有被放大）",
+                  apart.count == 2 && apart[0].text == oldText
+                  && apart[0].startTimeMillis == 20_000 && apart[0].endTimeMillis == 22_500,
+                  "段数 \(apart.count) · 首段 \(apart[0].formattedTimestamp) \(apart[0].text)")
+        }
+
+        // MARK: 用例 15：第三趟的文本守卫——候选的文本归属在别处时，不许按时间改写
+        //
+        // 2026-09-22（阶段 1.7）。探针 D2 抓到的破坏路径：候选的文本与一个**远**段
+        // （.same，但超了第一趟的上界 → 正确拒绝）相同，同时又与一个**近**段时间重叠
+        // （different 文本、未定稿）。改动前第三趟按时间改写近段，把它的整句原文覆盖掉。
+        do {
+            let farText = "正则化可以防止过拟合"
+            let nearText = "训练集和测试集要分开"
+            let candidateText = "正则化可以防止过拟合的"
+
+            let existing = [
+                TranscriptSegment(text: farText, isFinal: true, startTimeMillis: 30_000,
+                                  endTimeMillis: 33_000, languages: ["zh-CN"]),
+                TranscriptSegment(text: nearText, isFinal: false, startTimeMillis: 44_500,
+                                  endTimeMillis: 46_500, languages: ["zh-CN"]),
+            ]
+            let r = merge(WhisperMergeInput(
+                existing: existing,
+                // 候选全局 [44000,47000]：与近段重叠，与远段文本同句但相隔 11000ms
+                window: window(43_000, windowMillis, [seg(candidateText, 1_000, 4_000)]),
+                previousTail: [], previousWindowStartMillis: 0, stepMillis: stepMillis
+            ))
+            let segments = r.segments
+
+            check("守卫触发时候选新增一段（不改写时间重叠的那段）",
+                  segments.count == 3 && segments[2].text == candidateText,
+                  "段数 \(segments.count)")
+            check("时间重叠那段的文本 · 起止 · isFinal 全部原样不动",
+                  segments[1].text == nearText
+                  && segments[1].startTimeMillis == 44_500 && segments[1].endTimeMillis == 46_500
+                  && !segments[1].isFinal,
+                  "\(segments[1].formattedTimestamp) \(segments[1].text)")
+            check("也没有并进远处那个文本双胞胎（不搬时间戳）",
+                  segments[0].text == farText && segments[0].startTimeMillis == 30_000
+                  && segments[0].endTimeMillis == 33_000,
+                  "\(segments[0].formattedTimestamp) \(segments[0].text)")
+            check("守卫触发在 changes 里有区别于普通「新增」的标签",
+                  r.changes.contains { $0.hasPrefix("新增（文本归属在别处") },
+                  r.changes.joined(separator: " / "))
         }
 
         lines.append(allPassed ? "✅ Whisper 滑窗合并自检通过" : "❌ Whisper 滑窗合并自检未通过")
