@@ -118,6 +118,17 @@ struct SettingsView: View {
                     .textStyle(Theme.Text.caption)
                     .foregroundStyle(Theme.textSecondary)
 
+                LabeledField(label: "自动核查") {
+                    Toggle("", isOn: $store.autoFactCheck)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .frame(width: 360, alignment: .leading)
+                }
+
+                Text("开启后每段转录定稿会自动联网核查（消耗检索与模型额度）；关闭时可在核查页手动核查")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
                 note(
                     "检测的是「老师是不是在向全班提问」，命中的段落会在转录里标出来。"
                         + "纯本地规则判定，不联网、不调模型。"

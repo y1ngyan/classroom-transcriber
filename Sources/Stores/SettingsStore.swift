@@ -30,6 +30,11 @@ final class SettingsStore {
     /// 讲课陈述里全是「什么」「怎么」，没有这道门槛提问列表会被讲课淹没。
     var questionSensitivity: QuestionSensitivity = .normal
 
+    /// 段落定稿后是否自动联网核查。默认关闭：核查要联网、要花检索和 LLM
+    /// 额度，这是用户自己的账。开着的时候每段定稿都会自动跑一次，一节课
+    /// 下来是几十次请求——默认替他花掉不合适。关掉不影响手动核查。
+    var autoFactCheck = false
+
     // MARK: - 状态
 
     private(set) var saveMessage = ""
@@ -65,6 +70,7 @@ final class SettingsStore {
         cosKeyPrefix = config.cosKeyPrefix ?? "recordings"
         micGain = MicGainMode.of(config.micGain)
         questionSensitivity = QuestionSensitivity.of(config.questionSensitivity)
+        autoFactCheck = config.autoFactCheck ?? false
     }
 
     var configFilePath: String { AppConfig.configFilePath }
@@ -88,6 +94,7 @@ final class SettingsStore {
         // 配置文件是给人看的，留空之后没人知道空代表哪一档
         config.micGain = micGain.rawValue
         config.questionSensitivity = questionSensitivity.rawValue
+        config.autoFactCheck = autoFactCheck
 
         do {
             try AppConfig.save(config)

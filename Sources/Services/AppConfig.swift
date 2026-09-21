@@ -32,6 +32,10 @@ enum AppConfig {
         var micGain: String?
         /// 课堂提问检测灵敏度（high / normal / low / off）
         var questionSensitivity: String?
+        /// 段落定稿后是否自动联网核查。**缺省关闭**——核查要联网、
+        /// 要花检索和 LLM 额度，这是用户的账，不该由我们默认替他花掉。
+        /// 关掉只是不自动触发，手动点某一段照样能核查
+        var autoFactCheck: Bool?
     }
 
     private static let configURL: URL = {
@@ -199,6 +203,18 @@ enum AppConfig {
         QuestionSensitivity.of(value(env: "QUESTION_SENSITIVITY", file: box.current.questionSensitivity))
     }
 
+    /// 段落定稿后是否自动联网核查。配置文件里没写这一项时判定为 false——
+    /// 「没配过」和「明确关掉」在结果上是同一件事：不自动花钱。
+    /// 环境变量只认这几个真值写法，其余（含 "0" / "false"）都是关。
+    static var autoFactCheck: Bool {
+        let raw = value(
+            env: "AUTO_FACT_CHECK",
+            file: box.current.autoFactCheck.map { $0 ? "true" : "false" }
+        )
+        guard let raw else { return false }
+        return ["1", "true", "yes", "on"].contains(raw.lowercased())
+    }
+
     static var configFilePath: String { configURL.path }
 
     /// 供 UI 提示用：哪些能力当前可用
@@ -267,6 +283,7 @@ enum AppConfig {
         // 「填了、点了保存、下次打开又回到默认」在这两个字段上一样致命
         seed.micGain = "x3"
         seed.questionSensitivity = "low"
+        seed.autoFactCheck = true
 
         do {
             try save(seed)
@@ -300,6 +317,7 @@ enum AppConfig {
             ("cosKeyPrefix", onDisk.cosKeyPrefix == seed.cosKeyPrefix),
             ("micGain", onDisk.micGain == seed.micGain),
             ("questionSensitivity", onDisk.questionSensitivity == seed.questionSensitivity),
+            ("autoFactCheck", onDisk.autoFactCheck == seed.autoFactCheck),
         ]
         let lost = fields.filter { !$0.1 }.map(\.0)
         lines.append("  \(lost.isEmpty ? "✅" : "❌") \(fields.count) 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
@@ -346,7 +364,8 @@ enum AppConfig {
           "cosEndpoint": "",
           "cosKeyPrefix": "recordings",
           "micGain": "auto",
-          "questionSensitivity": "normal"
+          "questionSensitivity": "normal",
+          "autoFactCheck": false
         }
         """
         try? FileManager.default.createDirectory(

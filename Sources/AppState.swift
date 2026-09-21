@@ -20,7 +20,12 @@ final class AppState {
         AppConfig.writeTemplateIfMissing()
 
         transcription.onFinalSegment = { [weak self] segment in
-            self?.factCheck.submit(segment: segment)
+            // 自动核查是**用户开着的**才跑。默认关闭：核查要联网、要花检索和
+            // LLM 额度，每段定稿都自动触发的话一节课几十次请求，用户未必
+            // 想让 App 替他花这笔钱。关掉不是砍掉功能——核查页选中某段
+            // 手动点「核查」照样走同一条链路。
+            guard let self, self.settings.autoFactCheck else { return }
+            self.factCheck.submit(segment: segment)
         }
     }
 
