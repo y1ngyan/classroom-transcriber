@@ -14,6 +14,61 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     /// 录音片段。「接着录」一次就追加一条，永远按时间顺序
     var parts: [RecordingPart]
 
+    /// 用户给这条录音起的名字。空表示没起过——列表回落到显示
+    /// 日期和首段文本。**不给默认名**：自动生成的「未命名录音 3」
+    /// 比空更糟，用户得先删掉它才能起自己的名
+    var title: String = ""
+    /// 课程名，用于分组。空表示未分类
+    var course: String = ""
+
+    // MARK: - 向后兼容
+
+    /// 手写解码而不是用合成的：这两个字段是后加的，磁盘上已有的
+    /// 会话 JSON 里没有这两个键，合成解码会直接抛 keyNotFound 让
+    /// 整条会话读不出来。加字段不能把旧数据读废
+    private enum CodingKeys: String, CodingKey {
+        case id, startedAt, updatedAt, parts, title, course
+    }
+
+    init(id: UUID, startedAt: Date, updatedAt: Date, parts: [RecordingPart],
+         title: String = "", course: String = "") {
+        self.id = id
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.parts = parts
+        self.title = title
+        self.course = course
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        parts = try c.decode([RecordingPart].self, forKey: .parts)
+        // 缺键视作空串，和「没起过名」「未分类」是同一个意思
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        course = try c.decodeIfPresent(String.self, forKey: .course) ?? ""
+    }
+
+    /// 列表上显示的名字。用户起过就用它，没起过回落到时间——
+    /// 不显示空字符串，那在列表里就是一行空白
+    var displayTitle: String {
+        title.isEmpty ? formattedFallbackTitle : title
+    }
+
+    private var formattedFallbackTitle: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: startedAt)
+    }
+
+    /// 分组用的课程名。空归到「未分类」而不是空标题——
+    /// 列表里一个没有标题的分组会让人以为是渲染坏了
+    var displayCourse: String {
+        course.isEmpty ? "未分类" : course
+    }
+
     /// 会话总时长 = 最后一个片段的偏移 + 它自己的时长
     var durationMillis: Int {
         guard let last = parts.last else { return 0 }
@@ -88,6 +143,10 @@ struct SessionSummary: Identifiable, Codable, Equatable {
     /// 首段文本的前 30 字。列表光给一个日期看不出是哪节课，
     /// 开头说了什么是最便宜的辨认线索
     var firstText: String
+    /// 用户起的名字 / 课程名。摘要里也存一份，是为了列表页不必
+    /// 为了读两个名字去解码整条会话正文（正文可能有几百段）
+    var title: String
+    var course: String
 
     init(session: RecordingSession) {
         id = session.id
@@ -99,8 +158,49 @@ struct SessionSummary: Identifiable, Codable, Equatable {
         questionCount = session.questionCount
         poorCount = session.poorCount
         fairCount = session.fairCount
+        title = session.title
+        course = session.course
         firstText = String(
             session.parts.lazy.compactMap { $0.segments.first?.text }.first?.prefix(30) ?? ""
         )
+    }
+
+    /// 和 RecordingSession 同一套回落规则，见那边的注释
+    var displayTitle: String {
+        title.isEmpty ? formattedFallbackTitle : title
+    }
+
+    var displayCourse: String {
+        course.isEmpty ? "未分类" : course
+    }
+
+    private var formattedFallbackTitle: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter.string(from: startedAt)
+    }
+
+    /// 手写解码：title/course 是后加的字段，磁盘上的 index.json
+    /// 里没有这两个键，合成解码会让整个索引读不出来（等于所有
+    /// 录音消失）。缺键视作空串
+    private enum CodingKeys: String, CodingKey {
+        case id, startedAt, updatedAt, durationMillis, partCount, segmentCount
+        case questionCount, poorCount, fairCount, firstText, title, course
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        durationMillis = try c.decode(Int.self, forKey: .durationMillis)
+        partCount = try c.decode(Int.self, forKey: .partCount)
+        segmentCount = try c.decode(Int.self, forKey: .segmentCount)
+        questionCount = try c.decode(Int.self, forKey: .questionCount)
+        poorCount = try c.decode(Int.self, forKey: .poorCount)
+        fairCount = try c.decode(Int.self, forKey: .fairCount)
+        firstText = try c.decode(String.self, forKey: .firstText)
+        title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
+        course = try c.decodeIfPresent(String.self, forKey: .course) ?? ""
     }
 }

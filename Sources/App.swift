@@ -571,11 +571,27 @@ struct ClassroomTranscriberApp: App {
                 preset = parsed
             }
 
+            // 可选预处理：--preprocess-gain <档位>
+            //
+            // 存在的理由：重转要补 AGC（存档是未加增益的原始电平），
+            // 而这条能力需要一个能在终端里单独验证的入口——「重转后
+            // 到底好没好」只有把同一段音频转过、比过置信度才知道
+            var preprocess: FileTranscription.Preprocess?
+            if let gi = CommandLine.arguments.firstIndex(of: "--preprocess-gain"),
+               gi + 1 < CommandLine.arguments.count,
+               let mode = MicGainMode(rawValue: CommandLine.arguments[gi + 1]) {
+                preprocess = FileTranscription.Preprocess(gainMode: mode)
+                print("🎛  预处理增益档: \(mode.label)")
+            }
+
             let semaphore = DispatchSemaphore(value: 0)
             // 必须用 detached：App.init 是 @MainActor 隔离的，
             // 普通 Task 会继承主 actor，而主线程正阻塞在下面的 wait 上 → 死锁
             Task.detached {
-                await FileTranscription.run(path: path, locales: locales, presetChoice: preset)
+                await FileTranscription.run(
+                    path: path, locales: locales,
+                    presetChoice: preset, preprocess: preprocess
+                )
                 semaphore.signal()
             }
             if semaphore.wait(timeout: .now() + 900) == .timedOut {

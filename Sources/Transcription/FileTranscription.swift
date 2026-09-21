@@ -27,10 +27,53 @@ enum FileTranscription {
         }
     }
 
+    /// 文件转录的预处理。
+    ///
+    /// **重转默认不过 AGC。** 原因是实测出来的，和直觉相反：
+    ///
+    /// 存档刻意排在软件增益之前（见 TranscriptionEngine 的
+    /// MicTap.handle），所以 wav 里是未加增益的原始电平。直觉上重转该
+    /// 补上 AGC，但同一条录音三种处理各跑一遍的实测结果是：
+    ///
+    /// ```
+    ///   原始（不补）        平均置信度 0.684 · 可信段 3
+    ///   补 AGC 7.67×        平均置信度 0.619 · 可信段 0
+    ///   补 AGC 9.74×        平均置信度 0.613 · 可信段 0
+    /// ```
+    ///
+    /// 补了反而更差，而且不是增益不够（修掉开局 7 秒哑火期、把增益从
+    /// 7.67× 提到 9.74× 之后仍然更差）。原因是 AGC 是**逐帧变速**增益，
+    /// 给识别器引入了时变特性：原始音频虽然电平低，但电平是**时不变**
+    /// 的，识别器在训练时见过各种音量，能正常处理；增益每帧都在变，
+    /// 反而破坏了声学模型的输入分布假设。
+    ///
+    /// 所以这个参数保留成可选项而不是默认行为——它是可测的（见
+    /// App.swift 的 --preprocess-gain），留着是为了将来有新的证据时
+    /// 能再验一次，而不是因为现在推荐用它。
+    ///
+    /// **不要补高通**：存档已经过一次 80Hz 高通了（同一处链路），
+    /// 再滤一遍会在 80Hz 处衰减 6dB 而不是 3dB，把男声基频下沿削掉。
+    struct Preprocess {
+        var gainMode: MicGainMode
+        /// 每块喂给前级的帧数。和实时的 tap 回调块长一致，
+        /// 让 AGC 的包络跟随行为与实时链路可比
+        var blockFrames: AVAudioFrameCount = 4096
+    }
+
+    /// 文件转录的可选结果回收。
+    ///
+    /// 现在的调用方分两类：`--transcribe-file` 只要打印（传 nil），
+    /// 重转要把 segments 收回去写进会话（传闭包）。用回调而不是返回值，
+    /// 是因为结果是在 analyzer 消费过程中流式产生的，收完才返回会
+    /// 让「边转边能看到进度」这件事做不到
+    typealias SegmentSink = @Sendable (TranscriptSegment) -> Void
+
     static func run(
         path: String,
         locales: [String] = ["zh-CN"],
-        presetChoice: PresetChoice = .timeIndexedAlternatives
+        presetChoice: PresetChoice = .timeIndexedAlternatives,
+        preprocess: Preprocess? = nil,
+        sink: SegmentSink? = nil
     ) async {
         let url = URL(fileURLWithPath: path)
 
@@ -142,9 +185,19 @@ enum FileTranscription {
                                 confidences.reduce(0, +) / Double(confidences.count),
                                 grade?.label ?? "未评"
                             )
+
                             print(String(
                                 format: "[%@] %6.2f → %6.2f  %@（%@）",
                                 label, start, end, text, confidenceNote
+                            ))
+
+                            // 回收 segments（重转路径要用）
+                            sink?(TranscriptSegment(
+                                text: text,
+                                isFinal: true,
+                                startTimeMillis: Int(start * 1000),
+                                endTimeMillis: Int(end * 1000),
+                                languages: [label]
                             ))
                         }
                     } catch {
@@ -154,17 +207,150 @@ enum FileTranscription {
             }
 
             // 6. 喂文件
+            //
+            // 有预处理时改走流式输入：`start(inputAudioFile:)` 一次把文件
+            // 交给 analyzer，我们插不进手；要过前级就得自己读文件、按块
+            // 处理后 yield 进 stream。块长取 4096 与实时 tap 一致，
+            // 让 AGC 的包络跟随行为与当时实时转录可比
             do {
-                try await analyzer.start(inputAudioFile: file, finishAfterFile: true)
+                if let preprocess {
+                    try await feedWithPreprocess(
+                        file: file, into: analyzer,
+                        targetFormat: format, preprocess: preprocess
+                    )
+                } else {
+                    try await analyzer.start(inputAudioFile: file, finishAfterFile: true)
+                }
             } catch {
                 print("❌ 转录失败: \(error.localizedDescription)")
             }
 
             await group.waitForAll()
         }
-
         print("──────────────────────────────────")
         print("完成")
+    }
+
+    // MARK: - 带预处理的文件输入
+
+    /// 把文件读成块、过一遍软件增益、再喂给 analyzer。
+    ///
+    /// 为什么不用 `analyzer.start(inputAudioFile:)`：那个入口把文件一次性
+    /// 交给框架，中间插不进任何处理。重转要补 AGC（存档是未加增益的原始
+    /// 电平），所以只能自己读、自己处理、自己 yield。
+    ///
+    /// 格式链路（每一段都有实测依据）：
+    ///   存档 1ch/48kHz/Int16
+    ///   → 转成 Float32（`AudioPreamp` 只吃 Float32，它的 tanh 软限幅
+    ///     和包络计算都按 [-1,1] 的浮点做的）
+    ///   → 过 AudioPreamp（按 4096 帧一块，和实时 tap 的块长一致）
+    ///   → 转成 analyzer 要的格式（可能是 16kHz Int16）
+    ///   → yield
+    ///
+    /// **不过高通**：存档已经过一次 80Hz 高通了（见 TranscriptionEngine
+    /// 的 MicTap.handle，存档卡在高通之后、增益之前），再滤一遍会在
+    /// 80Hz 处衰减 6dB 而不是 3dB
+    private static func feedWithPreprocess(
+        file: AVAudioFile,
+        into analyzer: SpeechAnalyzer,
+        targetFormat: AVAudioFormat,
+        preprocess: Preprocess
+    ) async throws {
+        let sourceFormat = file.processingFormat
+
+        // 存档是 Int16，先转成前级要的 Float32 单声道
+        guard let floatFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: sourceFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            print("❌ 无法构建 Float32 单声道格式")
+            return
+        }
+
+        guard let toFloat = AVAudioConverter(from: sourceFormat, to: floatFormat),
+              let toTarget = AVAudioConverter(from: floatFormat, to: targetFormat) else {
+            print("❌ 无法创建转换器")
+            return
+        }
+
+        // 每段新转都要 reset：AGC 的包络和增益是跟着这一路信号收敛出来的，
+        // 跨文件复用会把上一条录音末尾的增益当成这条的起点
+        let preamp = AudioPreamp(mode: preprocess.gainMode)
+        preamp.reset()
+
+        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+        let feeder = Task {
+            defer { continuation.finish() }
+
+            var gainSum = 0.0
+            var gainSamples = 0
+
+            while true {
+                guard let raw = AVAudioPCMBuffer(
+                    pcmFormat: sourceFormat,
+                    frameCapacity: preprocess.blockFrames
+                ) else { break }
+
+                do {
+                    try file.read(into: raw, frameCount: preprocess.blockFrames)
+                } catch {
+                    print("⚠️ 读取中断: \(error.localizedDescription)")
+                    break
+                }
+                guard raw.frameLength > 0 else { break }
+
+                guard let floats = convertBuffer(raw, using: toFloat, to: floatFormat) else { continue }
+
+                // 过前级（原地改 floats 的内容）
+                let gain = preamp.process(floats)
+                gainSum += Double(gain)
+                gainSamples += 1
+
+                guard let out = convertBuffer(floats, using: toTarget, to: targetFormat) else { continue }
+                continuation.yield(AnalyzerInput(buffer: out))
+            }
+
+            // 平均增益报出来：重转到底有没有被放大，是这次操作最该被
+            // 确认的一件事（不报的话，用户只能靠转录质量反推）
+            if gainSamples > 0 {
+                let average = gainSum / Double(gainSamples)
+                print(String(format: "🎛  重转前级：%d 块 · 平均增益 %.2f×（%+.1f dB）",
+                             gainSamples, average, 20 * log10(max(average, 0.0001))))
+            }
+        }
+
+        try await analyzer.start(inputSequence: stream)
+        await feeder.value
+    }
+
+    /// 用 AVAudioConverter 转一块缓冲。输出每块新分配——
+    /// 复用同一块会让已经被 yield 出去的缓冲被下一块覆盖
+    private static func convertBuffer(
+        _ buffer: AVAudioPCMBuffer,
+        using converter: AVAudioConverter,
+        to format: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let ratio = format.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+        guard let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            return nil
+        }
+
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: output, error: &error) { _, outStatus in
+            if supplied {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, error == nil, output.frameLength > 0 else { return nil }
+        return output
     }
 
     /// 该语言在没指定地区时优先选用的地区。

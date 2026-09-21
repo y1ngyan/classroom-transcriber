@@ -65,13 +65,13 @@ struct RecordingsView: View {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.xl) {
-                        ForEach(groupedSummaries, id: \.0) { group in
-                            dayGroup(title: group.0, items: group.1)
+                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
+                        ForEach(courseGroups, id: \.0) { group in
+                            courseGroup(name: group.0, sessions: group.1)
                         }
                     }
                     .padding(.horizontal, Theme.pagePadding)
-                    .padding(.top, Theme.Spacing.md)
+                    .padding(.top, Theme.Spacing.lg)
                     .padding(.bottom, Theme.Spacing.xxl)
                 }
             }
@@ -107,20 +107,62 @@ struct RecordingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 按天分组的会话。同一天的归一组，组内新的在前。
+    /// 两级分组：先按课程，课程内再按天。
     ///
-    /// 分组键用 `dayKey`（稳定的 yyyy-MM-dd），显示用 `groupTitle`
-    /// （今天/昨天/9月20日）——两者刻意分开：键要稳定才能正确分组，
-    /// 标题要跟着日历走（今天录的，明天就该显示成「昨天」）
-    private var groupedSummaries: [(String, [SessionSummary])] {
-        let grouped = Dictionary(grouping: store.summaries) { $0.dayKey }
-        return grouped
-            .map { ($0.value.first?.groupTitle ?? $0.key, $0.value.sorted { $0.startedAt > $1.startedAt }) }
+    /// 为什么是「课程 → 天」而不是「天 → 课程」：用户找一条录音时想的是
+    /// 「那节机器学习课」，课程是第一位的检索维度；日期是课程内部的次级
+    /// 定位。反过来（天在上）会把同一门课打散在几十个日期组里，等于没有
+    /// 分类。未分类排在最后——它是兜底组，不该压在有归属的内容前面
+    private var courseGroups: [(String, [SessionSummary])] {
+        let byCourse = Dictionary(grouping: store.summaries) { $0.displayCourse }
+        return byCourse
+            .map { (name: $0.key, sessions: $0.value.sorted { $0.startedAt > $1.startedAt }) }
             .sorted { lhs, rhs in
-                // 用组内第一条（最新）的时间排组，不用标题字符串——
-                // 「今天」「昨天」「9月20日」按字典序排是乱的
-                (lhs.1.first?.startedAt ?? .distantPast) > (rhs.1.first?.startedAt ?? .distantPast)
+                // 未分类永远最后
+                let lIsOther = lhs.name == "未分类"
+                let rIsOther = rhs.name == "未分类"
+                if lIsOther != rIsOther { return rIsOther }
+                // 其余按组内最新时间倒序——最近在用的课排前面
+                let l = lhs.sessions.first?.startedAt ?? .distantPast
+                let r = rhs.sessions.first?.startedAt ?? .distantPast
+                return l > r
             }
+    }
+
+    /// 课程内按天分组
+    private func daysWithin(_ sessions: [SessionSummary]) -> [(String, [SessionSummary])] {
+        let byDay = Dictionary(grouping: sessions) { $0.dayKey }
+        return byDay
+            .map { (title: $0.value.first?.groupTitle ?? $0.key,
+                     sessions: $0.value.sorted { $0.startedAt > $1.startedAt }) }
+            .sorted { lhs, rhs in
+                let l = lhs.sessions.first?.startedAt ?? .distantPast
+                let r = rhs.sessions.first?.startedAt ?? .distantPast
+                return l > r
+            }
+    }
+
+    private func courseGroup(name: String, sessions: [SessionSummary]) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            // 课程名用 body 字号 + 主色，比日期组标题（caption + 次级色）
+            // 高一级：两级标题必须能一眼分出层级，同一档字号会读成平级
+            HStack(spacing: Theme.Spacing.sm) {
+                Text(name)
+                    .textStyle(Theme.Text.body)
+                    .foregroundStyle(Theme.textPrimary)
+                Text("\(sessions.count)")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                ForEach(daysWithin(sessions), id: \.0) { day in
+                    dayGroup(title: day.0, items: day.1)
+                }
+            }
+            // 课程内部缩进一档，让两级归属在视觉上成立
+            .padding(.leading, Theme.Spacing.md)
+        }
     }
 
     private func dayGroup(title: String, items: [SessionSummary]) -> some View {
@@ -157,9 +199,20 @@ private struct RecordingRow: View {
         Button(action: onOpen) {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
-                    Text(summary.formattedTime)
+                    // 显示名：用户起过就用它，没起过回落成时间。
+                    // title 为空时才另外补一个时间——否则「9月21日 11:12」
+                    // 会被显示两次
+                    Text(summary.displayTitle)
                         .textStyle(Theme.Text.body)
                         .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+
+                    if !summary.title.isEmpty {
+                        Text(summary.formattedTime)
+                            .textStyle(Theme.Text.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textSecondary)
+                    }
 
                     Text(summary.formattedDuration)
                         .textStyle(Theme.Text.caption)

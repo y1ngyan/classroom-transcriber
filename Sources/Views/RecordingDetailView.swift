@@ -12,7 +12,11 @@ struct RecordingDetailView: View {
     let session: RecordingSession
     let onBack: () -> Void
 
-    @State private var isRevealingAudio = false
+    @State private var isRenaming = false
+    @State private var isSettingCourse = false
+    @State private var isConfirmingRetranscribe = false
+    @State private var draftTitle = ""
+    @State private var draftCourse = ""
 
     private var store: RecordingsStore { appState.recordings }
 
@@ -23,6 +27,53 @@ struct RecordingDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .sheet(isPresented: $isRenaming) { renameSheet }
+        .sheet(isPresented: $isSettingCourse) { courseSheet }
+        .confirmationDialog(
+            "重新转录这条录音？",
+            isPresented: $isConfirmingRetranscribe,
+            titleVisibility: .visible
+        ) {
+            Button("重新转录", role: .destructive) {
+                for part in session.parts {
+                    Task {
+                        await store.retranscribe(sessionID: session.id, partID: part.id)
+                    }
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("会用新的识别结果替换现有的 \(session.segmentCount) 段转录内容。这个过程不可撤销，耗时较长。")
+        }
+    }
+
+    // MARK: - 改名 / 课程弹窗
+
+    private var renameSheet: some View {
+        EditSheet(
+            title: "重命名",
+            hint: "留空则恢复显示日期",
+            placeholder: "这条录音叫什么",
+            text: $draftTitle
+        ) {
+            store.rename(id: session.id, to: draftTitle)
+            isRenaming = false
+        } onCancel: { isRenaming = false }
+        .onAppear { draftTitle = session.title }
+    }
+
+    private var courseSheet: some View {
+        EditSheet(
+            title: "设置课程",
+            hint: "同课程的录音会归到一组；留空为未分类",
+            placeholder: "课程名",
+            text: $draftCourse,
+            suggestions: store.knownCourses
+        ) {
+            store.setCourse(id: session.id, to: draftCourse)
+            isSettingCourse = false
+        } onCancel: { isSettingCourse = false }
+        .onAppear { draftCourse = session.course }
     }
 
     // MARK: - 标题区
@@ -75,21 +126,52 @@ struct RecordingDetailView: View {
         .overlay(alignment: .bottom) { Separator() }
     }
 
-    /// 操作行：一个 PillButton（主操作）+ 文字链接（次要操作）
+    /// 操作行：一个 PillButton（主操作）+ 文字链接（次要操作）。
+    /// 设计规范要求一行只放一个 PillButton，所以改名和课程退化成文字链接
     private var actionRow: some View {
-        HStack(spacing: Theme.Spacing.md) {
-            // 主操作：把这条录音的音频文件在 Finder 里显示出来。
-            // 比「重新转录」更该占主位——重转要先想清楚用途，而
-            // 「这条录音在哪」是马上能用的
-            PillButton(title: "在访达中显示") {
-                revealAudio()
-            }
-            .disabled(session.audioFileURL == nil)
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(spacing: Theme.Spacing.lg) {
+                PillButton(title: "在访达中显示", action: revealAudio)
+                    .disabled(session.audioFileURL == nil)
 
-            if session.parts.count > 1 {
-                Text("由 \(session.parts.count) 段录音拼接")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                Button { isRenaming = true } label: {
+                    Text("重命名").textStyle(Theme.Text.caption).foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+
+                Button { isSettingCourse = true } label: {
+                    Text("设置课程").textStyle(Theme.Text.caption).foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+
+                // 重转：覆盖式操作，先确认再跑
+                Button { isConfirmingRetranscribe = true } label: {
+                    Text("重新转录").textStyle(Theme.Text.caption)
+                        .foregroundStyle(store.isRetranscribing ? Theme.textTertiary : Theme.accent)
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isRetranscribing || session.parts.allSatisfy { $0.fileName == nil })
+
+                Spacer()
+            }
+
+            // 重转进行中：一条几十分钟的录音要跑很久，不给状态用户会
+            // 以为卡死了，进而去点别的地方把界面搞乱
+            if store.isRetranscribing {
+                HStack(spacing: Theme.Spacing.sm) {
+                    ProgressView().controlSize(.small)
+                    Text("\(store.retranscribeProgress)请勿关闭窗口")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
+            }
+
+            if !session.course.isEmpty {
+                HStack(spacing: Theme.Spacing.xs) {
+                    Image(systemName: "folder").font(.system(size: 10))
+                    Text(session.course).textStyle(Theme.Text.caption)
+                }
+                .foregroundStyle(Theme.textSecondary)
             }
         }
     }

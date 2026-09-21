@@ -117,6 +117,142 @@ final class RecordingsStore {
         persistIndex()
     }
 
+    // MARK: - 改名 / 课程
+
+    /// 改名。空串表示恢复成「没起过名」（列表回落到显示时间）——
+    /// 用户把名字清空就是在表达「别给我起名」，不是想显示一个空行
+    func rename(id: UUID, to title: String) {
+        guard var session = session(id: id) else { return }
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean != session.title else { return }
+        session.title = clean
+        session.updatedAt = Date()
+        save(session)
+    }
+
+    /// 设置课程。空串 = 未分类
+    func setCourse(id: UUID, to course: String) {
+        guard var session = session(id: id) else { return }
+        let clean = course.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean != session.course else { return }
+        session.course = clean
+        session.updatedAt = Date()
+        save(session)
+    }
+
+    /// 已有课程名，按出现次数从多到少。给「设置课程」的下拉候选，
+    /// 让用户复用已有课程名而不是每次手打——手打早晚会出现
+    /// 「机器学习」和「机器学习 」两个组
+    var knownCourses: [String] {
+        var counts: [String: Int] = [:]
+        for summary in summaries where !summary.course.isEmpty {
+            counts[summary.course, default: 0] += 1
+        }
+        return counts.sorted { lhs, rhs in
+            lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+        }.map(\.key)
+    }
+
+    // MARK: - 重新转录
+
+    /// 重转的进行状态。UI 要显示「正在重转第 N 段」——
+    /// 一条几十分钟的录音要跑很久，没有进度用户会以为卡死了
+    private(set) var retranscribing: UUID?
+    private(set) var retranscribeProgress = ""
+
+    var isRetranscribing: Bool { retranscribing != nil }
+
+    /// 重新转录某条会话的某个片段，用新的结果替换该片段原有的 segments。
+    ///
+    /// **默认不过 AGC**（`gainMode: nil`）：同一条录音的对照实测显示，
+    /// 补 AGC 后平均置信度反而从 0.684 降到 0.619——AGC 是逐帧变速增益，
+    /// 给识别器引入了时不变的原始音频所没有的时变特性。详见
+    /// `FileTranscription.Preprocess` 的注释。
+    ///
+    /// 覆盖是不可逆的：原 segments 上可能已经有用户看过的内容，所以
+    /// UI 层必须先确认再调这里
+    func retranscribe(
+        sessionID: UUID,
+        partID: UUID,
+        locales: [String] = ["zh-CN"],
+        gainMode: MicGainMode? = nil
+    ) async {
+        guard retranscribing == nil else { return }
+        guard var session = session(id: sessionID),
+              let partIndex = session.parts.firstIndex(where: { $0.id == partID }),
+              let fileName = session.parts[partIndex].fileName
+        else {
+            statusMessage = "❌ 找不到要重转的片段"
+            return
+        }
+
+        let url = recordingsDirectory.appendingPathComponent(fileName)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            statusMessage = "❌ 音频文件不存在：\(fileName)"
+            return
+        }
+
+        retranscribing = partID
+        retranscribeProgress = "正在重转 \(fileName)…"
+        defer {
+            retranscribing = nil
+            retranscribeProgress = ""
+        }
+
+        // 收集结果。sink 在 analyzer 的消费任务里被调用，所以用锁保护——
+        // 那条任务不在主 actor 上
+        let collected = Collector()
+        let preprocess = gainMode.map { FileTranscription.Preprocess(gainMode: $0) }
+
+        await FileTranscription.run(
+            path: url.path,
+            locales: locales,
+            presetChoice: .timeIndexed,
+            preprocess: preprocess,
+            sink: { segment in collected.append(segment) }
+        )
+
+        let fresh = collected.snapshot()
+        guard !fresh.isEmpty else {
+            statusMessage = "⚠️ 重转没有产出内容，保留原有转录"
+            return
+        }
+
+        // 重转出来的段要补上质量分档和提问标记：这两件事在实时链路里
+        // 是定稿时做的（见 TranscriptionEngine.upsert），文件路径没有
+        // 那个环节，不补的话重转完质量标记会整片消失
+        var enriched = fresh
+        let detector = QuestionDetector(sensitivity: .normal)
+        for i in enriched.indices {
+            if let hit = detector.detect(enriched[i].text) {
+                enriched[i].questionLevel = hit.level
+                enriched[i].coreQuestion = hit.coreQuestion
+            }
+        }
+
+        session.parts[partIndex].segments = enriched
+        session.updatedAt = Date()
+        save(session)
+        statusMessage = "✅ 已重转 \(fileName)：\(fresh.count) 段"
+    }
+
+    /// 跨线程收集重转结果。FileTranscription 的 sink 在它的消费任务里
+    /// 被调用，不在主 actor 上，所以要自己加锁
+    private final class Collector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [TranscriptSegment] = []
+
+        func append(_ segment: TranscriptSegment) {
+            lock.lock(); defer { lock.unlock() }
+            items.append(segment)
+        }
+
+        func snapshot() -> [TranscriptSegment] {
+            lock.lock(); defer { lock.unlock() }
+            return items
+        }
+    }
+
     // MARK: - 删除
 
     /// 删除会话记录，**保留 wav**。

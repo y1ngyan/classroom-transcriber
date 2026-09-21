@@ -137,6 +137,9 @@ final class AudioPreamp {
     private var agcLevel: Float = AudioPreamp.initialFloor
     private var agcGain: Float = 1
     private var floorEstimate: Float = AudioPreamp.initialFloor
+    /// 开局采样：前若干帧的最低电平，用来自举底噪基线
+    private var primingFrames: [Float] = []
+    private var didPrime = false
 
     init(mode: MicGainMode = .auto) {
         self.mode = mode
@@ -173,6 +176,8 @@ final class AudioPreamp {
         agcLevel = Self.initialFloor
         agcGain = 1
         floorEstimate = Self.initialFloor
+        primingFrames.removeAll(keepingCapacity: true)
+        didPrime = false
     }
 
     /// 当前 AGC 增益。读数用，不参与处理。
@@ -186,6 +191,38 @@ final class AudioPreamp {
             sumSq += v * v
         }
         let rms = count > 0 ? Float((sumSq / Double(count)).squareRoot()) : 0
+
+        // 1b) 开局自举底噪基线。
+        //
+        // 为什么需要：`initialFloor` 是写死的 0.005，而它是按「正常麦克风」
+        // 假设的。实测一条极低电平录音（底噪 0.002、语音 0.0035）时，
+        // 基线要从 0.005 慢慢降下来（floorDown 每帧 5%），**开局 7 秒
+        // 内增益一直钉在 1.0**——课堂录音的前 7 秒完全没有被放大，而
+        // 平均增益还被这 7 秒拉低到 7.67×（7 秒之后实际在 9~28× 工作，
+        // 那才是有效区间）。
+        //
+        // 自举取的是前若干帧里的低分位而不是均值：均值会被开头的说话声
+        // 拉高，而低分位贴近真实底噪。取不到那么多帧（短录音）时就按
+        // 现有帧算，退化成「一开始就用实测值」，仍比写死好
+        if !didPrime {
+            primingFrames.append(rms)
+            if primingFrames.count >= Self.primingFrameCount {
+                let sorted = primingFrames.sorted()
+                let low = sorted[max(0, Int(Double(sorted.count) * Self.primingQuantile))]
+                // 自举值不大于写死的初值：比它高说明房间比假设的吵，
+                // 那种情况宁可保守（沿用初值，靠慢跟踪慢慢跟上），
+                // 也不该一开口就认定底噪很高、把语音一起门掉
+                floorEstimate = min(Self.initialFloor, max(low, Self.floorFloor))
+                agcLevel = floorEstimate
+                didPrime = true
+            } else {
+                // 自举没完成前不动增益：这几帧（约 0.2 秒）宁可原样通过。
+                // 用错的基线去放大，开头就会爆一下
+                agcGain = 1
+                applyGain(samples, count: count, gain: 1)
+                return 1
+            }
+        }
 
         // 2) 底噪基线：向下快、向上极慢。向上慢是关键——持续语音不能
         //    被慢慢吸收成「底噪」再被门限反杀（理由见类型注释）
@@ -230,6 +267,17 @@ final class AudioPreamp {
     }
 
     // MARK: - 参数
+
+    /// 开局自举底噪基线用的帧数。经验值：0.2 秒（约 2.4 帧）太短，
+    /// 一次意外静音就把基线拉到接近零；3 帧能覆盖约 0.25 秒，足够躲开
+    /// 单个静音误判又不拖慢开录。这里按块数算，一个块 4096 帧 @48kHz
+    /// 是 85ms，3 块约 0.25 秒
+    private static let primingFrameCount = 3
+    /// 自举取的分位。取低分位贴近底噪——均值会被开头的说话声拉高
+    private static let primingQuantile = 0.5
+    /// 自举值的下限。防一段「绝对静音」的开局把基线拉成 0，
+    /// 那会让判据变成除零、增益直接顶到上限
+    private static let floorFloor: Float = 0.0005
 
     /// 底噪基线与包络的初值。取旧固定门限 0.005：比它低的真实底噪几秒内
     /// 被向下跟踪跟上，比它吵的房间靠向上慢跟踪十几分钟跟上——开局宁可
