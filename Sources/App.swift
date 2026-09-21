@@ -270,6 +270,16 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头 Whisper 引擎自检：--whisper-selftest
+        // （纯本地：繁简转换 + 概率聚合纯函数 + 缺模型分支；
+        //   不跑推理、不发网络请求、不需要麦克风、不依赖已下载的模型）
+        if CommandLine.arguments.contains("--whisper-selftest") {
+            for line in WhisperEngine.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 无头语义切分自检：--split-selftest（纯函数，不依赖任何设备）
         if CommandLine.arguments.contains("--split-selftest") {
             for line in TranscriptSplitter.selfTest() {

@@ -19,6 +19,34 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 SOURCES=$(find Sources -name '*.swift' | sort)
 
+# ---- Whisper（本地语音识别）----
+#
+# 用 brew 装的 whisper.cpp 动态库。链接它要三样东西：
+#   1. module map：让 Swift 能 `import whisper`（whisper.h 是纯 C API）
+#   2. -I：whisper.h 和它依赖的 ggml.h 的路径（ggml.h 在 /opt/homebrew/include）
+#   3. -L/-l：libwhisper 和 ggml 系列
+#
+# 路径写死 brew 的前缀（/opt/homebrew）而不是调 `brew --prefix`：
+# 构建脚本每次都要跑，起子进程查前缀会明显拖慢构建，而 brew 的默认
+# 前缀是稳定的。Intel Mac 上前缀不同，那台机器需要改这里
+WHISPER_PREFIX="/opt/homebrew"
+WHISPER_INC="$WHISPER_PREFIX/Cellar/whisper.cpp/1.9.4/include"
+MODULEMAP="$BUILD_DIR/whisper.modulemap"
+
+mkdir -p "$BUILD_DIR"
+cat > "$MODULEMAP" <<MAP
+module whisper [system] {
+    header "$WHISPER_INC/whisper.h"
+    link "whisper"
+    export *
+}
+MAP
+
+if [ ! -f "$WHISPER_INC/whisper.h" ]; then
+  echo "⚠️  找不到 whisper.h（$WHISPER_INC）"
+  echo "   本地 Whisper 功能将不可用。安装：brew install whisper-cpp"
+fi
+
 swiftc \
   -sdk "$SDK_PATH" \
   -target "$TARGET" \
@@ -28,6 +56,11 @@ swiftc \
   -framework SwiftUI \
   -framework Speech \
   -framework AVFoundation \
+  -Xcc -fmodule-map-file="$MODULEMAP" \
+  -I "$WHISPER_INC" \
+  -I "$WHISPER_PREFIX/include" \
+  -L "$WHISPER_PREFIX/lib" -lwhisper -lggml -lggml-base \
+  -Xlinker -rpath -Xlinker "$WHISPER_PREFIX/lib" \
   $SOURCES \
   -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 
