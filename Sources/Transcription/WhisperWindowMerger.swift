@@ -5,6 +5,13 @@ struct WhisperWindow {
     let startMillis: Int
     let endMillis: Int
     let segments: [WhisperSegment]
+
+    /// 本窗覆盖的时长。第一趟匹配的时间上界用它（见 `merge` 策略 3 第一条）。
+    ///
+    /// ⚠️ 接线时必须把 `endMillis` 填成 `startMillis + 窗口时长`（不是最后一个
+    /// segment 的结束时间）。填 0 或与 startMillis 相等会让上界退化成 0，
+    /// 第一趟就只在时间零间隔时才生效——合并率会莫名下降，且不报任何错。
+    var durationMillis: Int { max(0, endMillis - startMillis) }
 }
 
 /// 合并器的输入。调用方负责维护 `previousTail` 和 `previousWindowStartMillis`，
@@ -41,8 +48,13 @@ enum WhisperWindowMerger {
     /// 1. 窗口内 segment 的时间戳 = window.startMillis + segment.startMillis。
     /// 2. 只在 `existing` 的最后 `scanBackLimit` 段里找匹配——随会话变长不能变慢。
     /// 3. 匹配分三档（复用 `TranscriptionEngine.textRelation`）：
-    ///    - `.same(≥6 字)`：直接认为是同一段的 refine，**不看时间**——
-    ///      Whisper 换窗后同一句的时间戳会整体平移，固定时间窗框不住；
+    ///    - `.same(≥6 字)`：认为是同一段的 refine，**不看时间**，但有一个上界：
+    ///      候选与已有段的时间间隔必须 ≤ 一个窗口时长（`WhisperWindow.durationMillis`）。
+    ///      不看时间，是因为 Whisper 换窗后同一句的时间戳会整体平移；设上界，是因为
+    ///      这一趟会**连文本带时间戳一起改写**已有段，而老师隔半分钟重复一句口头禅
+    ///      是课堂常态——没有上界就会把旧段的文本和时间戳搬到当前时刻（时间线被
+    ///      破坏，那次重复也没留下自己的段）。上界取一个窗口时长：这一趟补偿的
+    ///      本来就是「同一句在相邻窗口之间的抖动」，量级在一个窗口以内，不是分钟级。
     ///    - `.similar`：且时间重叠或相邻（candidate.start 与 existing.end 相差
     ///      ≤ 1 秒）时认为是同一段。1 秒而不是 Apple 那条链路的 4000ms：
     ///      这里只用来盖住「同一句被重识别时的时间戳抖动」，不需要那么宽。
@@ -50,21 +62,30 @@ enum WhisperWindowMerger {
     ///      避免同一时间出现两段不同文本。
     /// 4. 稳定性判据：一段 segment 在 `previousTail` 里存在，且本窗在重叠区
     ///    给出 `.same(≥6 字)` 的文本，才标记为 `isFinal = true`。
-    ///    这回答的是「这句话还会不会被改」，不依赖固定时间边界。
-    /// 5. 未匹配到的 segment 新建，初始 isFinal=false。
+    /// 5. 补定稿：候选循环之后，`endTimeMillis <= window.startMillis + stepMillis`
+    ///    且未定稿的段一律定稿。下一窗的起点正是 `window.startMillis + stepMillis`、
+    ///    之后的窗口只会更晚，所以这些段再也无法与任何候选**按时间重叠**，也就
+    ///    永远过不了第 4 条（它要求候选落在 `previousTail` 里，而 `pendingTail`
+    ///    的判据是 `endMillis > stepMillis`）。它缺的是判据，不是「没人能改它」——
+    ///    第 3 条第一趟仍可按文本改写它。
+    ///    第 4、5 条互补：**还能再被覆盖的靠两窗一致定稿，再也覆盖不到的靠这条定稿**，
+    ///    合起来的不变式是「每一段最终都会定稿」（窗口起点每步递增，任何一段的
+    ///    结束时间迟早落进阈值）。少了第 5 条，滑出覆盖范围的段会永久停在临时，
+    ///    而下游的核查、质量档位都挂在定稿上，这些段就永远拿不到。
+    ///    ⚠️ 这条不变式的**前提是 `stepMillis > 0`**（调用方按步长推进窗口起点）。
+    ///    `stepMillis <= 0` 时阈值不前移，`endTimeMillis > window.startMillis` 的段
+    ///    会永久停在临时——2026-09-21 核验时用 `stepMillis = 0` 实测确认过。
+    ///    调用方接线时要保证步长为正。
+    /// 6. 未匹配到的 segment 新建，初始 isFinal=false。
     ///
-    /// **已知缺口（2026-09-21 探针实测，本轮未改，等接线时裁决）**：
-    /// - 一个段落若结束在「本窗起点 + 步长」之前，之后的窗口只会从更晚的位置
-    ///   开始，永远不会再覆盖它；如果它当时没能通过稳定性判据，就会**永久停在
-    ///   临时**（下游的核查、质量档位都挂在定稿上，等于这些段拿不到）。
-    ///   实测：W0 的段 [0,3000] 之后连过 3 个窗口仍是 final=false。
-    /// - 反过来，已定稿段的文本**仍可能被后续窗口改写**：第一趟 `.same(≥6)` 不
-    ///   区分是否已定稿，改写后 isFinal 保持 true、也不会再触发一次定稿事件，
-    ///   于是「已送去核查的文本」和「界面上显示的文本」可能不一致。
-    ///   实测：定稿段「今天我们讲梯度下降」被下一窗改写成「…算法」，id 不变、
-    ///   final 保持 true、changes 里只有「刷新」。
-    /// 两条都取决于 isFinal 打算对外承诺什么语义（「两窗一致」还是「不再改写」），
-    /// 是接线前要定的契约，不是这里的逻辑错。
+    /// **`isFinal` 的语义（弱语义，2026-09-21 裁决）**：它承诺的是「已被两个窗口
+    /// 独立确认，或已不可能再被按时间重叠覆盖」，**不是「文本从此不再改变」**——
+    /// 已定稿段仍可能被后续窗口按第 3 条第一趟改写文本与时间戳（这种改写不回退
+    /// isFinal，也不会再报一次定稿）。
+    /// 为什么不承诺冻结：要冻结就得处理「候选与已定稿段文本相同（≥6 字）但时间
+    /// 零重叠」这一大类，而那只能靠「丢弃候选」——在课堂场景里丢弃就是丢内容
+    /// （老师重复口头禅是常态），代价大于「定稿后被精修几个字」。
+    /// 下游按 isFinal 触发一次性动作（比如送核查）时要按这个语义理解。
     static func merge(
         _ input: WhisperMergeInput,
         scanBackLimit: Int = 5
@@ -101,7 +122,8 @@ enum WhisperWindowMerger {
             if let index = matchIndex(
                 in: segments,
                 candidate: candidate,
-                scanBackLimit: scanBackLimit
+                scanBackLimit: scanBackLimit,
+                windowDurationMillis: input.window.durationMillis
             ) {
                 let shouldStabilize = !segments[index].isFinal
                     && isStable(candidate: candidate, previousTail: previousTailGlobal)
@@ -112,7 +134,7 @@ enum WhisperWindowMerger {
 
                 if shouldStabilize {
                     segments[index].isFinal = true
-                    changes.append("落定：\(candidate.text.prefix(30))")
+                    changes.append("落定（两窗一致）：\(candidate.text.prefix(30))")
                 } else {
                     changes.append("刷新：\(candidate.text.prefix(30))")
                 }
@@ -120,6 +142,18 @@ enum WhisperWindowMerger {
                 segments.append(candidate)
                 changes.append("新增：\(candidate.text.prefix(30))")
             }
+        }
+
+        // 补定稿：滑出「还能被覆盖」的范围的段，从此不会再有任何窗口按时间重叠
+        // 碰到它，稳定性判据（第 4 条）对它永远为假。判据见上面策略第 5 条。
+        //
+        // 注意范围是**全部** segments（不只后 scanBackLimit 段），且包含本窗刚
+        // 新建的段：新段若当窗就落在阈值以内，它同样永远等不到第二次确认。
+        let coverageEndMillis = input.window.startMillis + input.stepMillis
+        for index in segments.indices
+        where !segments[index].isFinal && segments[index].endTimeMillis <= coverageEndMillis {
+            segments[index].isFinal = true
+            changes.append("补定稿（滑出覆盖）：\(segments[index].text.prefix(30))")
         }
 
         return WhisperMergeResult(
@@ -134,15 +168,22 @@ enum WhisperWindowMerger {
     private static func matchIndex(
         in existing: [TranscriptSegment],
         candidate: TranscriptSegment,
-        scanBackLimit: Int
+        scanBackLimit: Int,
+        windowDurationMillis: Int
     ) -> Int? {
         guard !existing.isEmpty else { return nil }
         let lower = max(0, existing.count - scanBackLimit)
         let range = existing.indices.suffix(from: lower)
 
-        // 第一趟：same（≥6 字）。长文本撞车概率极低，不依赖时间窗——
-        // Whisper 不同窗口对同一句的重识别常落到相邻但不重叠的时间戳上。
+        // 第一趟：same（≥6 字）。长文本撞车概率极低，不看时间——Whisper 不同窗口
+        // 对同一句的重识别常落到相邻但不重叠的时间戳上。
+        //
+        // 但**必须有个上界**（2026-09-21 裁决）：这一趟会连文本带时间戳一起改写
+        // 已有段，而老师隔半分钟重复同一句是课堂常态；只要那段还在后 scanBackLimit
+        // 段里，就会被当成「同一句」，把旧段的文本和时间戳搬到当前时刻——时间线
+        // 损坏 + 那次重复没留下自己的段，比显示瑕疵严重。上界取一个窗口时长。
         for index in range.reversed() {
+            guard intervalGapMillis(existing[index], candidate) <= windowDurationMillis else { continue }
             if case .same(let shorter) = TranscriptionEngine.textRelation(existing[index].text, candidate.text),
                shorter >= 6 {
                 return index
@@ -179,6 +220,17 @@ enum WhisperWindowMerger {
         }
 
         return nil
+    }
+
+    /// 两段时间区间之间隔了多远（毫秒），重叠或相接算 0。
+    ///
+    /// 用「区间距离」而不是「起点之差」：同一句被重识别时段的长度会变，
+    /// 起点之差会把「长段被截短」（起点差大、实际紧挨着）误判成漂移很大。
+    private static func intervalGapMillis(
+        _ a: TranscriptSegment,
+        _ b: TranscriptSegment
+    ) -> Int {
+        max(0, max(a.startTimeMillis - b.endTimeMillis, b.startTimeMillis - a.endTimeMillis))
     }
 
     private static func isStable(
@@ -264,9 +316,12 @@ extension WhisperWindowMerger {
             pendingTail = r1.pendingTail
             previousStart = w1.startMillis
 
-            check("W1 产生两段且都临时",
-                  segments.count == 2 && !segments[0].isFinal && !segments[1].isFinal,
-                  "段数 \(segments.count)")
+            // 第二段 [3000,7000] 跨过阈值、后面还会被覆盖 → 仍临时；
+            // 第一段 [0,3000] 结束在阈值上（0 + 步长），此后没有任何窗口能按时间
+            // 重叠碰到它 → 当窗就补定稿（策略 5，2026-09-21 裁决）
+            check("W1：[0,3000] 已滑出可覆盖范围（补定稿），[3000,7000] 仍临时",
+                  segments.count == 2 && segments[0].isFinal && !segments[1].isFinal,
+                  "段数 \(segments.count) · final=\(segments[0].isFinal)/\(segments[1].isFinal)")
 
             // W2 [3000, 13000]：第一段修正，第二段 same
             let w2 = window(3_000, windowMillis, [
@@ -324,6 +379,9 @@ extension WhisperWindowMerger {
             check("W2 新增第二段", segments.count == 2, "段数 \(segments.count)")
             check("第一段连续两窗一致，已落定", segments[0].isFinal, "")
             check("第二段只出现一次，仍临时", !segments[1].isFinal, "")
+            check("这条定稿走的是稳定性判据（changes 里带自己的标签）",
+                  r.changes.contains { $0.hasPrefix("落定（两窗一致）") },
+                  r.changes.joined(separator: " / "))
 
             lines.append("  ── 用例 2 当前段表 ──")
             dump(segments)
@@ -616,6 +674,127 @@ extension WhisperWindowMerger {
             check("第三次再喂：仍是同一段（id 不变）、不翻回临时",
                   segments.count == 1 && segments[0].id == idAfterFirst && segments[0].isFinal,
                   "段数 \(segments.count) final=\(segments[0].isFinal)")
+        }
+
+        // MARK: 用例 10：补定稿的边界（闭区间）
+        //
+        // 阈值判据是 `endTimeMillis <= window.startMillis + stepMillis`（闭区间取到）。
+        // 这里的段都是本窗新建的：新段若当窗就落在阈值以内，它同样永远等不到
+        // 第二次确认（下一窗的起点正好在阈值上，覆盖不到它）——按策略 5 一并补定稿。
+        do {
+            let w = window(0, windowMillis, [
+                seg("刚好落在阈值上", 0, stepMillis),
+                seg("比阈值多一毫秒", stepMillis, stepMillis + 1),
+            ])
+            let r = merge(WhisperMergeInput(
+                existing: [],
+                window: w,
+                previousTail: [],
+                previousWindowStartMillis: 0,
+                stepMillis: stepMillis
+            ))
+            check("end == 窗口起点+步长：补定稿（闭区间取到）",
+                  r.segments[0].isFinal, "final=\(r.segments[0].isFinal)")
+            check("end 多 1 毫秒且没通过稳定性判据：不得定稿",
+                  !r.segments[1].isFinal, "final=\(r.segments[1].isFinal)")
+            check("补定稿在 changes 里有区别于稳定性落定的标签",
+                  r.changes.contains { $0.hasPrefix("补定稿（滑出覆盖）") },
+                  r.changes.joined(separator: " / "))
+        }
+
+        // MARK: 用例 11：第一趟上界之内——漂移仍按「同一句」处理
+        do {
+            // 已有段 [0,4000]，候选同文本落在 [9000,13000]：两段相隔 5000ms，
+            // 在一个窗口时长（10000）以内。这正是第一趟要补偿的「同一句的时间戳
+            // 整体平移」量级 → 仍合并成一段、时间戳跟到新位置。
+            let existing = [
+                TranscriptSegment(text: "它的核心思想是沿着负梯度方向迭代", isFinal: false,
+                                  startTimeMillis: 0, endTimeMillis: 4_000, languages: ["zh-CN"])
+            ]
+            let r = merge(WhisperMergeInput(
+                existing: existing,
+                window: window(9_000, windowMillis, [seg("它的核心思想是沿着负梯度方向迭代", 0, 4_000)]),
+                previousTail: [],
+                previousWindowStartMillis: 0,
+                stepMillis: stepMillis
+            ))
+            check("相隔 ≤ 一个窗口：仍按同一句合并，段数不增",
+                  r.segments.count == 1, "段数 \(r.segments.count)")
+            check("时间戳跟到新位置",
+                  r.segments[0].startTimeMillis == 9_000 && r.segments[0].endTimeMillis == 13_000,
+                  "\(r.segments[0].startTimeMillis)–\(r.segments[0].endTimeMillis)")
+        }
+
+        // MARK: 用例 12：第一趟上界之外——同一句远距离重复必须各自成段
+        do {
+            // 老师说过一次「大家理解我的意思吧」，18 秒后又重复一遍：两段相隔
+            // 14000ms > 一个窗口时长（10000）。第一趟不得认成同一句——认了就会
+            // 把旧段的文本和时间戳搬到当前时刻（时间线损坏，那次重复也没留下段）。
+            var pendingTail: [WhisperSegment] = []
+            var previousStart = 0
+            var segments: [TranscriptSegment] = []
+
+            var r = merge(WhisperMergeInput(
+                existing: segments,
+                window: window(0, windowMillis, [seg("大家理解我的意思吧", 0, 4_000)]),
+                previousTail: pendingTail, previousWindowStartMillis: previousStart,
+                stepMillis: stepMillis
+            ))
+            segments = r.segments; pendingTail = r.pendingTail; previousStart = 0
+            let oldText = segments[0].text
+            let oldRange = (segments[0].startTimeMillis, segments[0].endTimeMillis)
+
+            // 直接跳到 18 秒后的窗口：中间隔了 6 步，这条用例关心的是距离不是过程
+            r = merge(WhisperMergeInput(
+                existing: segments,
+                window: window(18_000, windowMillis, [seg("大家理解我的意思吧", 0, 4_000)]),
+                previousTail: pendingTail, previousWindowStartMillis: previousStart,
+                stepMillis: stepMillis
+            ))
+            segments = r.segments
+
+            check("相隔 > 一个窗口：新增一段（不并成一段）",
+                  segments.count == 2, "段数 \(segments.count)")
+            check("旧段文本原样不动",
+                  segments[0].text == oldText, segments[0].text)
+            check("旧段起止时间原样不动",
+                  segments[0].startTimeMillis == oldRange.0 && segments[0].endTimeMillis == oldRange.1,
+                  "\(segments[0].startTimeMillis)–\(segments[0].endTimeMillis)（期望 \(oldRange.0)–\(oldRange.1)）")
+        }
+
+        // MARK: 用例 13：不变式——滑过若干窗口后没有段永久停在临时
+        do {
+            var pendingTail: [WhisperSegment] = []
+            var previousStart = 0
+            var segments: [TranscriptSegment] = []
+
+            // 每窗吐同样的两句：长句跨过阈值（走稳定性判据），两段都落在可覆盖区
+            for k in 0..<3 {
+                let w = window(k * stepMillis, windowMillis, [
+                    seg("今天讲梯度下降算法", 0, 4_000),
+                    seg("它的核心思想是沿着负梯度方向迭代", 4_000, 8_000),
+                ])
+                let r = merge(WhisperMergeInput(
+                    existing: segments, window: w,
+                    previousTail: pendingTail, previousWindowStartMillis: previousStart,
+                    stepMillis: stepMillis
+                ))
+                segments = r.segments; pendingTail = r.pendingTail; previousStart = w.startMillis
+            }
+
+            // 再滑一个静音窗：让「最后一个窗口吐出的段」也滑出可覆盖范围
+            segments = merge(WhisperMergeInput(
+                existing: segments,
+                window: window(3 * stepMillis, windowMillis, []),
+                previousTail: pendingTail, previousWindowStartMillis: previousStart,
+                stepMillis: stepMillis
+            )).segments
+
+            let stuck = segments.filter { !$0.isFinal }
+            check("全部段都已定稿（没有永久停在临时的段）",
+                  stuck.isEmpty,
+                  "仍临时 \(stuck.count) 段：\(stuck.map(\.text).joined(separator: " / "))")
+            check("同一句反复出现不产生重复段", segments.count == 2, "段数 \(segments.count)")
         }
 
         lines.append(allPassed ? "✅ Whisper 滑窗合并自检通过" : "❌ Whisper 滑窗合并自检未通过")
