@@ -11,6 +11,7 @@ final class AppState {
     let notes = NotesStore()
     let attachments = AttachmentStore()
     let glossary = GlossaryStore()
+    let punctuation = PunctuationStore()
     let upload = UploadStore()
     let recordings = RecordingsStore()
     /// 放在这里而不是设置页的 `@State` 里：切走标签页再回来，视图会被

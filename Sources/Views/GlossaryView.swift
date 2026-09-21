@@ -4,12 +4,17 @@ struct GlossaryView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
-        GlossaryContent(store: appState.glossary, engine: appState.transcription)
+        GlossaryContent(
+            store: appState.glossary,
+            punctuation: appState.punctuation,
+            engine: appState.transcription
+        )
     }
 }
 
 private struct GlossaryContent: View {
     @Bindable var store: GlossaryStore
+    let punctuation: PunctuationStore
     let engine: TranscriptionEngine
 
     var body: some View {
@@ -18,6 +23,7 @@ private struct GlossaryContent: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
                 coursePreset
+                punctuationSection
                 if !store.candidates.isEmpty { candidatePanel }
                 if store.hasPending { diffPanel }
                 correctionList
@@ -141,6 +147,50 @@ private struct GlossaryContent: View {
                 }
 
                 Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: - LLM 补标点
+
+    private var punctuationSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            Separator()
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                Text("LLM 补标点")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textPrimary)
+
+                Text("识别引擎原生不产出标点，长段转录是一整坨无标点文字。这一步把整场转录发给 "
+                     + "DeepSeek 补标点，每段返回都要过校验——剥掉标点后必须和原文逐字一致才落地，"
+                     + "不一致的段保持原文。要联网，只在你点按钮时跑；补过标点的段落，展示时会"
+                     + "严格按标点断句。")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: Theme.Spacing.sm) {
+                PillButton(
+                    title: punctuation.isRunning ? "补标点中…" : "补标点",
+                    systemImage: "text.quote",
+                    isLoading: punctuation.isRunning,
+                    isEnabled: punctuation.isConfigured && !engine.segments.isEmpty
+                ) {
+                    Task { await punctuation.run(on: engine) }
+                }
+
+                Spacer()
+            }
+
+            if !punctuation.statusMessage.isEmpty {
+                Text(punctuation.statusMessage)
+                    .font(.system(size: Theme.Text.caption.size, design: .monospaced))
+                    .foregroundStyle(punctuation.statusMessage.hasPrefix("❌")
+                        ? Theme.error : Theme.textSecondary)
+                    .textSelection(.enabled)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -115,7 +115,64 @@ enum TranscriptSplitter {
             || c == "," || c == ";" || c == ":" || c == "." || c == "!" || c == "?"
     }
 
+    /// **标点优先：带标点的文本只按标点切。**
+    ///
+    /// 语气词/确认式短语/话语标记那套启发式，是为「整段完全无标点」的
+    /// 原始识别输出兜底的（SpeechTranscriber 原生不出标点）。一旦文本
+    /// 带了标点——LLM 补过的（PunctuationService），或识别器偶尔给的——
+    /// 标点本身就是语义边界，而且是比启发式可靠得多的边界；这时候再叠
+    /// 一层语气词规则只会把完整的句子切碎（「这个公式对吧是怎么推导
+    /// 出来的」会被确认式短语从句子中间砍开）。
+    ///
+    /// 判定用「有没有真标点」而不是「有没有标点切点」：末尾的句号
+    /// 不产生切点（后面没字符了），但它依然说明这段文本带标点——
+    /// 若按切点有无来判，只有末尾一个句号的句子会被错交给启发式。
+    /// 半角标点要求后面跟空白或文末才算数（「3.14」「10:30」不算），
+    /// 所以一段只含「3.14」的无标点文本照样走启发式，不会被堵死兜底路。
     private static func candidates(in chars: [Character]) -> [Candidate] {
+        guard hasPunctuation(chars) else { return heuristicCandidates(in: chars) }
+        return punctuationCandidates(in: chars)
+    }
+
+    /// 文本是否带「真标点」。全角直接算；半角的判定规则和切点一致
+    private static func hasPunctuation(_ chars: [Character]) -> Bool {
+        for i in 0..<chars.count {
+            let c = chars[i]
+            if strongFullWidth.contains(c) || mediumFullWidth.contains(c) { return true }
+            if c == "." || c == "!" || c == "?" || c == "," || c == ";" || c == ":" {
+                let isLast = i + 1 >= chars.count
+                if isLast || chars[i + 1] == " " { return true }
+            }
+        }
+        return false
+    }
+
+    /// 标点切点。全角直接算；半角要求后面是空白或文末，否则「3.14」
+    /// 「10:30」这种会被当成句末
+    private static func punctuationCandidates(in chars: [Character]) -> [Candidate] {
+        var result: [Candidate] = []
+        let n = chars.count
+
+        for i in 0..<n {
+            let c = chars[i]
+            let isLast = i + 1 >= n
+            let next = isLast ? nil : chars[i + 1]
+
+            if strongFullWidth.contains(c) {
+                if i + 1 < n { result.append(Candidate(index: i + 1, strength: .strong)) }
+            } else if mediumFullWidth.contains(c) {
+                if i + 1 < n { result.append(Candidate(index: i + 1, strength: .medium)) }
+            } else if c == "." || c == "!" || c == "?" {
+                if (isLast || next == " "), i + 1 < n { result.append(Candidate(index: i + 1, strength: .strong)) }
+            } else if c == "," || c == ";" || c == ":" {
+                if (isLast || next == " "), i + 1 < n { result.append(Candidate(index: i + 1, strength: .medium)) }
+            }
+        }
+        return result
+    }
+
+    /// 启发式切点。只在整段完全无标点时才会被调用（见 candidates 的注释）。
+    private static func heuristicCandidates(in chars: [Character]) -> [Candidate] {
         var result: [Candidate] = []
         let n = chars.count
 
@@ -129,18 +186,6 @@ enum TranscriptSplitter {
             let c = chars[i]
             let isLast = i + 1 >= n
             let next = isLast ? nil : chars[i + 1]
-
-            // 标点:全角直接算;半角要求后面是空白或文末,否则「3.14」
-            // 「10:30」这种会被当成句末
-            if strongFullWidth.contains(c) {
-                add(i + 1, .strong)
-            } else if mediumFullWidth.contains(c) {
-                add(i + 1, .medium)
-            } else if c == "." || c == "!" || c == "?" {
-                if isLast || next == " " { add(i + 1, .strong) }
-            } else if c == "," || c == ";" || c == ":" {
-                if isLast || next == " " { add(i + 1, .medium) }
-            }
 
             // 句末语气词:位置要在小句末尾(见 clauseStarters 的注释);
             // 「哪怕」的「哪」是词首, explicitly 排除

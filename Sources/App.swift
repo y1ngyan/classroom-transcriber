@@ -278,6 +278,15 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头补标点自检：--punct-selftest（校验纯函数 + 切分器标点优先，
+        // 不发网络请求——补标点本身不进自检）
+        if CommandLine.arguments.contains("--punct-selftest") {
+            for line in PunctuationService.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 无头重复段去重自检：--dedup-selftest（纯内存驱动 upsert，不依赖设备）
         if CommandLine.arguments.contains("--dedup-selftest") {
             for line in TranscriptionEngine.dedupSelfTest() {
