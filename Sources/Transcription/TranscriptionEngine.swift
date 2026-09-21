@@ -674,6 +674,148 @@ final class TranscriptionEngine {
         })
     }
 
+    /// 「文本相似但不算同一句」时要求的时间窗口。实测 Apple 在 progressive
+    /// 模式下会修正中间结果的 start：小幅修正 3000ms（课堂-20260920-141224.wav），
+    /// 极端情况 12000ms（课堂-20260920-151734.wav：孤儿停在 start=0，
+    /// 定稿落在 12 秒后）。窗口取 4000：盖住常见的小幅修正再留一秒余量；
+    /// 极端漂移不由窗口兜——那种形态文本完全相同，走 textRelation 的
+    /// 「same」分支，不需要时间窗（见 tolerantMatch）
+    private static let startToleranceMillis = 4_000
+
+    /// 用一条新结果刷新已有段。定稿（false→true）的那一刻通知下游（事实核查），
+    /// 避免重复提交——核查挂在这个回调上，不是挂在视图对 segments 的 diff 上
+    private func applyUpdate(at index: Int, text: String, endMillis: Int, isFinal: Bool, qualityGrade: TranscriptGrade?) {
+        let wasFinal = segments[index].isFinal
+        segments[index].text = text
+        segments[index].endTimeMillis = endMillis
+        segments[index].isFinal = isFinal
+        if isFinal && !wasFinal {
+            segments[index].qualityGrade = qualityGrade
+            applyQuestionDetection(at: index)
+            onFinalSegment?(segments[index])
+        }
+    }
+
+    /// 找「start 漂移了但其实是同一段」的已有段。
+    ///
+    /// 为什么存在：Apple 在 progressive 模式下先吐一个 start 偏早的中间结果，
+    /// 定稿时才把 start 修正到真实位置。实测修正量 3000~12000ms——漂移量
+    /// 取决于它多久才定稿，不是一个小修正，**任何固定时间窗都框不住**。
+    /// 精确键认不出这是同一段，于是留下一条永远停在未定稿的孤儿段 +
+    /// 一条内容相同的定稿段。
+    ///
+    /// 所以匹配按文本确定度分两档（外加一条硬限制：只合**未定稿**的段，
+    /// 双定稿同文是老师真的重复了一遍，合掉就把真实内容吞了）：
+    /// 1. 归一化后完全相同/互含、且短者 ≥6 字：两个不同话语撞出这么长的
+    ///    相同文本概率极低（撞上了也是双定稿，已被硬限制挡住），这就是
+    ///    start 被修正的孤儿——**不看时间窗**，多远都认
+    /// 2. 只是相似（编辑距离 ≤20%，有个别字差异）：必须同时 start 落在
+    ///    4000ms 窗口内。课堂上「好的我们看一下上一页/下一页」这种句式
+    ///    重复是常态，放了时间窗就会把两句真话吞成一段
+    private func tolerantMatch(startMillis: Int, language: String, text: String) -> Int? {
+        // 全表扫（一节课段数百量级，代价可忽略），从后往前、先命中最近的
+        // ——多条孤儿撞文本时，近的那条才是这次漂移的另一半
+        for index in segments.indices.reversed() {
+            let seg = segments[index]
+            guard seg.languages.first == language, !seg.isFinal else { continue }
+            switch Self.textRelation(seg.text, text) {
+            case .same(let shorter):
+                guard shorter >= 6 else { continue }
+                return index
+            case .similar:
+                guard abs(seg.startTimeMillis - startMillis) <= Self.startToleranceMillis else { continue }
+                return index
+            case .different:
+                continue
+            }
+        }
+        return nil
+    }
+
+    /// 两条文本的相似关系。minLength 是归一化后较短那条的长度，
+    /// 给「same 也要够长才作数」用——「好的」这种两三个字到处出现
+    private enum TextRelation {
+        /// 归一化后完全相同，或一个包含另一个（中间结果还没说完）
+        case same(shorterLength: Int)
+        /// 编辑距离 ≤ 较长者的 20%：同一句的个别字差异
+        case similar
+        case different
+    }
+
+    /// 判两条文本的相似关系。
+    ///
+    /// 比较前剥掉空白和标点：定稿时识别器可能补标点（「管理管理」→「管理，管理」），
+    /// 带标点比会把同一句判成两句。
+    ///
+    /// 20% 的阈值**不给下限兜底**：短句里一个字的分量很重，「第一点」和
+    /// 「第二点」只差 1 字但占比 33%，必须判成 different——这正是
+    /// 「光有时间容差会误合并」要防的
+    private static func textRelation(_ a: String, _ b: String) -> TextRelation {
+        let na = normalizedForMatch(a), nb = normalizedForMatch(b)
+        if na.isEmpty || nb.isEmpty { return .different }
+        if na == nb || na.contains(nb) || nb.contains(na) {
+            return .same(shorterLength: min(na.count, nb.count))
+        }
+        let distance = levenshtein(Array(na), Array(nb))
+        return distance * 5 <= max(na.count, nb.count) ? .similar : .different
+    }
+
+    /// 「可能是同一句」的宽判：same 或 similar 都算。只用于自检和
+    /// --dedup-file 的残留重复扫描，不参与合并决策（合并要看档位）
+    private static func textsMatch(_ a: String, _ b: String) -> Bool {
+        switch textRelation(a, b) {
+        case .same, .similar: return true
+        case .different: return false
+        }
+    }
+
+    private static let matchIgnoredChars: Set<Character> = [
+        " ", "\n", "\t", "。", "，", "、", "；", "：", "！", "？", "…",
+        ".", ",", ";", ":", "!", "?",
+    ]
+
+    private static func normalizedForMatch(_ text: String) -> String {
+        String(text.filter { !matchIgnoredChars.contains($0) })
+    }
+
+    /// 编辑距离。只服务 textsMatch，输入已归一化、课堂段很少超过几百字，
+    /// O(n·m) 完全够用，不值得上更聪明的算法
+    private static func levenshtein(_ a: [Character], _ b: [Character]) -> Int {
+        if a.isEmpty { return b.count }
+        if b.isEmpty { return a.count }
+        var prev = Array(0...b.count)
+        var curr = [Int](repeating: 0, count: b.count + 1)
+        for (i, ca) in a.enumerated() {
+            curr[0] = i + 1
+            for (j, cb) in b.enumerated() {
+                curr[j + 1] = ca == cb
+                    ? prev[j]
+                    : min(prev[j], prev[j + 1], curr[j]) + 1
+            }
+            swap(&prev, &curr)
+        }
+        return prev[b.count]
+    }
+
+    /// segments 必须按 startTimeMillis 有序——展示、追加优化都依赖它。
+    /// 流式结果几乎总是按时间到达，有序时这个检查只是一次空转；真乱序
+    /// （start 漂移合并、更早的段迟到）才付出 sort + 重建索引的代价
+    /// （一节课上千段，全量重建是 O(n²)，不能每次做）
+    private func restoreOrderIfNeeded() {
+        let staysSorted = zip(segments, segments.dropFirst()).allSatisfy {
+            $0.startTimeMillis <= $1.startTimeMillis
+        }
+        guard !staysSorted else { return }
+        segments.sort { $0.startTimeMillis < $1.startTimeMillis }
+        // 排序后索引失效，重建
+        segmentIndex = Dictionary(
+            uniqueKeysWithValues: segments.enumerated().compactMap { idx, seg in
+                guard let lang = seg.languages.first else { return nil }
+                return (SegmentKey(startMillis: seg.startTimeMillis, language: lang), idx)
+            }
+        )
+    }
+
     private func upsert(
         text: String,
         startMillis: Int,
@@ -686,16 +828,23 @@ final class TranscriptionEngine {
         let key = SegmentKey(startMillis: startMillis, language: language)
 
         if let existing = segmentIndex[key], existing < segments.count {
-            let wasFinal = segments[existing].isFinal
-            segments[existing].text = text
-            segments[existing].endTimeMillis = endMillis
-            segments[existing].isFinal = isFinal
-            // 定稿的那一刻通知下游（事实核查），避免重复提交
-            if isFinal && !wasFinal {
-                segments[existing].qualityGrade = qualityGrade
-                applyQuestionDetection(at: existing)
-                onFinalSegment?(segments[existing])
-            }
+            applyUpdate(at: existing, text: text, endMillis: endMillis, isFinal: isFinal, qualityGrade: qualityGrade)
+        } else if let near = tolerantMatch(startMillis: startMillis, language: language, text: text) {
+            // start 漂移合并的字段取舍（想清楚了再改）：
+            // · id 沿用旧段——核查结果、笔记引用、术语校正回写都按 segment id
+            //   关联（见 applyCorrections），换 id 会让已有的下游数据变孤儿
+            // · text / start / end 用新值——定稿是修正后的结果，更准
+            // · timestamp 保留旧值——这段第一次出现的墙上时间不变
+            // · qualityGrade / 提问标记：旧段是未定稿的孤儿，这两个字段只在
+            //   定稿时写入，旧段上必然还是空的，走 applyUpdate 的定稿转换
+            //   逻辑正常写入即可，不需要特殊处理
+            let oldKey = SegmentKey(startMillis: segments[near].startTimeMillis, language: language)
+            segments[near].startTimeMillis = startMillis
+            applyUpdate(at: near, text: text, endMillis: endMillis, isFinal: isFinal, qualityGrade: qualityGrade)
+            segmentIndex.removeValue(forKey: oldKey)
+            segmentIndex[key] = near
+            // start 改大可能打乱有序性
+            restoreOrderIfNeeded()
         } else {
             segmentIndex[key] = segments.count
             var created = TranscriptSegment(
@@ -713,22 +862,7 @@ final class TranscriptionEngine {
                 applyQuestionDetection(at: segments.count - 1)
                 onFinalSegment?(segments[segments.count - 1])
             }
-            // 流式结果几乎总是按时间顺序到达，追加本身不破坏有序性——
-            // 这种时候全量 sort + 重建索引是纯浪费（一节课上千段就是 O(n²)）。
-            // 只有真的来了「更早」的段（乱序）才付出这次代价。
-            let count = segments.count
-            let staysSorted = count < 2
-                || segments[count - 2].startTimeMillis <= segments[count - 1].startTimeMillis
-            if !staysSorted {
-                segments.sort { $0.startTimeMillis < $1.startTimeMillis }
-                // 排序后索引失效，重建
-                segmentIndex = Dictionary(
-                    uniqueKeysWithValues: segments.enumerated().compactMap { idx, seg in
-                        guard let lang = seg.languages.first else { return nil }
-                        return (SegmentKey(startMillis: seg.startTimeMillis, language: lang), idx)
-                    }
-                )
-            }
+            restoreOrderIfNeeded()
         }
     }
 
@@ -747,6 +881,284 @@ final class TranscriptionEngine {
         segments[index].questionLevel = hit.level
         segments[index].coreQuestion = hit.coreQuestion
         onQuestion?(segments[index], hit)
+    }
+
+    // MARK: - 自检
+
+    /// `--dedup-selftest`：容差去重的规则回归。纯内存驱动 upsert，
+    /// 不需要麦克风和模型。
+    ///
+    /// 核心用例来自真实录音（课堂-20260920-141224.wav）：start=0 未定稿
+    /// + start=3000 已定稿、文本完全相同——旧逻辑建出两段，新逻辑必须
+    /// 合并成一段
+    static func dedupSelfTest() -> [String] {
+        var lines: [String] = ["重复段去重自检（纯内存驱动 upsert）"]
+        var allPassed = true
+        let lang = "zh-CN"
+
+        func dump(_ engine: TranscriptionEngine) {
+            for seg in engine.segments {
+                lines.append(String(
+                    format: "     start=%6d  %@  %@",
+                    seg.startTimeMillis, seg.isFinal ? "定稿" : "中间", seg.text
+                ))
+            }
+        }
+
+        /// steps 依次喂给 upsert；verify 返回 nil 表示通过，否则返回失败理由
+        func check(
+            _ name: String,
+            _ reason: String,
+            _ steps: [(text: String, start: Int, end: Int, final: Bool)],
+            verify: (TranscriptionEngine) -> String?
+        ) {
+            let engine = TranscriptionEngine()
+            for step in steps {
+                engine.upsert(
+                    text: step.text, startMillis: step.start, endMillis: step.end,
+                    isFinal: step.final, language: lang,
+                    qualityGrade: step.final ? .good : nil
+                )
+            }
+            if let problem = verify(engine) {
+                allPassed = false
+                lines.append("  ❌ \(name)：\(problem)")
+            } else {
+                lines.append("  ✅ \(name)：\(reason)")
+            }
+            dump(engine)
+        }
+
+        // 1. 核心用例（真实录音的形态）：start 漂移 3000ms、文本相同 →
+        //    合并成一段，留下定稿的内容和时间，id 沿用旧段
+        do {
+            let engine = TranscriptionEngine()
+            let text = "现在学校的管理管理育人的方方面面"
+            engine.upsert(text: text, startMillis: 0, endMillis: 3500, isFinal: false, language: lang, qualityGrade: nil)
+            let originalID = engine.segments[0].id
+            engine.upsert(text: text, startMillis: 3000, endMillis: 6000, isFinal: true, language: lang, qualityGrade: .good)
+
+            var problems: [String] = []
+            if engine.segments.count != 1 {
+                problems.append("段数 \(engine.segments.count) ≠ 1（孤儿段没合掉）")
+            }
+            if let seg = engine.segments.first {
+                if !seg.isFinal { problems.append("留下的还是未定稿段") }
+                if seg.startTimeMillis != 3000 || seg.endTimeMillis != 6000 {
+                    problems.append("时间没用定稿的修正值")
+                }
+                if seg.id != originalID { problems.append("id 变了，下游引用会成孤儿") }
+                if seg.qualityGrade != .good { problems.append("定稿时质量自评没写入") }
+            }
+            if problems.isEmpty {
+                lines.append("  ✅ 真重复（start 漂移 3000ms、文本相同）：合并为一段，定稿优先，id 不变")
+            } else {
+                allPassed = false
+                lines.append("  ❌ 真重复（start 漂移 3000ms、文本相同）：\(problems.joined(separator: "；"))")
+            }
+            dump(engine)
+        }
+
+        // 2. 真重复：start 只差 5ms、新文本是旧文本的延展（中间结果还没说完）
+        check(
+            "真重复（start 差 5ms、前缀关系）",
+            "前缀视为同一句的续说，合并",
+            [
+                ("现在学校的管理", 1000, 2000, false),
+                ("现在学校的管理管理育人的方方面面", 1005, 4000, true),
+            ]
+        ) { engine in
+            guard engine.segments.count == 1 else { return "段数 \(engine.segments.count) ≠ 1" }
+            guard engine.segments[0].text == "现在学校的管理管理育人的方方面面" else { return "文本没用新值" }
+            return engine.segments[0].isFinal ? nil : "没转成定稿"
+        }
+
+        // 3. 假重复：start 差 400ms 但文本明显不同。短句差 1 字占比 33%，
+        //    超过 20% 阈值——文本闸门必须拦住，时间再近也不许合
+        check(
+            "假重复（start 差 400ms、文本不同）",
+            "文本闸门拦住，不合并",
+            [
+                ("第一点。", 0, 1500, false),
+                ("第二点。", 400, 1900, true),
+            ]
+        ) { engine in
+            engine.segments.count == 2 ? nil : "段数 \(engine.segments.count) ≠ 2（真话被吞了）"
+        }
+
+        // 4. 正常刷新：start 完全相同、文本变长 → 原地更新，不新建
+        check(
+            "正常刷新（start 相同、文本变长）",
+            "精确键命中，原地更新",
+            [
+                ("今天我们讲", 5000, 6000, false),
+                ("今天我们讲梯度下降", 5000, 7000, false),
+            ]
+        ) { engine in
+            guard engine.segments.count == 1 else { return "段数 \(engine.segments.count) ≠ 1" }
+            guard engine.segments[0].text == "今天我们讲梯度下降" else { return "文本没更新" }
+            return engine.segments[0].isFinal ? "被误标定稿" : nil
+        }
+
+        // 5. 老师真的重复了一遍（强调）：两条都定稿、文本相同、start 在窗口内。
+        //    孤儿段永远是未定稿的，所以只合未定稿——双定稿必须保留两条
+        check(
+            "真实重复（双定稿同文，强调）",
+            "只合未定稿段，真实内容保留",
+            [
+                ("这个概念很重要。", 0, 2000, true),
+                ("这个概念很重要。", 3000, 5000, true),
+            ]
+        ) { engine in
+            engine.segments.count == 2 ? nil : "段数 \(engine.segments.count) ≠ 2（强调的重复被吞了）"
+        }
+
+        // 6. 大漂移（课堂-20260920-151734.wav 的形态）：孤儿停在 start=0，
+        //    定稿落在 12 秒后、文本完全相同。任何固定时间窗都框不住它——
+        //    完全相同且够长，放时间窗也要认
+        check(
+            "真重复（start 漂移 12000ms、文本相同）",
+            "完全相同且 ≥6 字，不看时间窗，合并",
+            [
+                ("是有点别这草地加土那可显出了个物边和发亮", 0, 9000, false),
+                ("是有点别这草地加土那可显出了个物边和发亮", 12000, 21000, true),
+            ]
+        ) { engine in
+            guard engine.segments.count == 1 else { return "段数 \(engine.segments.count) ≠ 1（大漂移孤儿没合掉）" }
+            return engine.segments[0].isFinal ? nil : "没转成定稿"
+        }
+
+        // 7. 句式重复：只是相似（上/下一个字，10% 差异）且 start 差 20 秒。
+        //    放了时间窗就把「上一页/下一页」两句真话吞成一句
+        check(
+            "假重复（相似但超窗，句式重复）",
+            "相似但没到相同，时间窗拦住，不合并",
+            [
+                ("好的我们看一下上一页", 0, 3000, false),
+                ("好的我们看一下下一页", 20000, 23000, true),
+            ]
+        ) { engine in
+            engine.segments.count == 2 ? nil : "段数 \(engine.segments.count) ≠ 2（句式重复被吞了）"
+        }
+
+        // 8. 短文本相同：「好的」这种两三个字到处出现，same 也要 ≥6 字才作数
+        check(
+            "假重复（短文本互含，不足 6 字）",
+            "短文本撞车太常见，不合并",
+            [
+                ("好的", 0, 800, false),
+                ("好的我们开始吧", 30000, 32000, true),
+            ]
+        ) { engine in
+            engine.segments.count == 2 ? nil : "段数 \(engine.segments.count) ≠ 2（短文本被误合）"
+        }
+
+        lines.append(allPassed ? "全部通过 ✅" : "存在失败用例 ❌")
+        return lines
+    }
+
+    /// `--dedup-file <wav>` 的实现：用实时同款预设（timeIndexedProgressive）
+    /// 转文件，结果逐条喂给引擎的 upsert，同时用旧的「精确 start 键」逻辑
+    /// 离线重放一遍作对照，最后报「旧逻辑段数 → 新逻辑段数」。
+    ///
+    /// --transcribe-file 走的是「只打印定稿结果」的路，不过 upsert，
+    /// 复现不了重复段 bug；这个入口跑的是和线上一模一样的去重逻辑
+    static func dedupFileRun(path: String) async {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            print("❌ 文件不存在: \(path)")
+            return
+        }
+
+        do {
+            let supported = await SpeechTranscriber.supportedLocales
+            guard let locale = FileTranscription.resolve(["zh-CN"], against: supported).first else {
+                print("❌ 没有可用的 zh-CN 模型")
+                return
+            }
+            var preset = SpeechTranscriber.Preset.timeIndexedProgressiveTranscription
+            preset.attributeOptions.insert(.transcriptionConfidence)
+            let transcriber = SpeechTranscriber(locale: locale, preset: preset)
+            if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+                print("⬇️  正在下载语言模型…")
+                try await request.downloadAndInstall()
+            }
+            let analyzer = SpeechAnalyzer(modules: [transcriber])
+            guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
+                print("❌ 无法确定音频格式")
+                return
+            }
+            try await analyzer.prepareToAnalyze(in: format)
+
+            let engine = TranscriptionEngine()
+            // Task 闭包是 @Sendable 的，直接抓 var 会被 Swift 6 警告;
+            //  rows 只从这一个闭包访问,用盒子做显式承诺
+            final class RowBox: @unchecked Sendable {
+                var rows: [(start: Int, end: Int, final: Bool, text: String)] = []
+            }
+            let box = RowBox()
+
+            let consumer = Task { @MainActor in
+                do {
+                    for try await result in transcriber.results {
+                        let text = String(result.text.characters)
+                        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                        let startMillis = Int(result.range.start.seconds * 1000)
+                        let endMillis = Int((result.range.start + result.range.duration).seconds * 1000)
+                        box.rows.append((startMillis, endMillis, result.isFinal, text))
+                        // 和 consumeResults 完全同款的喂法
+                        let quality = TranscriptQualityAssessor.grade(
+                            confidences: TranscriptQualityAssessor.confidences(from: result.text)
+                        )
+                        engine.upsert(
+                            text: text, startMillis: startMillis, endMillis: endMillis,
+                            isFinal: result.isFinal, language: locale.identifier,
+                            qualityGrade: quality
+                        )
+                    }
+                } catch {
+                    print("⚠️ 结果流中断: \(error.localizedDescription)")
+                }
+            }
+
+            let file = try AVAudioFile(forReading: url)
+            try await analyzer.start(inputAudioFile: file, finishAfterFile: true)
+            _ = await consumer.value
+
+            // 旧逻辑（精确 start 键）离线重放，作改前对照
+            var oldIndex: [Int: Int] = [:]
+            var oldSegments: [(start: Int, final: Bool, text: String)] = []
+            for row in box.rows {
+                if let i = oldIndex[row.start] {
+                    oldSegments[i] = (row.start, row.final, row.text)
+                } else {
+                    oldIndex[row.start] = oldSegments.count
+                    oldSegments.append((row.start, row.final, row.text))
+                }
+            }
+
+            print("📁 \(url.lastPathComponent)")
+            print("结果总数 \(box.rows.count) → 旧逻辑（精确键）\(oldSegments.count) 段 / 新逻辑（容差+文本闸门）\(engine.segments.count) 段")
+            print("\n─── 新逻辑建段 ───")
+            for (i, seg) in engine.segments.enumerated() {
+                print(String(
+                    format: "  %2d. start=%6d  %@  %@",
+                    i + 1, seg.startTimeMillis, seg.isFinal ? "定稿" : "中间",
+                    String(seg.text.prefix(30))
+                ))
+            }
+            // 收尾校验:新逻辑的结果里不该再有「相邻且文本撞车」的段
+            var remaining = 0
+            for pair in zip(engine.segments, engine.segments.dropFirst()) {
+                if textsMatch(pair.0.text, pair.1.text) {
+                    remaining += 1
+                    print("  ⚠️ 仍有疑似重复: start=\(pair.0.startTimeMillis) / \(pair.1.startTimeMillis)")
+                }
+            }
+            print(remaining == 0 ? "\n✅ 无残留重复" : "\n❌ 残留 \(remaining) 处疑似重复")
+        } catch {
+            print("❌ \(error.localizedDescription)")
+        }
     }
 
     // MARK: - 自定义词表

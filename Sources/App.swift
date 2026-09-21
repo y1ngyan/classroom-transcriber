@@ -278,6 +278,31 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头重复段去重自检：--dedup-selftest（纯内存驱动 upsert，不依赖设备）
+        if CommandLine.arguments.contains("--dedup-selftest") {
+            for line in TranscriptionEngine.dedupSelfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
+        // 真实录音回归重复段去重：--dedup-file <wav>
+        // 走引擎的 upsert（实时同款 progressive 预设），同时用旧逻辑离线重放
+        // 作对照——--transcribe-file 只打印定稿结果，复现不了重复段
+        if let di = CommandLine.arguments.firstIndex(of: "--dedup-file"),
+           di + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[di + 1]
+            // 引擎是 @MainActor 的,主线程不能像 --transcribe-file 那样
+            // 阻塞在 semaphore 上( MainActor 的 hop 需要主队列空转);
+            // 改用 dispatchMain 让主队列继续服务,任务结束自己 exit
+            Task { @MainActor in
+                await TranscriptionEngine.dedupFileRun(path: path)
+                exit(0)
+            }
+            dispatchMain()
+        }
+
         // 无头术语提词：--extract-terms（走真实模型，验证整条提词链路）
         //
         // 和 --glossary 一样直接调 Service 不走 Store：Store 是 @MainActor 的，
