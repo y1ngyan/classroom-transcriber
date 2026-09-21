@@ -287,19 +287,33 @@ enum FileTranscription {
             var gainSum = 0.0
             var gainSamples = 0
 
-            while true {
+            let totalFrames = file.length
+            var readFrames: AVAudioFramePosition = 0
+
+            while readFrames < totalFrames {
+                // 按「还剩多少」而不是固定块长来读。
+                //
+                // `AVAudioFile.read(into:frameCount:)` 在 `frameCount` 超过
+                // 剩余帧数时**会抛错**（_GenericObjCError），而不是安静地
+                // 返回短读——固定读 4096 的话，文件末尾不足一块的那部分
+                // 直接丢失。实测一条 144.8 秒的录音因此只转出到 131.6 秒，
+                // 最后 13 秒整段消失，而报错只出现在一行日志里
+                let remaining = totalFrames - readFrames
+                let want = AVAudioFrameCount(min(AVAudioFramePosition(preprocess.blockFrames), remaining))
+
                 guard let raw = AVAudioPCMBuffer(
                     pcmFormat: sourceFormat,
-                    frameCapacity: preprocess.blockFrames
+                    frameCapacity: want
                 ) else { break }
 
                 do {
-                    try file.read(into: raw, frameCount: preprocess.blockFrames)
+                    try file.read(into: raw, frameCount: want)
                 } catch {
-                    print("⚠️ 读取中断: \(error.localizedDescription)")
+                    print("⚠️ 读取中断（已读 \(readFrames)/\(totalFrames) 帧）: \(error.localizedDescription)")
                     break
                 }
                 guard raw.frameLength > 0 else { break }
+                readFrames += AVAudioFramePosition(raw.frameLength)
 
                 guard let floats = convertBuffer(raw, using: toFloat, to: floatFormat) else { continue }
 
@@ -323,6 +337,19 @@ enum FileTranscription {
 
         try await analyzer.start(inputSequence: stream)
         await feeder.value
+
+        // 必须显式定稿，不能只等喂完。
+        //
+        // 喂完 stream 和「analyzer 把最后几段吐出来」是两件事：结果消费
+        // 任务在另一个 Task 里跑，`feeder.value` 只保证音频都 yield 完了，
+        // 此时 analyzer 可能还在处理队尾。不调这个的话末尾会被整段丢掉——
+        // 实测一条 144.8 秒的录音只转出到 131.6 秒，末尾 13 秒消失，
+        // 而且不报任何错。
+        //
+        // 这和 CLAUDE.md 第 5 条（stop() 必须先定稿再取消消费任务）
+        // 是同一类顺序约束。用 inputAudioFile 那条路径时框架自己管这件事，
+        // 所以之前没暴露过
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
     }
 
     /// 用 AVAudioConverter 转一块缓冲。输出每块新分配——

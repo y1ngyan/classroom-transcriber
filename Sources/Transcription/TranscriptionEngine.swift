@@ -1472,15 +1472,29 @@ final class TranscriptionEngine {
         var peak: Double = 0
         var pcm = Data()
 
-        while let buffer = AVAudioPCMBuffer(pcmFormat: micFormat, frameCapacity: chunk) {
+        // 按「还剩多少」读，不按固定块长读。
+        // `AVAudioFile.read(into:frameCount:)` 在 frameCount 超过剩余帧数时
+        // 会抛错而不是安静地短读，固定块长会让文件末尾不足一块的那部分
+        // 直接丢失——同 TranscriptionEngine 的 feedWithPreprocess，
+        // 那一处实测丢过 13 秒
+        let totalFrames = inputFile.length
+        var consumed: AVAudioFramePosition = 0
+
+        while consumed < totalFrames,
+              let buffer = AVAudioPCMBuffer(
+                  pcmFormat: micFormat,
+                  frameCapacity: AVAudioFrameCount(min(AVAudioFramePosition(chunk), totalFrames - consumed))
+              ) {
+            let want = AVAudioFrameCount(min(AVAudioFramePosition(chunk), totalFrames - consumed))
             do {
-                try inputFile.read(into: buffer, frameCount: chunk)
+                try inputFile.read(into: buffer, frameCount: want)
             } catch {
-                lines.append("⚠️ 读取中断: \(error.localizedDescription)")
+                lines.append("⚠️ 读取中断（已读 \(consumed)/\(totalFrames) 帧）: \(error.localizedDescription)")
                 break
             }
             guard buffer.frameLength > 0 else { break }
             readFrames += Int(buffer.frameLength)
+            consumed += AVAudioFramePosition(buffer.frameLength)
 
             guard let extracted = firstChannelAsMono(buffer, format: monoFormat),
                   let converted = convert(extracted, using: converter, to: target) else {
