@@ -321,6 +321,15 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头课程词库联网生成自检：--glossary-suggest-selftest（纯函数：检索式规划、
+        // 响应解析、术语抽取边界；不发网络请求）
+        if CommandLine.arguments.contains("--glossary-suggest-selftest") {
+            for line in GlossarySuggestionService.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 无头会话持久化自检：--session-selftest（临时目录，不碰真实数据）
         if CommandLine.arguments.contains("--session-selftest") {
             for line in RecordingsStore.selfTest() {

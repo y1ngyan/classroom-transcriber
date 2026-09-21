@@ -221,8 +221,14 @@ enum GlossarySuggestionService {
     ///
     /// 复用 `GlossaryService.parseTerms`（它已经处理了「模型没按格式吐」的
     /// 好几种情况：带编号、只给一个词、多吐解释行），但**强制把 aliases
-    /// 清空**——这一步是这个功能的语义保证。即使模型自作主张吐了三列，
-    /// 第三列也会在这里被丢掉。
+    /// 清空**——这一步是这个功能的语义保证。
+    ///
+    /// 注意：不能把模型的多列输出直接丢给它。那个解析器认的三列布局是
+    /// 「术语|别名|说明」——它服务的是手动导入词表那条路径；而这里提示词明确
+    /// 只要两列（英文术语|中文说明）。于是模型多吐一列时，被当成「说明」的会是
+    /// **最后一列**，也就是模型自己编的误转写，等于把猜测当实测显示给用户。
+    /// 所以这里先把每行截到两列，再交给它；原有护栏（行首编号、单列整句、
+    /// 中文词条、去重、上限）全部继续生效。
     ///
     /// 已经在词表里的词也在这里滤掉，省得用户看到一个「采纳了没变化」的候选。
     static func parseTerms(
@@ -231,7 +237,14 @@ enum GlossarySuggestionService {
         limit: Int = maxCandidates
     ) -> [GlossaryEntry] {
         let existing = Set(existingTerms.map { $0.lowercased() })
-        return GlossaryService.parseTerms(response, limit: limit)
+        let twoColumns = response
+            .components(separatedBy: .newlines)
+            .map { line -> String in
+                let columns = line.components(separatedBy: "|")
+                return columns.count > 2 ? columns.prefix(2).joined(separator: "|") : line
+            }
+            .joined(separator: "\n")
+        return GlossaryService.parseTerms(twoColumns, limit: limit)
             .filter { !existing.contains($0.term.lowercased()) }
             .map { GlossaryEntry(term: $0.term, aliases: [], note: $0.note) }
     }
