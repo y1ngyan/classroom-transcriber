@@ -206,13 +206,32 @@ struct TranscriptLine: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Text(TextHighlight.styled(segment.text))
-                .textStyle(Theme.Text.body)
-                // 未定稿的段落压暗一档：识别结果还会变，视觉上先区分开
+            // 语义切分：识别器只在长静音处切段，课堂上十几秒一整段是常态。
+            // 切分是派生数据（segments 数据层不动，见 TranscriptSplitter），
+            // 这里只负责把子段分行画出来——同一段的子段共享底部那一个
+            // 时间戳，后续子行缩进一档表示「我是续行」，不再重复时间戳
+            let pieces = TranscriptSplitter.split(segment)
+            if pieces.count == 1 {
+                Text(TextHighlight.styled(segment.text))
+                    .textStyle(Theme.Text.body)
+                    // 未定稿的段落压暗一档：识别结果还会变，视觉上先区分开
+                    .opacity(segment.isFinal ? 1 : 0.55)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    ForEach(Array(pieces.enumerated()), id: \.offset) { index, piece in
+                        Text(TextHighlight.styled(piece.text))
+                            .textStyle(Theme.Text.body)
+                            .padding(.leading, index == 0 ? 0 : Theme.Spacing.lg)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
                 .opacity(segment.isFinal ? 1 : 0.55)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             // 缩略图 + 时间戳，一起右对齐
             HStack(alignment: .bottom, spacing: Theme.Spacing.sm) {
