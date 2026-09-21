@@ -185,7 +185,9 @@ final class GlossaryStore {
             lastQueries = queries
 
             statusMessage = "正在联网检索（\(queries.count) 条检索式）…"
-            let hits = await GlossarySuggestionService.search(queries)
+            // 全都失败时会抛 searchUnavailable（通道不通），与「搜到了但没内容」
+            // 分开——前者用户该去查网络，后者才是换个说法重试。
+            let hits = try await GlossarySuggestionService.search(queries)
             guard !hits.isEmpty else {
                 throw GlossarySuggestionService.SuggestionError.noSearchResults
             }

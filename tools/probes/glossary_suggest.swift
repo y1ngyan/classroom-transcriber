@@ -63,7 +63,15 @@ struct GlossarySuggestProbe {
 
         // ---- 2.2 联网检索 ----
         let searchStart = Date()
-        let hits = await GlossarySuggestionService.search(queries)
+        let hits: [SearchHit]
+        do {
+            hits = try await GlossarySuggestionService.search(queries)
+        } catch {
+            print(String(format: "\n── 检索结果（%.1fs）──", Date().timeIntervalSince(searchStart)))
+            print("❌ \(error.localizedDescription)")
+            print("   这是「通道不通」，不是「没搜到」——后面几步测不了，先修网络或密钥")
+            exit(1)
+        }
         print(String(format: "\n── 检索结果（%.1fs，去重后 %d 条）──",
                      Date().timeIntervalSince(searchStart), hits.count))
         for (index, hit) in hits.enumerated() {

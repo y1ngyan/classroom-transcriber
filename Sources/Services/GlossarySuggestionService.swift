@@ -34,11 +34,19 @@ enum GlossarySuggestionService {
     enum SuggestionError: LocalizedError {
         case emptyCourse
         case noSearchResults
+        /// 检索通道不通：所有检索式都失败了（网络或密钥）。**不是**「没搜到」——
+        /// 原先两种情况共用 `.noSearchResults`，通道不通时界面说「联网没搜到可用
+        /// 内容，换个说法再试」，用户会一直换课程名，而问题在网络。
+        case searchUnavailable(detail: String)
 
         var errorDescription: String? {
             switch self {
             case .emptyCourse: return "先填一个课程名"
             case .noSearchResults: return "联网没搜到可用内容，换个说法再试"
+            case .searchUnavailable(let detail):
+                return detail.isEmpty
+                    ? "检索通道不通——检查网络或搜索密钥（不是没搜到）"
+                    : "检索通道不通——检查网络或搜索密钥（不是没搜到）：\(detail)"
             }
         }
     }
@@ -139,12 +147,46 @@ enum GlossarySuggestionService {
     /// **单个检索式失败不影响其他**：联网本来就会抖，让三条里挂一条就整体
     /// 失败没必要。按 URL 去重，因为同一条结果常会在多个检索式里出现，
     /// 重复喂给抽取模型会让它把同一个词列两遍。
-    static func search(_ queries: [String], perQuery: Int = resultsPerQuery) async -> [SearchHit] {
+    ///
+    /// 三件事和原先不同：
+    /// 1. **全都失败时抛错**，而不是返回空数组。空数组意味着「这门课在网上没有
+    ///    术语表」，全都失败意味着「通道不通（网络或密钥）」——对用户是两件事
+    ///    （2026-09-21 实测：通道不通时挂 47.7 秒，然后说「一条结果都没有」）。
+    /// 2. **并发**：检索式最多 3 条、每条超时 15 秒，串行时通道不通要挂满 45 秒；
+    ///    并发把最坏等待压成「一次超时」。
+    /// 3. **仍按检索式原顺序拼装**：正文顺序会影响抽取模型看到的上下文，而抽取是
+    ///    temperature 0——保持顺序就保持可复现，别让并发把输出变成随机的。
+    static func search(_ queries: [String], perQuery: Int = resultsPerQuery) async throws -> [SearchHit] {
+        // 下标对齐 queries，让并发结果能按原顺序取回
+        var hitsPerQuery: [[SearchHit]?] = Array(repeating: nil, count: queries.count)
+        var lastFailure = ""
+
+        // 用字符串而不是 `Error` 跨任务边界传失败原因：Swift 6 严格并发下
+        // `any Error` 不是 Sendable，String 是。
+        await withTaskGroup(of: (Int, [SearchHit]?, String?).self) { group in
+            for (index, query) in queries.enumerated() {
+                group.addTask {
+                    do {
+                        return (index, try await SearchService.search(query: query, maxResults: perQuery), nil)
+                    } catch {
+                        let text = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        return (index, nil, text)
+                    }
+                }
+            }
+            for await (index, found, failure) in group {
+                if let found { hitsPerQuery[index] = found }
+                if let failure { lastFailure = failure }
+            }
+        }
+
+        guard hitsPerQuery.contains(where: { $0 != nil }) else {
+            throw SuggestionError.searchUnavailable(detail: lastFailure)
+        }
+
         var hits: [SearchHit] = []
         var seen = Set<String>()
-
-        for query in queries {
-            let found = (try? await SearchService.search(query: query, maxResults: perQuery)) ?? []
+        for found in hitsPerQuery.compactMap({ $0 }) {
             for hit in found where seen.insert(hit.url).inserted {
                 hits.append(hit)
             }
