@@ -3,15 +3,11 @@ import Foundation
 /// 一个 Whisper 滑窗结果。segment 的时间是相对于窗口起点的。
 struct WhisperWindow {
     let startMillis: Int
+    /// 本窗覆盖到的时间。目前**只作记录**：第一趟匹配的时间上界从阶段 1.5 起取
+    /// `input.stepMillis`，不再依赖窗口时长，所以这里填什么都不会静默改变合并率
+    /// （原先「填错会让上界退化成 0」的 ⚠️ 随之作废，`durationMillis` 已删除）。
     let endMillis: Int
     let segments: [WhisperSegment]
-
-    /// 本窗覆盖的时长。第一趟匹配的时间上界用它（见 `merge` 策略 3 第一条）。
-    ///
-    /// ⚠️ 接线时必须把 `endMillis` 填成 `startMillis + 窗口时长`（不是最后一个
-    /// segment 的结束时间）。填 0 或与 startMillis 相等会让上界退化成 0，
-    /// 第一趟就只在时间零间隔时才生效——合并率会莫名下降，且不报任何错。
-    var durationMillis: Int { max(0, endMillis - startMillis) }
 }
 
 /// 合并器的输入。调用方负责维护 `previousTail` 和 `previousWindowStartMillis`，
@@ -49,12 +45,16 @@ enum WhisperWindowMerger {
     /// 2. 只在 `existing` 的最后 `scanBackLimit` 段里找匹配——随会话变长不能变慢。
     /// 3. 匹配分三档（复用 `TranscriptionEngine.textRelation`）：
     ///    - `.same(≥6 字)`：认为是同一段的 refine，**不看时间**，但有一个上界：
-    ///      候选与已有段的时间间隔必须 ≤ 一个窗口时长（`WhisperWindow.durationMillis`）。
+    ///      候选与已有段的时间间隔必须 ≤ `input.stepMillis`（**一个步长**）。
     ///      不看时间，是因为 Whisper 换窗后同一句的时间戳会整体平移；设上界，是因为
-    ///      这一趟会**连文本带时间戳一起改写**已有段，而老师隔半分钟重复一句口头禅
-    ///      是课堂常态——没有上界就会把旧段的文本和时间戳搬到当前时刻（时间线被
-    ///      破坏，那次重复也没留下自己的段）。上界取一个窗口时长：这一趟补偿的
-    ///      本来就是「同一句在相邻窗口之间的抖动」，量级在一个窗口以内，不是分钟级。
+    ///      这一趟会**连文本带时间戳一起改写**已有段，而老师隔十几秒重复一句口头禅
+    ///      是课堂常态——没有上界就会把旧段的文本和时间戳搬到当前时刻（时间线被破坏，
+    ///      那次重复也没留下自己的段）。
+    ///      为什么是步长而不是窗口时长（2026-09-21 阶段 1.5 收紧）：这一趟要补偿的是
+    ///      「同一句在相邻窗口之间的时间戳位移」，而窗口每次只前进一个步长，位移的
+    ///      量级就该按步长算。原先取一个窗口（10 秒）时余量大到能把老师 10 秒后的
+    ///      口头禅重复也算成「同一句」——探针实测三种子「时间线位置消失的句子」
+    ///      7/42（旧版无上界 14/42）；收到一个步长后 4/42，代价是三种子段数 46 → 49。
     ///    - `.similar`：且时间重叠或相邻（candidate.start 与 existing.end 相差
     ///      ≤ 1 秒）时认为是同一段。1 秒而不是 Apple 那条链路的 4000ms：
     ///      这里只用来盖住「同一句被重识别时的时间戳抖动」，不需要那么宽。
@@ -123,7 +123,7 @@ enum WhisperWindowMerger {
                 in: segments,
                 candidate: candidate,
                 scanBackLimit: scanBackLimit,
-                windowDurationMillis: input.window.durationMillis
+                maxIntervalGapMillis: input.stepMillis
             ) {
                 let shouldStabilize = !segments[index].isFinal
                     && isStable(candidate: candidate, previousTail: previousTailGlobal)
@@ -169,7 +169,7 @@ enum WhisperWindowMerger {
         in existing: [TranscriptSegment],
         candidate: TranscriptSegment,
         scanBackLimit: Int,
-        windowDurationMillis: Int
+        maxIntervalGapMillis: Int
     ) -> Int? {
         guard !existing.isEmpty else { return nil }
         let lower = max(0, existing.count - scanBackLimit)
@@ -178,12 +178,13 @@ enum WhisperWindowMerger {
         // 第一趟：same（≥6 字）。长文本撞车概率极低，不看时间——Whisper 不同窗口
         // 对同一句的重识别常落到相邻但不重叠的时间戳上。
         //
-        // 但**必须有个上界**（2026-09-21 裁决）：这一趟会连文本带时间戳一起改写
-        // 已有段，而老师隔半分钟重复同一句是课堂常态；只要那段还在后 scanBackLimit
-        // 段里，就会被当成「同一句」，把旧段的文本和时间戳搬到当前时刻——时间线
-        // 损坏 + 那次重复没留下自己的段，比显示瑕疵严重。上界取一个窗口时长。
+        // 但**必须有个上界**（2026-09-21 裁决，阶段 1.5 收紧到一个步长）：这一趟会
+        // 连文本带时间戳一起改写已有段，而老师隔十几秒重复同一句是课堂常态；只要
+        // 那段还在后 scanBackLimit 段里，就会被当成「同一句」，把旧段的文本和时间戳
+        // 搬到当前时刻——时间线损坏 + 那次重复没留下自己的段，比显示瑕疵严重。
+        // 上界为什么是步长而不是窗口时长：见 `merge` 策略 3 第一条（附实测数字）。
         for index in range.reversed() {
-            guard intervalGapMillis(existing[index], candidate) <= windowDurationMillis else { continue }
+            guard intervalGapMillis(existing[index], candidate) <= maxIntervalGapMillis else { continue }
             if case .same(let shorter) = TranscriptionEngine.textRelation(existing[index].text, candidate.text),
                shorter >= 6 {
                 return index
@@ -702,27 +703,40 @@ extension WhisperWindowMerger {
                   r.changes.joined(separator: " / "))
         }
 
-        // MARK: 用例 11：第一趟上界之内——漂移仍按「同一句」处理
+        // MARK: 用例 11：第一趟上界的三个邻点——一个步长内 / 正好一个步长 / 超 1 毫秒
         do {
-            // 已有段 [0,4000]，候选同文本落在 [9000,13000]：两段相隔 5000ms，
-            // 在一个窗口时长（10000）以内。这正是第一趟要补偿的「同一句的时间戳
-            // 整体平移」量级 → 仍合并成一段、时间戳跟到新位置。
-            let existing = [
-                TranscriptSegment(text: "它的核心思想是沿着负梯度方向迭代", isFinal: false,
-                                  startTimeMillis: 0, endTimeMillis: 4_000, languages: ["zh-CN"])
-            ]
-            let r = merge(WhisperMergeInput(
-                existing: existing,
-                window: window(9_000, windowMillis, [seg("它的核心思想是沿着负梯度方向迭代", 0, 4_000)]),
-                previousTail: [],
-                previousWindowStartMillis: 0,
-                stepMillis: stepMillis
-            ))
-            check("相隔 ≤ 一个窗口：仍按同一句合并，段数不增",
-                  r.segments.count == 1, "段数 \(r.segments.count)")
-            check("时间戳跟到新位置",
-                  r.segments[0].startTimeMillis == 9_000 && r.segments[0].endTimeMillis == 13_000,
-                  "\(r.segments[0].startTimeMillis)–\(r.segments[0].endTimeMillis)")
+            // 阶段 1.5 把上界从「一个窗口时长」收到「一个步长」：相邻窗口对同一句的
+            // 时间戳位移本来就只有一个步长的量级，内测点仍必须合并。
+            // 期望值由 stepMillis 推导，不写死数字——上界再变这条用例也跟着变。
+            func trial(_ gapMillis: Int) -> (count: Int, start: Int, end: Int) {
+                let existing = [
+                    TranscriptSegment(text: "它的核心思想是沿着负梯度方向迭代", isFinal: false,
+                                      startTimeMillis: 0, endTimeMillis: 4_000, languages: ["zh-CN"])
+                ]
+                let r = merge(WhisperMergeInput(
+                    existing: existing,
+                    window: window(4_000 + gapMillis, windowMillis,
+                                   [seg("它的核心思想是沿着负梯度方向迭代", 0, 4_000)]),
+                    previousTail: [],
+                    previousWindowStartMillis: 0,
+                    stepMillis: stepMillis
+                ))
+                return (r.segments.count, r.segments[0].startTimeMillis, r.segments[0].endTimeMillis)
+            }
+
+            let inside = trial(2_000)
+            let onBoundary = trial(stepMillis)          // 判据是 ≤，闭区间取到
+            let outside = trial(stepMillis + 1)
+
+            check("间隔 2000ms < 一个步长：仍按同一句合并，时间戳跟到新位置",
+                  inside.count == 1 && inside.start == 6_000 && inside.end == 10_000,
+                  "段数 \(inside.count) · \(inside.start)–\(inside.end)")
+            check("间隔正好一个步长（\(stepMillis)ms）：闭区间取到，仍合并",
+                  onBoundary.count == 1 && onBoundary.start == 7_000,
+                  "段数 \(onBoundary.count) · \(onBoundary.start)–\(onBoundary.end)")
+            check("间隔超 1 毫秒（\(stepMillis + 1)ms）：不得认成同一句，各自成段",
+                  outside.count == 2 && outside.start == 0 && outside.end == 4_000,
+                  "段数 \(outside.count) · 首段 \(outside.start)–\(outside.end)")
         }
 
         // MARK: 用例 12：第一趟上界之外——同一句远距离重复必须各自成段
