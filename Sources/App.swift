@@ -286,6 +286,14 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头会话持久化自检：--session-selftest（临时目录，不碰真实数据）
+        if CommandLine.arguments.contains("--session-selftest") {
+            for line in RecordingsStore.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 真实录音回归重复段去重：--dedup-file <wav>
         // 走引擎的 upsert（实时同款 progressive 预设），同时用旧逻辑离线重放
         // 作对照——--transcribe-file 只打印定稿结果，复现不了重复段

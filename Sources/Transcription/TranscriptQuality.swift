@@ -7,7 +7,7 @@ import Speech
 /// 不是文本统计启发式——2026-09-20 实测虚词密度方案会把正常口语
 /// （虚词占比天然 40%+）误判成崩坏，而废掉了。识别器自己知道每个字
 /// 有多可信，这个问题本来就不需要猜。
-enum TranscriptGrade: String {
+enum TranscriptGrade: String, Codable {
     /// 可信：置信度和准确转录一个水平
     case good
     /// 存疑：部分字符识别器自己也没把握

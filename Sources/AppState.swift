@@ -12,6 +12,7 @@ final class AppState {
     let attachments = AttachmentStore()
     let glossary = GlossaryStore()
     let upload = UploadStore()
+    let recordings = RecordingsStore()
     /// 放在这里而不是设置页的 `@State` 里：切走标签页再回来，视图会被
     /// 重建，`@State` 跟着归零——用户填了一半的密钥就没了
     let settings = SettingsStore()
@@ -26,6 +27,12 @@ final class AppState {
             // 手动点「核查」照样走同一条链路。
             guard let self, self.settings.autoFactCheck else { return }
             self.factCheck.submit(segment: segment)
+        }
+
+        // 录音收尾完成后自动落盘。引擎用 SessionDraft 交接、拿会话 id
+        // 回去——「接着录」的下一次 stop 才知道该追加到哪条会话
+        transcription.onSessionComplete = { [weak self] draft in
+            self?.recordings.ingest(draft).id
         }
     }
 

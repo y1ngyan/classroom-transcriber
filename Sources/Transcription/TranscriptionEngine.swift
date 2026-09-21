@@ -75,6 +75,25 @@ final class TranscriptionEngine {
     /// 回调拿到的 segment 已经带好 questionLevel / coreQuestion。
     var onQuestion: (@MainActor (TranscriptSegment, QuestionDetection) -> Void)?
 
+    /// 录音收尾完成、定稿内容吐完之后回调一次，把本次新增的内容交出去落盘。
+    ///
+    /// 引擎不认识 RecordingsStore（Transcription 层不依赖 Stores 层），
+    /// 由 AppState 把 store.ingest 接上来。返回值是会话 id，引擎记进
+    /// `sessionID`——「接着录」的下一次 stop 才知道该追加到哪条会话
+    var onSessionComplete: (@MainActor (SessionDraft) -> UUID?)?
+
+    /// 本次录制属于哪条会话。nil = 新会话；「接着录」时由调用方（下轮的
+    /// UI / AppState）塞入已有会话的 id，stop 落盘时就会追加而不是新建。
+    /// 每次落盘后会被回调的返回值刷新
+    var sessionID: UUID?
+
+    /// 本次 start() 时 segments 已有的条数。stop 落盘只存
+    /// `segments[sessionSegmentBase...]`——同一场 App 运行里录第二次时，
+    /// 内存里的 segments 是累加的，上一次录的内容已经落过盘，不能重存
+    private var sessionSegmentBase = 0
+    /// 本次开录的墙上时间（片段的 startedAt）
+    private var partStartedAt: Date?
+
     /// 课堂提问检测灵敏度。只在段落**定稿**的那一刻跑一次——
     /// 未定稿的文本还会被反复改写，对半成品跑规则只会得到一会有一会没的假信号。
     var questionSensitivity: QuestionSensitivity = .normal
@@ -154,6 +173,9 @@ final class TranscriptionEngine {
     func start() async {
         guard !isRunning else { return }
         statusMessage = "准备中…"
+        // 落盘用的会话边界:从这一刻起新进的段才算「本次录制」的
+        sessionSegmentBase = segments.count
+        partStartedAt = Date()
 
         // 1. 确认语言受支持
         //    坑：SpeechTranscriber 吐出的 Locale 标识符不一定是 "zh-CN" 这种形式
@@ -1235,7 +1257,31 @@ final class TranscriptionEngine {
                 try? await analyzer.finalizeAndFinishThroughEndOfInput()
             }
             for task in tasks { task.cancel() }
-            guard let self, !self.statusMessage.hasPrefix("❌") else { return }
+            guard let self else { return }
+
+            // 会话落盘必须在这个位置:analyzer 定稿完、消费任务吐完最后
+            // 几段之后——再早存下来的就是不完整的转录(顺序约束同上的注释)
+            if let onSessionComplete = self.onSessionComplete {
+                let newSegments = Array(self.segments[self.sessionSegmentBase...])
+                // 没有新段也没有录音文件,这次录制什么都没留下,不落盘
+                if !newSegments.isEmpty || self.recordingURL != nil {
+                    let draft = SessionDraft(
+                        sessionID: self.sessionID,
+                        recordingFileName: self.recordingURL?.lastPathComponent,
+                        startedAt: self.partStartedAt ?? Date(),
+                        // 存档时长为准;没开存档时用最后一段的结束时间兜底,
+                        // 不然「接着录」的偏移会算出 0,两段的时间轴叠在一起
+                        durationMillis: max(
+                            recordedSeconds * 1000,
+                            newSegments.map(\.endTimeMillis).max() ?? 0
+                        ),
+                        segments: newSegments
+                    )
+                    self.sessionID = onSessionComplete(draft) ?? self.sessionID
+                }
+            }
+
+            guard !self.statusMessage.hasPrefix("❌") else { return }
             var message = "已停止 · 共 \(self.segments.count) 段"
             if let url = self.recordingURL {
                 message += " · 已存档 \(url.lastPathComponent)"
@@ -1254,6 +1300,11 @@ final class TranscriptionEngine {
     func clear() {
         segments.removeAll()
         segmentIndex.removeAll()
+        // 清空 = 新的一课:会话归属一起断掉,否则下一段转录会
+        // 追加进已经翻篇的会话里
+        sessionID = nil
+        sessionSegmentBase = 0
+        partStartedAt = nil
         statusMessage = "就绪"
     }
 

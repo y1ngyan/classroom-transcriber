@@ -5,7 +5,7 @@ import Foundation
 /// `languages` 记录这段文字由哪个语言模型产出——因为中英混合是挂载
 /// 多个 SpeechTranscriber（zh-CN / en-US）分别识别，同一时刻可能多个
 /// 模型都有输出，靠这个字段区分来源。
-struct TranscriptSegment: Identifiable, Equatable {
+struct TranscriptSegment: Identifiable, Codable, Equatable {
     let id: UUID
     var text: String
     var isFinal: Bool
