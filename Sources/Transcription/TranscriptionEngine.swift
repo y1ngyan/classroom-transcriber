@@ -756,7 +756,7 @@ final class TranscriptionEngine {
 
     /// 两条文本的相似关系。minLength 是归一化后较短那条的长度，
     /// 给「same 也要够长才作数」用——「好的」这种两三个字到处出现
-    private enum TextRelation {
+    enum TextRelation {
         /// 归一化后完全相同，或一个包含另一个（中间结果还没说完）
         case same(shorterLength: Int)
         /// 编辑距离 ≤ 较长者的 20%：同一句的个别字差异
@@ -772,7 +772,7 @@ final class TranscriptionEngine {
     /// 20% 的阈值**不给下限兜底**：短句里一个字的分量很重，「第一点」和
     /// 「第二点」只差 1 字但占比 33%，必须判成 different——这正是
     /// 「光有时间容差会误合并」要防的
-    private static func textRelation(_ a: String, _ b: String) -> TextRelation {
+    nonisolated static func textRelation(_ a: String, _ b: String) -> TextRelation {
         let na = normalizedForMatch(a), nb = normalizedForMatch(b)
         if na.isEmpty || nb.isEmpty { return .different }
         if na == nb || na.contains(nb) || nb.contains(na) {
@@ -791,18 +791,18 @@ final class TranscriptionEngine {
         }
     }
 
-    private static let matchIgnoredChars: Set<Character> = [
+    nonisolated static let matchIgnoredChars: Set<Character> = [
         " ", "\n", "\t", "。", "，", "、", "；", "：", "！", "？", "…",
         ".", ",", ";", ":", "!", "?",
     ]
 
-    private static func normalizedForMatch(_ text: String) -> String {
+    nonisolated static func normalizedForMatch(_ text: String) -> String {
         String(text.filter { !matchIgnoredChars.contains($0) })
     }
 
     /// 编辑距离。只服务 textsMatch，输入已归一化、课堂段很少超过几百字，
     /// O(n·m) 完全够用，不值得上更聪明的算法
-    private static func levenshtein(_ a: [Character], _ b: [Character]) -> Int {
+    nonisolated static func levenshtein(_ a: [Character], _ b: [Character]) -> Int {
         if a.isEmpty { return b.count }
         if b.isEmpty { return a.count }
         var prev = Array(0...b.count)

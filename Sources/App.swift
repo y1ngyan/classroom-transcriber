@@ -305,6 +305,22 @@ struct ClassroomTranscriberApp: App {
             exit(0)
         }
 
+        // 无头 Whisper 滑窗合并自检：--whisper-window-selftest（纯函数，不依赖模型/麦克风）
+        if CommandLine.arguments.contains("--whisper-window-selftest") {
+            for line in WhisperWindowMerger.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
+        // 无头 Whisper 滑窗攒帧自检：--whisper-buffer-selftest（纯内存，不碰麦克风）
+        if CommandLine.arguments.contains("--whisper-buffer-selftest") {
+            for line in WhisperWindowBuffer.selfTest() {
+                print(line)
+            }
+            exit(0)
+        }
+
         // 无头会话持久化自检：--session-selftest（临时目录，不碰真实数据）
         if CommandLine.arguments.contains("--session-selftest") {
             for line in RecordingsStore.selfTest() {
