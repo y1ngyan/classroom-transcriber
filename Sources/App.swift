@@ -311,6 +311,21 @@ struct ClassroomTranscriberApp: App {
             dispatchMain()
         }
 
+        // 无头核查状态汇总自检：--manual-check-selftest（纯本地，不发网络请求）
+        //
+        // 走 MainActor：FactCheckStore 是 @MainActor 的，自检要构造它。
+        // 不用 semaphore 阻塞主线程（那会和 MainActor 死锁——阶段 2 踩过的坑），
+        // 让 App 照常启动、跑完自己 exit
+        if CommandLine.arguments.contains("--manual-check-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            Task { @MainActor in
+                for line in FactCheckStore.selfTest() {
+                    print(line)
+                }
+                exit(0)
+            }
+        }
+
         // 无头术语提词：--extract-terms（走真实模型，验证整条提词链路）
         //
         // 和 --glossary 一样直接调 Service 不走 Store：Store 是 @MainActor 的，

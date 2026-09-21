@@ -174,6 +174,21 @@ struct TranscriptLine: View {
     let segment: TranscriptSegment
     var attachments: [ImageAttachment] = []
     var onRemoveAttachment: ((ImageAttachment) -> Void)?
+    /// 这一段的核查状态。传 `.none` 表示还没查过。
+    ///
+    /// 由调用方从 FactCheckStore 查好传进来，而不是在这里读 store：
+    /// 这个组件是纯展示的，让它去依赖某个 Store 就没法在别处复用了
+    var checkState: SegmentCheckState = .none
+    /// 点「核查」时回调。为 nil 表示调用方不支持手动核查（比如文件转录预览）
+    var onCheck: (() -> Void)?
+
+    @State private var isHovering = false
+
+    /// 该段是否已完成过核查（决定按钮措辞）
+    private var hasResolvedCheck: Bool {
+        if case .done = checkState { return true }
+        return false
+    }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
@@ -233,8 +248,32 @@ struct TranscriptLine: View {
                 .opacity(segment.isFinal ? 1 : 0.55)
             }
 
+            // 核查状态：和提问标记、质量自评同一套状态语言（小图标 + 颜色）。
+            // 只在「查过」或「正在查」时占一行——没查过的段是绝大多数，
+            // 给每段都挂一个「未核查」等于把列表塞满噪声
+            if let mark = checkMark {
+                StatusMark(kind: mark.kind, text: mark.text)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             // 缩略图 + 时间戳，一起右对齐
             HStack(alignment: .bottom, spacing: Theme.Spacing.sm) {
+                // 手动核查入口：悬停才出现。
+                // 放在时间戳左边而不是常驻——常驻的话每段都挂个按钮，
+                // 一屏几十段全是控件，读转录本身反而被挤没了
+                if isHovering, onCheck != nil, segment.isFinal {
+                    Button(action: { onCheck?() }) {
+                        Text(hasResolvedCheck ? "重新核查" : "核查")
+                            .textStyle(Theme.Text.caption)
+                            .foregroundStyle(Theme.accent)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(checkState == .checking)
+                    .opacity(checkState == .checking ? 0.4 : 1)
+                    .transition(.opacity)
+                }
+
                 ForEach(attachments) { attachment in
                     if let onRemoveAttachment {
                         Thumbnail(attachment: attachment) { onRemoveAttachment(attachment) }
@@ -248,6 +287,36 @@ struct TranscriptLine: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.textTertiary)
             }
+        }
+        // 悬停反馈是一条 2pt 左侧竖条（设计规范），不是背景填充。
+        // 画在 overlay 里不占布局，指针进出时列表不会抖
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
+                .frame(width: 2)
+                .offset(x: -Theme.Spacing.sm)
+        }
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+        }
+    }
+
+    /// 核查状态对应的标记。没查过返回 nil（那一行不显示）
+    private var checkMark: (kind: StatusMark.Kind, text: String)? {
+        switch checkState {
+        case .none:
+            return nil
+        case .checking:
+            return (.live, "核查中…")
+        case .failed:
+            return (.warning, "核查失败，可重新核查")
+        case .done(.verified):
+            return (.ok, "已核查：已证实")
+        case .done(.disputed):
+            return (.error, "已核查：存疑")
+        case .done(.unverifiable):
+            return (.neutral, "已核查：无法核实")
         }
     }
 }

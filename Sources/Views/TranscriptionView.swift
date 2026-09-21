@@ -196,7 +196,13 @@ struct TranscriptionView: View {
                         TranscriptLine(
                             segment: segment,
                             attachments: appState.attachments.attachments(for: segment),
-                            onRemoveAttachment: { appState.attachments.remove($0) }
+                            onRemoveAttachment: { appState.attachments.remove($0) },
+                            checkState: appState.factCheck.state(for: segment.id),
+                            // 手动核查无视全局 autoFactCheck 开关——那一条
+                            // 管的是「自动跑不跑」，这里管的是「我现在想查
+                            // 这一段」。定稿后才能查：未定稿的文字还在被
+                            // 模型改写，拿去核查既浪费请求又会得到错结论
+                            onCheck: { appState.factCheck.submit(segment: segment) }
                         )
                         .id(segment.id)
                     }
