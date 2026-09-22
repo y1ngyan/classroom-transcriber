@@ -10,7 +10,7 @@ struct ClassroomTranscriberApp: App {
             for line in EnvironmentChecks.run() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 文件通道转换：--conv-file <输入> <输出>
@@ -22,7 +22,7 @@ struct ClassroomTranscriberApp: App {
             ) {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 声道转换探针：--conv-probe（纯计算，不需要麦克风 / 不说话也能跑）
@@ -30,7 +30,7 @@ struct ClassroomTranscriberApp: App {
             for line in TranscriptionEngine.conversionProbe() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 语音处理 A/B：--mic-ab [--seconds N]
@@ -110,7 +110,7 @@ struct ClassroomTranscriberApp: App {
 
                 print("")
                 print("✅ A/B 结束")
-                exit(0)
+                exitReleasingGgml()
             }
         }
 
@@ -156,13 +156,16 @@ struct ClassroomTranscriberApp: App {
                 let after = await runtime.state
                 print("重复 warmUp() 后状态: \(describe(after))")
 
-                // 退出前放掉引擎：whisper 的 ggml Metal 后端在静态析构时断言
-                // residency set 为空，引擎还活着的话进程以 abort 结束（exit=134）。
-                // 走到这条路上的 `exit(0)` 不会经过 AppKit 终止流程，
-                // 所以那个通知钩子在这里不发，得显式放一次
+                // 退出前放掉引擎。走正规所有权这一步是**为了验它**——这条自检
+                // 要覆盖的就是「warmUp 之后 unload 能不能干净收场」。
+                //
+                // 但**不能靠它来避免 abort**：它放掉的只是本对象持有的那一份，
+                // 而这条路上 App 照常启动，`AppState` 会按配置预热**另一份**
+                // （实测：这一步调过之后仍然 exit=134）。真正的兜底是
+                // `exitReleasingGgml()`——它放掉进程里所有 context，再卸后端
                 await MainActor.run { runtime.unload() }
-                print("已放掉引擎（退出前必须做，否则 ggml 静态析构会 abort）")
-                exit(0)
+                print("已放掉本对象持有的引擎（退出前必须做，否则 ggml 静态析构会 abort）")
+                exitReleasingGgml()
             }
         }
 
@@ -183,7 +186,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 1800) == .timedOut {
                 print("❌ 离线跑超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 麦克风链路自检：--mic-selftest
@@ -345,12 +348,17 @@ struct ClassroomTranscriberApp: App {
                     }
                 }
 
-                // 同上：exit(0) 不走 AppKit 终止流程，引擎得显式放掉
-                if backend == .whisper {
-                    await MainActor.run { engine.whisper.unload() }
-                }
+                // 优雅路径：放掉自检自己那个引擎，顺带覆盖 unload()。
+                //
+                // **刻意不再按 `backend == .whisper` 判定**——那个判据正是漏放的
+                // 来源：它问的是「这条入口这次跑的是哪个后端」，而真正漏掉的是
+                // 「这条入口让 App 照常启动，于是 AppState 按**配置**预热的那一份」。
+                // 两者可以不一致（配置是 whisper、命令行没给 --backend），
+                // 判据为假就跳过释放，进程照样 abort。
+                // 现在无条件走一遍，兜底交给 exitReleasingGgml()
+                await MainActor.run { engine.whisper.unload() }
                 print("✅ 麦克风链路自检结束，未崩溃")
-                exit(0)
+                exitReleasingGgml()
             }
         }
 
@@ -369,7 +377,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 300) == .timedOut {
                 print("❌ COS 自检超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 配置存取往返：--config-selftest（会临时改写 config.json，结束还原）
@@ -385,7 +393,7 @@ struct ClassroomTranscriberApp: App {
             for line in AppConfig.statusLines {
                 print("  \(line)")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头录音存档自检：--wav-selftest（写已知正弦波再读回核对，不用麦克风）
@@ -393,7 +401,7 @@ struct ClassroomTranscriberApp: App {
             for line in WAVRecorder.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头高通自检：--hp-selftest（量幅频响应，和解析解对照，不用麦克风）
@@ -401,7 +409,7 @@ struct ClassroomTranscriberApp: App {
             for line in HighPassFilter.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头音频前级自检：--preamp-selftest（量增益与噪声门，不用麦克风）
@@ -409,7 +417,7 @@ struct ClassroomTranscriberApp: App {
             for line in AudioPreamp.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头提问检测自检：--question-selftest（纯规则，不依赖任何设备）
@@ -417,7 +425,7 @@ struct ClassroomTranscriberApp: App {
             for line in QuestionDetector.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头转录质量自评自检：--quality-selftest（真实样本回归，不依赖任何设备）
@@ -425,7 +433,7 @@ struct ClassroomTranscriberApp: App {
             for line in TranscriptQualityAssessor.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头 Whisper 引擎自检：--whisper-selftest
@@ -435,7 +443,7 @@ struct ClassroomTranscriberApp: App {
             for line in WhisperEngine.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头语义切分自检：--split-selftest（纯函数，不依赖任何设备）
@@ -443,7 +451,7 @@ struct ClassroomTranscriberApp: App {
             for line in TranscriptSplitter.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头补标点自检：--punct-selftest（校验纯函数 + 切分器标点优先，
@@ -452,7 +460,7 @@ struct ClassroomTranscriberApp: App {
             for line in PunctuationService.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头重复段去重自检：--dedup-selftest（纯内存驱动 upsert，不依赖设备）
@@ -460,7 +468,7 @@ struct ClassroomTranscriberApp: App {
             for line in TranscriptionEngine.dedupSelfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头 Whisper 滑窗合并自检：--whisper-window-selftest（纯函数，不依赖模型/麦克风）
@@ -468,7 +476,7 @@ struct ClassroomTranscriberApp: App {
             for line in WhisperWindowMerger.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头 Whisper 滑窗攒帧自检：--whisper-buffer-selftest（纯内存，不碰麦克风）
@@ -476,7 +484,7 @@ struct ClassroomTranscriberApp: App {
             for line in WhisperWindowBuffer.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头课程词库联网生成自检：--glossary-suggest-selftest（纯函数：检索式规划、
@@ -485,7 +493,7 @@ struct ClassroomTranscriberApp: App {
             for line in GlossarySuggestionService.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头会话持久化自检：--session-selftest（临时目录，不碰真实数据）
@@ -493,7 +501,7 @@ struct ClassroomTranscriberApp: App {
             for line in RecordingsStore.selfTest() {
                 print(line)
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 真实录音回归重复段去重：--dedup-file <wav>
@@ -508,7 +516,7 @@ struct ClassroomTranscriberApp: App {
             // 改用 dispatchMain 让主队列继续服务,任务结束自己 exit
             Task { @MainActor in
                 await TranscriptionEngine.dedupFileRun(path: path)
-                exit(0)
+                exitReleasingGgml()
             }
             dispatchMain()
         }
@@ -524,7 +532,7 @@ struct ClassroomTranscriberApp: App {
                 for line in FactCheckStore.selfTest() {
                     print(line)
                 }
-                exit(0)
+                exitReleasingGgml()
             }
         }
 
@@ -571,7 +579,7 @@ struct ClassroomTranscriberApp: App {
                 semaphore.signal()
             }
             semaphore.wait()
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头术语提词解析自检：--terms-parser
@@ -594,7 +602,7 @@ struct ClassroomTranscriberApp: App {
                 let aliases = entry.aliases.isEmpty ? "—" : entry.aliases.joined(separator: "、")
                 print("  \(entry.term) | \(aliases) | \(entry.note)")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头术语校正：--glossary（用内置示例转录，验证整条链路）
@@ -663,7 +671,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 240) == .timedOut {
                 print("❌ 术语校正超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头笔记生成：--notes（用内置示例转录，验证整条链路）
@@ -704,7 +712,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 180) == .timedOut {
                 print("❌ 笔记生成超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头事实核查：--factcheck "待核查的陈述"
@@ -741,7 +749,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 120) == .timedOut {
                 print("❌ 核查超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
 
         // 无头文件转录：--transcribe-file <path> [--locales zh-CN,en-US]
@@ -790,7 +798,7 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 900) == .timedOut {
                 print("❌ 转录超时")
             }
-            exit(0)
+            exitReleasingGgml()
         }
     }
 

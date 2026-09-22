@@ -2,6 +2,105 @@ import AVFoundation
 import Foundation
 import whisper
 
+/// 进程退出前的 ggml 清理 —— **所有 `exit()` 都必须走 `exitReleasingGgml`**。
+///
+/// **为什么必须是全局的**：whisper context 从来不只有一份。GUI 启动时 `AppState`
+/// 会按配置预热一份（`AppState` 里那个 `warmUp()`），无头入口又各自构造一份，
+/// `--mic-selftest` 那条路上两者**同时**存在。而 ggml 的 Metal 后端在静态析构时
+/// 断言 `[rsets->data count] == 0`：**只要还有任意一份 context 活着**，进程就以
+/// abort 结束（实测 exit=134，栈在 `__cxa_finalize_ranges` → `ggml_metal_device_free`）。
+///
+/// 所以「放掉自己那一个」是不够的。`--whisper-prewarm` 明明已经调过
+/// `runtime.unload()` 却仍然 134，正是因为它放掉的是自检自己造的那一份，而
+/// AppKit 那条路上 `AppState` 造的那一份还活着。清理必须能找到**所有** context。
+///
+/// **顺序是硬约束**：先 `whisper_free`（把 buffer 还给后端，residency set 才空得
+/// 下来），再 `ggml_backend_unload`。反过来会在后端已拆的情况下 free context。
+enum GgmlTeardown {
+
+    private static let lock = NSLock()
+    /// 还活着的 context。`OpaquePointer` 可哈希，正好当身份用。
+    ///
+    /// `nonisolated(unsafe)` 的依据：**每一次**读写都在 `lock` 里（`adopt` / `release`
+    /// / `releaseAll` 三个入口无一例外），所以这里的可变全局状态是安全的。
+    /// Swift 6 看不出「调用方都记得加锁」，只能靠这个显式承诺。
+    nonisolated(unsafe) private static var live: Set<OpaquePointer> = []
+
+    /// 登记新造的 context（`WhisperEngine.init` 造完就登记）
+    static func adopt(_ context: OpaquePointer) {
+        lock.lock()
+        defer { lock.unlock() }
+        live.insert(context)
+    }
+
+    /// 放掉一个 context。**幂等**——已经放过的返回 false，不会再 free 一次。
+    /// 所以 `WhisperEngine.deinit` 和退出清理谁先跑，都不会重复释放。
+    @discardableResult
+    static func release(_ context: OpaquePointer) -> Bool {
+        lock.lock()
+        let owned = live.remove(context) != nil
+        lock.unlock()
+        guard owned else { return false }
+        whisper_free(context)
+        return true
+    }
+
+    /// 放掉**所有**还活着的 context，再卸掉动态加载的 ggml 后端。幂等，可重复调。
+    ///
+    /// 返回值给自检打印用：「这次退出到底放掉了几个 context、卸了哪些后端」——
+    /// 没有这个数字，出问题时只能看见一个 exit=134，看不见是谁没放。
+    @discardableResult
+    static func releaseAll() -> (contexts: Int, backends: [String]) {
+        lock.lock()
+        let pending = live
+        live.removeAll()
+        lock.unlock()
+
+        // 先 context 后后端，顺序不能反（见类型注释）
+        for context in pending {
+            whisper_free(context)
+        }
+
+        // `ggml_backend_unload` 只对**动态库加载**的后端有效，而
+        // `ggml_backend_load_all()` 正是从 .so 加载的（Metal / BLAS / CPU），
+        // 所以这里逐个卸得掉——实测它会打 `ggml_metal_free: deallocating`。
+        //
+        // **先把名字全取下来，再倒着卸。** 两件事都是必须的：
+        // ① 名字只能在卸之前取——`ggml_backend_unload` 会把该后端从注册表里
+        //    `unregister`（头文件原话），卸完再问名字就是问一个不在册的
+        // ② 必须**倒着**卸：摘除会让后面的下标前移。正向 `0..<count` 遍历时
+        //    count 一边走一边缩，第二次取下标就越界——2026-09-22 实测直接
+        //    `ggml-backend-reg.cpp:321 GGML_ASSERT(index < reg_count())`，
+        //    把「退出时 abort」原样复现了一遍，只是这次 abort 在自己的代码里
+        //
+        // 倒着卸也正好是「后加载的先拆」，与 `ggml_backend_load_all` 的加载
+        // 顺序相反，依赖关系上是安全的那一头
+        let names: [String] = (0..<ggml_backend_reg_count()).map { index in
+            guard let reg = ggml_backend_reg_get(index),
+                  let name = ggml_backend_reg_name(reg) else { return "?" }
+            return String(cString: name)
+        }
+        for index in stride(from: ggml_backend_reg_count(), through: 1, by: -1) {
+            guard let reg = ggml_backend_reg_get(index - 1) else { continue }
+            ggml_backend_unload(reg)
+        }
+        return (pending.count, names)
+    }
+}
+
+/// 无头入口唯一的退出出口。**不许再出现裸 `exit()`。**
+///
+/// 裸 `exit()` 会跳过 AppKit 终止流程，ggml 的静态析构随即 abort（exit=134）。
+/// 把清理钉死在这一个函数里，「这次忘了放」在结构上就不可能再发生——
+/// 之前是每个出口各写一遍、还要判断「这次是不是用了 whisper」，于是漏了。
+///
+/// 刻意不是 `@MainActor`：出口散落在 `Task.detached` 和 `Task { @MainActor }` 里，
+/// 必须从任何隔离域都调得到。
+func exitReleasingGgml(_ code: Int32 = 0) -> Never {
+    GgmlTeardown.releaseAll()
+    exit(code)
+}
+
 /// 本地 Whisper 转录引擎（whisper.cpp 的 Swift 封装）。
 ///
 /// 存在的理由：Apple 的 SpeechTranscriber 在低质量音频上表现明显更差——
@@ -115,10 +214,15 @@ final class WhisperEngine: @unchecked Sendable {
             throw WhisperError.initFailed
         }
         context = ctx
+        // 登记进全局表。退出清理要能找到**所有** context，不只是本对象这一份
+        // （理由见 `GgmlTeardown`）
+        GgmlTeardown.adopt(ctx)
     }
 
     deinit {
-        if let context { whisper_free(context) }
+        // 走 `release` 而不是直接 `whisper_free`：退出清理可能已经先一步把它
+        // 放掉了，那这里就该什么都不做——直接 free 会二次释放
+        if let context { GgmlTeardown.release(context) }
     }
 
     /// 转一段 16kHz 单声道 Float32 PCM。

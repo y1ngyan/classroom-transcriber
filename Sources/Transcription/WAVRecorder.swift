@@ -23,6 +23,18 @@ final class WAVRecorder: @unchecked Sendable {
     private var dataBytes = 0
     private var isClosed = false
 
+    /// 已经**真正落盘**的音频字节数。只在 `queue` 上访问
+    private var flushedBytes = 0
+    /// 上一次回填头时 `flushedBytes` 的值。`-1` = 还没回填过
+    private var lastHeaderBytes = -1
+
+    /// 头回填的间隔（字节）。48kHz 单声道 16-bit 下 `96000` = 1 秒音频。
+    ///
+    /// 这一秒是**崩溃窗口**：进程在这一秒内被杀，头会少报最多 1 秒的时长。
+    /// 换更小的话每次回填要 seek 两趟，纯属浪费——1 秒的欠报已经远好过
+    /// 「整个文件打不开」
+    private static let headerRefreshBytes = 96_000
+
     /// 标准 PCM 头长度
     private static let headerSize = 44
 
@@ -48,8 +60,23 @@ final class WAVRecorder: @unchecked Sendable {
         self.sampleRate = sampleRate
         self.channels = channels
 
-        // 头先占位，收尾时 seek 回来回填真实长度
-        try? handle.write(contentsOf: Data(repeating: 0, count: Self.headerSize))
+        // **一开始就写一个合法的头**（长度 0），而不是 44 字节的零占位。
+        //
+        // 这一行是「录音被强杀就废掉」的直接修复。原来占位写成全零，真正的头
+        // 只在 `finish()` 里回填；而 `finish()` 只在正常停止时才走到。于是进程
+        // 中途被杀（崩溃 / 强杀 / 退出收尾没走完）时，磁盘上是「44 字节零 +
+        // 完整 PCM」——2026-09-22 在 recordings/ 里实测到 8 个这样的文件：
+        // 头 60 字节全为零、数据一个不少、但任何播放器都打不开。
+        //
+        // 写成合法的 0 长度头之后，**任何时刻**文件都是可解析的 WAV
+        // （最坏情况时长报 0，而不是打不开），再由 `refreshHeader()` 定期把
+        // 真实长度填进去
+        try? handle.write(contentsOf: Self.header(
+            dataBytes: 0,
+            sampleRate: sampleRate,
+            channels: channels
+        ))
+        lastHeaderBytes = 0
     }
 
     /// **在音频线程调用。** 只做转换 + 入队，不做真正的 I/O。
@@ -79,33 +106,65 @@ final class WAVRecorder: @unchecked Sendable {
 
     private func write(_ data: Data) {
         try? handle.write(contentsOf: data)
+        flushedBytes += data.count
+
+        // 每隔 `headerRefreshBytes` 回填一次头。**判据用「已落盘字节数」而不是
+        // 「已接收字节数」**：只有真的写进去的那些才该被报进长度，否则头会
+        // 比文件实际内容长，播放器读到文件尾就报错
+        if flushedBytes - lastHeaderBytes >= Self.headerRefreshBytes {
+            refreshHeader()
+        }
+    }
+
+    /// 自检用：等所有已入队的写块落盘，但**不回填头、不关闭**。
+    /// 「进程此刻被杀」这个状态只能这样构造——走 `finish()` 就不是中途了
+    func drainForTesting() {
+        queue.sync {}
+    }
+
+    /// 把当前长度回填进头。**只在 `queue` 上调用**（`write` 与 `finish` 都在这条
+    /// 队列上，串行保证不会和 append 交错）。
+    ///
+    /// 写完必须把文件偏移恢复到尾端——否则下一块音频会从偏移 0 开始覆盖，
+    /// 把整段前几秒的数据写没。
+    private func refreshHeader() {
+        try? handle.seek(toOffset: 0)
+        try? handle.write(contentsOf: Self.header(
+            dataBytes: flushedBytes,
+            sampleRate: sampleRate,
+            channels: channels
+        ))
+        _ = try? handle.seekToEnd()
+        lastHeaderBytes = flushedBytes
     }
 
     /// 收尾：排空队列 → 回填头 → 关闭。返回写入的音频字节数。
     ///
-    /// 用 `queue.sync` 而不是 `async`——必须确保所有缓冲都落盘了才能回填
-    /// 长度，否则文件头会少算最后几块，播放器会截断。
+    /// 整个收尾都在 `queue` 上做，不是只 `queue.sync {}` 排空一下：回填头和
+    /// 写音频用的是同一个 `FileHandle`，如果留在这个调用方的线程上，一个
+    /// 迟到的 `append` 刚好把写块入队，两边就会同时改同一个 fd（还可能把
+    /// 偏移搞乱）。放同一条串行队列上，顺序有唯一定义。
     @discardableResult
     func finish() -> Int {
-        queue.sync {}
-
-        lock.lock()
-        guard !isClosed else {
-            let total = dataBytes
+        var total = 0
+        queue.sync {
+            lock.lock()
+            guard !isClosed else {
+                total = flushedBytes
+                lock.unlock()
+                return
+            }
+            isClosed = true
             lock.unlock()
-            return total
-        }
-        isClosed = true
-        let total = dataBytes
-        lock.unlock()
 
-        try? handle.seek(toOffset: 0)
-        try? handle.write(contentsOf: Self.header(
-            dataBytes: total,
-            sampleRate: sampleRate,
-            channels: channels
-        ))
-        try? handle.close()
+            // 用 `flushedBytes` 而不是 `dataBytes`：头里的长度必须等于文件里
+            // **实际存在**的字节数。正常收尾时两者相等，但 `dataBytes` 是在
+            // 音频线程上先加计数、写块后入队的——存在「计数已加、块还没写」
+            // 的瞬间。那头就会比文件长，播放器读到文件尾报错
+            refreshHeader()
+            try? handle.close()
+            total = flushedBytes
+        }
         return total
     }
 
@@ -243,6 +302,101 @@ extension WAVRecorder {
         lines.append("  \(maxError < 0.001 ? "✅" : "❌") 逐帧最大偏差 \(String(format: "%.5f", maxError))（16-bit 量化误差上限约 0.00003）")
 
         lines.append(contentsOf: clippingCheck(sampleRate: sampleRate, format: format))
+        lines.append(contentsOf: crashSafetyCheck(sampleRate: sampleRate, format: format))
+        return lines
+    }
+
+    /// 关键判据：**录音中途（`finish()` 还没调）文件必须已经是一个能解析的 WAV。**
+    ///
+    /// 这条对应 2026-09-22 在 `recordings/` 里实测到的 8 个坏文件：头 60 字节
+    /// 全为零、PCM 数据一个不少、任何播放器都打不开。成因是头只在 `finish()`
+    /// 里回填，而进程被强杀时走不到那里。
+    ///
+    /// 刻意**不用 SIGKILL 来测**：真正的判据是「任意时刻磁盘上的字节自洽」，
+    /// 而这一点不需要真的杀进程就能判定——杀进程那条端到端用例另有一条
+    /// （`tools/probes/wav_kill.sh`），两条互相独立。
+    private static func crashSafetyCheck(sampleRate: UInt32, format: AVAudioFormat) -> [String] {
+        var lines: [String] = ["中途落盘（进程被杀也必须能打开）:"]
+
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("wav-crash-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        guard let recorder = WAVRecorder(url: url, sampleRate: sampleRate, channels: 1) else {
+            return lines + ["  ❌ 无法创建 WAVRecorder"]
+        }
+
+        /// 半秒一块，写到 2.5 秒——跨过 `headerRefreshBytes`（1 秒）至少一次
+        let chunkFrames = 24_000
+        let totalFrames = 120_000
+
+        func bytesOnDisk() -> Data? { try? Data(contentsOf: url) }
+        func describe(_ data: Data) -> (riff: String, wave: String, dataBytes: Int, fileBytes: Int) {
+            func ascii(_ offset: Int) -> String {
+                String(data: data.subdata(in: offset..<(offset + 4)), encoding: .ascii) ?? "?"
+            }
+            let declared = data.count >= 44
+                ? data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 40, as: UInt32.self) }
+                : UInt32.max
+            return (ascii(0), ascii(8), Int(declared), data.count)
+        }
+
+        // ① 刚创建、一个样本都还没写
+        if let data = bytesOnDisk() {
+            let info = describe(data)
+            let ok = info.riff == "RIFF" && info.wave == "WAVE" && info.dataBytes == 0
+            lines.append("  \(ok ? "✅" : "❌") 刚创建还未写入：\(info.fileBytes) 字节，"
+                         + "头 \(info.riff)/\(info.wave)，data 声明 \(info.dataBytes)（期望 0）")
+        } else {
+            lines.append("  ❌ 刚创建还未写入：文件读不回来")
+        }
+
+        // ② 写满 2.5 秒但**不调 finish()**，此刻模拟「进程刚被杀」
+        var written = 0
+        while written < totalFrames {
+            let frames = min(chunkFrames, totalFrames - written)
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: format,
+                frameCapacity: AVAudioFrameCount(frames)
+            ), let channel = buffer.floatChannelData?[0] else {
+                return lines + ["  ❌ 无法创建 PCM 缓冲"]
+            }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            for index in 0..<frames {
+                channel[index] = Float(sin(2 * Double.pi * 440 * Double(written + index) / Double(sampleRate))) * 0.5
+            }
+            recorder.append(buffer)
+            written += frames
+        }
+        // 排空写队列：`append` 是异步落盘的，不等的话读到的是半个文件
+        recorder.drainForTesting()
+
+        guard let data = bytesOnDisk() else {
+            return lines + ["  ❌ 中途落盘：文件读不回来"]
+        }
+        let info = describe(data)
+        let actualDataBytes = info.fileBytes - 44
+        let duration = Double(info.dataBytes) / (Double(sampleRate) * 2)
+
+        let headerOk = info.riff == "RIFF" && info.wave == "WAVE"
+        lines.append("  \(headerOk ? "✅" : "❌") 写到一半未 finish：头 \(info.riff)/\(info.wave)"
+                     + "（打不开就是全零头那个缺陷）")
+        // 欠报可以有（最多一个回填间隔），**多报不行**——多报会让播放器读到文件尾报错
+        let lengthOk = info.dataBytes <= actualDataBytes
+        lines.append("  \(lengthOk ? "✅" : "❌") 头里声明的长度 \(info.dataBytes) ≤ 文件实际数据 \(actualDataBytes)"
+                     + "\(lengthOk ? "" : "（多报 = 播放器读到文件尾报错）")")
+        let durationOk = duration >= 1.0 && duration <= Double(totalFrames) / Double(sampleRate)
+        lines.append("  \(durationOk ? "✅" : "❌") 声明时长 \(String(format: "%.2f", duration)) 秒"
+                     + "（期望 1.0–\(String(format: "%.1f", Double(totalFrames) / Double(sampleRate)))；"
+                     + "0 秒说明从没回填过）")
+
+        // 真正的证据：整段能被当成 WAV 解析出正确的帧数
+        let parsed = (try? AVAudioFile(forReading: url)).map { file in
+            Int(file.length)
+        }
+        lines.append("  \(parsed != nil ? "✅" : "❌") AVAudioFile 能打开，读出 \(parsed ?? -1) 帧"
+                     + "（期望 \(Int(duration * Double(sampleRate)))）")
+
         return lines
     }
 

@@ -60,7 +60,14 @@ final class WhisperRuntime {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.unload() }
+            MainActor.assumeIsolated {
+                // 先走正规所有权：`unload()` 把引擎放掉，`deinit` 里 free context
+                self?.unload()
+                // 再兜一遍底：进程里可能还有本对象之外的 context（无头自检自己
+                // 造的、或另一个 runtime）。只要漏一个，退出就是 abort——
+                // 而 abort 发生在静态析构里，栈上看不出是谁没放
+                GgmlTeardown.releaseAll()
+            }
         }
     }
 
