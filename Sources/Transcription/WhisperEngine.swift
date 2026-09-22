@@ -21,7 +21,12 @@ import whisper
 ///
 /// 模型：medium-q5_0（514MB，8GB 内存实测跑得动）。中文默认输出繁体，
 /// 这里统一转成简体（见 `ChineseText`）。
-final class WhisperEngine {
+/// `@unchecked Sendable` 的依据：whisper context 的**每一次**使用都在
+/// `lock` 里（`transcribe` 全程持锁），所以实例本身可以跨线程转移
+/// （预热在后台队列造、录音时给滑窗队列用）。`deinit` 里的 `whisper_free`
+/// 不在锁里——它只在最后一个引用消失时执行，而那时不可能还有持锁的调用者
+/// （调用者自己就握着引用）。
+final class WhisperEngine: @unchecked Sendable {
 
     /// 模型的下载地址。用 hf-mirror 是因为国内直连 huggingface 不稳
     static let modelFileName = "ggml-medium-q5_0.bin"
@@ -42,8 +47,23 @@ final class WhisperEngine {
         modelDirectory.appendingPathComponent(modelFileName)
     }
 
+    /// 实际要加载的模型文件。
+    ///
+    /// 允许用 `CLASSROOM_WHISPER_MODEL` 指到别处：514MB 的模型未必每个人都
+    /// 想放在 Application Support 里（外置盘、已有的另一份量化版本都说得通）。
+    /// 缺省位置是可发现的——`Application Support/ClassroomTranscriber/models/`，
+    /// 而且设置页会把完整路径显示出来（`WhisperRuntime.modelURL`），
+    /// 因为「模型放哪儿」这个问题不该只能靠翻文档回答。
+    static var resolvedModelURL: URL {
+        if let raw = ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_MODEL"],
+           !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+            return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+        }
+        return modelPath
+    }
+
     static var isModelReady: Bool {
-        FileManager.default.fileExists(atPath: modelPath.path)
+        FileManager.default.fileExists(atPath: resolvedModelURL.path)
     }
 
     enum WhisperError: LocalizedError {
@@ -66,9 +86,10 @@ final class WhisperEngine {
     /// 只从使用它的队列访问。whisper_full 是重计算，调用方会放到后台
     private let lock = NSLock()
 
-    /// 用默认路径（Application Support/models）构造
+    /// 用解析出来的路径构造（默认 Application Support/models，
+    /// 可用 `CLASSROOM_WHISPER_MODEL` 覆盖）
     convenience init() throws {
-        try self.init(modelURL: Self.modelPath)
+        try self.init(modelURL: Self.resolvedModelURL)
     }
 
     /// 指定模型路径。抽出来是为了自检能喂一个**不存在的路径**，
@@ -277,6 +298,17 @@ final class WhisperEngine {
     ///
     /// Whisper 的输入格式是固定的（16kHz mono float），不做这一步
     /// 会得到完全错误的结果而且不报错
+    /// 从**已经是 16kHz 单声道 Float32** 的缓冲里取出样本。
+    ///
+    /// 和 `resampleTo16k` 分开是因为实时链路那一边已经用 AVAudioConverter
+    /// 转过了（转换必须在 MicTap 里自己做，理由见 `firstChannelAsMono`），
+    /// 再走一次转换器只是白跑一遍重采样——每秒十几次的音频线程上，白跑的
+    /// 每一次都是一次可能丢帧的分配。
+    static func samples(from buffer: AVAudioPCMBuffer) -> [Float]? {
+        guard let channel = buffer.floatChannelData?[0] else { return nil }
+        return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+    }
+
     static func resampleTo16k(_ buffer: AVAudioPCMBuffer) -> [Float]? {
         let target = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                    sampleRate: 16_000, channels: 1, interleaved: false)

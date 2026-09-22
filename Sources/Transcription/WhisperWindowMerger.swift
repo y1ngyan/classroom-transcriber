@@ -94,14 +94,26 @@ enum WhisperWindowMerger {
         var changes: [String] = []
 
         // 候选段转全局时间
-        let candidates = input.window.segments.map { seg in
-            TranscriptSegment(
+        //
+        // 档位在**候选构造时**就带上，而不是等定稿再算：合并之后
+        // `WhisperSegment` 就不存在了（只剩合并器吐出的 `TranscriptSegment`），
+        // 逐字符置信度只有这一刻拿得到。Apple 那条链路是反过来的——它的
+        // 置信度挂在 `AttributedString` 上、跟着结果一路走到 `applyUpdate`，
+        // 所以那边可以「定稿时才算档位」。两条链路的档位最终都由同一个
+        // `TranscriptQualityAssessor` 判，口径一致。
+        //
+        // `seg.grade` 为 nil 只在拿不到 token 概率时发生（见
+        // `WhisperEngine.spreadTokenProbabilities`），不是错判成「不可信」。
+        let candidates = input.window.segments.map { seg -> TranscriptSegment in
+            var candidate = TranscriptSegment(
                 text: seg.text,
                 isFinal: false,
                 startTimeMillis: input.window.startMillis + seg.startMillis,
                 endTimeMillis: input.window.startMillis + seg.endMillis,
                 languages: ["zh-CN"]
             )
+            candidate.qualityGrade = seg.grade
+            return candidate
         }
 
         // 上一窗尾部转全局时间
@@ -135,6 +147,8 @@ enum WhisperWindowMerger {
                 segments[index].text = candidate.text
                 segments[index].startTimeMillis = candidate.startTimeMillis
                 segments[index].endTimeMillis = candidate.endTimeMillis
+                // 档位跟着这一版文本走：文本被换掉了，旧档位就不是这段的档位了
+                segments[index].qualityGrade = candidate.qualityGrade
 
                 if shouldStabilize {
                     segments[index].isFinal = true

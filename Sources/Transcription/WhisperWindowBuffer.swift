@@ -51,6 +51,34 @@ final class WhisperWindowBuffer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return totalAppended
     }
+
+    /// 取窗 **+ 这一窗第一个样本在整段录音里的起点毫秒**。
+    ///
+    /// 为什么两件事必须在同一把锁里做完：分开调 `window()` 和 `totalSampleCount`
+    /// 的话，两次调用之间采集线程可能又追加了一整个回调块（4096 帧 ≈ 256ms），
+    /// 算出来的起点会比窗内实际内容偏后——而滑窗链路的每一段时间戳都由它决定，
+    /// 偏一次就是整窗的段落位置都不对，且这种偏法只跟「当时音频线程恰好在不在」
+    /// 有关，看一眼代码看不出来。
+    ///
+    /// - Parameter minimumSeconds: 音频不足 `durationSeconds` 时，只要不少于
+    ///   这个时长也照给（录音收尾要用：最后那一窗可能只剩两三秒）。低于它就
+    ///   返回 nil——Whisper 喂几百毫秒会编出幻觉文本（实测），与其编一段出来，
+    ///   不如不取。
+    /// - Returns: `nil` 表示缓冲是空的，或不足 `minimumSeconds`。
+    func windowWithOrigin(
+        durationSeconds: Double,
+        sampleRate: Double = 16_000,
+        minimumSeconds: Double = 0
+    ) -> (samples: [Float], startMillis: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        let minimum = Int(minimumSeconds * sampleRate)
+        guard !buffer.isEmpty, buffer.count >= minimum else { return nil }
+
+        let wanted = Int(durationSeconds * sampleRate)
+        let count = min(wanted, buffer.count)
+        let start = totalAppended - count
+        return (Array(buffer.suffix(count)), Int(Double(start) / sampleRate * 1000))
+    }
 }
 
 // MARK: - 无头自检
@@ -150,6 +178,50 @@ extension WhisperWindowBuffer {
                   "\(buf.totalSampleCount)（期望 \(expected)，\(threads) 线程 × \(perThread) 次 × \(perCall) 样本）")
             check("并发之后仍能正常取窗", buf.window(durationSeconds: windowSeconds, sampleRate: rate)?.count == windowSamples,
                   "")
+        }
+
+        // MARK: 用例 6：取窗同时给出起点毫秒（滑窗链路每段时间戳的来源）
+        //
+        // 期望值用手算的样本下标写死，不是拿实现再算一遍——这条测的正是
+        // 「起点是不是窗内第一个样本的位置」。容量 1500 < 灌进去的 3000，
+        // 所以同时覆盖了「被挤出 ring buffer 之后起点仍按累计量算」这一条。
+        do {
+            let buf = WhisperWindowBuffer(capacitySeconds: capacity, sampleRate: rate)
+            let total = 3000
+            buf.append((0..<total).map { Float($0) })
+            let windowed = buf.windowWithOrigin(durationSeconds: windowSeconds, sampleRate: rate)
+            let expectedStartSamples = total - windowSamples          // 3000 - 1000 = 2000
+            let expectedStartMillis = expectedStartSamples * 1000 / Int(rate)  // 20000ms
+
+            check("起点毫秒 = 窗内第一个样本的位置",
+                  windowed?.startMillis == expectedStartMillis,
+                  "\(windowed?.startMillis ?? -1)（期望 \(expectedStartMillis)）")
+            check("窗内第一个样本确实是那个位置上的样本（起点不虚报）",
+                  windowed?.samples.first == Float(expectedStartSamples),
+                  "首样本=\(windowed?.samples.first ?? -1)（期望 \(Float(expectedStartSamples))）")
+            // 新旧两个取窗口径必须一致，否则「时间戳」和「内容」会对不上
+            check("与 window() 取到的是同一段音频",
+                  windowed?.samples == buf.window(durationSeconds: windowSeconds, sampleRate: rate),
+                  "")
+        }
+
+        // MARK: 用例 7：不够一整窗时按 minimumSeconds 放宽（录音收尾那一窗）
+        do {
+            let buf = WhisperWindowBuffer(capacitySeconds: capacity, sampleRate: rate)
+            let partial = Int(4.0 * rate)      // 只有 4 秒
+            buf.append((0..<partial).map { Float($0) })
+
+            let wide = buf.windowWithOrigin(durationSeconds: windowSeconds, sampleRate: rate, minimumSeconds: 2.0)
+            check("只有 4 秒音频时，minimumSeconds=2 也能取到（长度就是现有的 4 秒）",
+                  wide?.samples.count == partial, "\(wide?.samples.count ?? -1)（期望 \(partial)）")
+            check("短窗的起点是 0（整段都还没满一窗）", wide?.startMillis == 0, "\(wide?.startMillis ?? -1)")
+
+            let narrow = buf.windowWithOrigin(durationSeconds: windowSeconds, sampleRate: rate, minimumSeconds: 5.0)
+            check("低于 minimumSeconds 时返回 nil（不喂几百毫秒给模型）", narrow == nil, "")
+
+            let empty = WhisperWindowBuffer(capacitySeconds: capacity, sampleRate: rate)
+            check("空缓冲返回 nil（minimumSeconds=0 也不行）",
+                  empty.windowWithOrigin(durationSeconds: windowSeconds, sampleRate: rate) == nil, "")
         }
 
         lines.append(allPassed ? "✅ Whisper 滑窗攒帧自检通过" : "❌ Whisper 滑窗攒帧自检未通过")

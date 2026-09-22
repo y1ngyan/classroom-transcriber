@@ -36,6 +36,8 @@ enum AppConfig {
         /// 要花检索和 LLM 额度，这是用户的账，不该由我们默认替他花掉。
         /// 关掉只是不自动触发，手动点某一段照样能核查
         var autoFactCheck: Bool?
+        /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
+        var transcriptionBackend: String?
     }
 
     private static let configURL: URL = {
@@ -215,6 +217,15 @@ enum AppConfig {
         return ["1", "true", "yes", "on"].contains(raw.lowercased())
     }
 
+    /// 实时转录后端。认不出来的值回落 `.apple`（见 `TranscriptionBackend.of`）。
+    ///
+    /// 允许环境变量覆盖，是为了无头自检能指定后端跑——
+    /// 例如 `TRANSCRIBE_BACKEND=whisper ClassroomTranscriber --mic-selftest`。
+    /// 这条覆盖**只能选后端，不能改默认值**：文件里没写这一项时仍然是 apple。
+    static var transcriptionBackend: TranscriptionBackend {
+        .of(value(env: "TRANSCRIBE_BACKEND", file: box.current.transcriptionBackend))
+    }
+
     static var configFilePath: String { configURL.path }
 
     /// 供 UI 提示用：哪些能力当前可用
@@ -284,6 +295,7 @@ enum AppConfig {
         seed.micGain = "x3"
         seed.questionSensitivity = "low"
         seed.autoFactCheck = true
+        seed.transcriptionBackend = "whisper"
 
         do {
             try save(seed)
@@ -318,12 +330,18 @@ enum AppConfig {
             ("micGain", onDisk.micGain == seed.micGain),
             ("questionSensitivity", onDisk.questionSensitivity == seed.questionSensitivity),
             ("autoFactCheck", onDisk.autoFactCheck == seed.autoFactCheck),
+            ("transcriptionBackend", onDisk.transcriptionBackend == seed.transcriptionBackend),
         ]
         let lost = fields.filter { !$0.1 }.map(\.0)
         lines.append("  \(lost.isEmpty ? "✅" : "❌") \(fields.count) 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
 
         // 档位名认不出来时必须回落 AUTO，而不是变成一个「没有增益」的默认值
         lines.append("  \(MicGainMode.of("x3") == .x3 && MicGainMode.of("笔误") == .auto && MicGainMode.of(nil) == .auto ? "✅" : "❌") 增益档解析：x3 → x3，无效值 / 缺省 → auto")
+
+        // 这一条守的是接线那一包的硬约束：**默认后端必须是 Apple**。
+        // 翻默认值必须是有人显式改这一行、并且在这里看见红——不是某次
+        // 顺手重构把它带过去的（那会让「明天照常录课」变成一句空话）
+        lines.append("  \(TranscriptionBackend.of("whisper") == .whisper && TranscriptionBackend.of("APPLE") == .apple && TranscriptionBackend.of("笔误") == .apple && TranscriptionBackend.of(nil) == .apple ? "✅" : "❌") 后端解析：whisper → whisper；APPLE / 无效值 / 缺省 → apple（默认值）")
 
         // 4. 权限：这文件里有密钥，同机其他账户不该读得到
         let mode = (try? FileManager.default.attributesOfItem(atPath: configURL.path))?[.posixPermissions] as? NSNumber
@@ -365,7 +383,8 @@ enum AppConfig {
           "cosKeyPrefix": "recordings",
           "micGain": "auto",
           "questionSensitivity": "normal",
-          "autoFactCheck": false
+          "autoFactCheck": false,
+          "transcriptionBackend": "apple"
         }
         """
         try? FileManager.default.createDirectory(

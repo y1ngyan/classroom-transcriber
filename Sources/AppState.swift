@@ -38,6 +38,17 @@ final class AppState {
         transcription.onSessionComplete = { [weak self] draft in
             self?.recordings.ingest(draft).id
         }
+
+        // Whisper 引擎在启动时就预热。
+        //
+        // 为什么在这里：引擎构造冷启动实测 17.03 秒（Metal kernel 编译），
+        // 那笔钱绝不能落在「点开始录制」那一刻。放在启动时，用户翻设置、
+        // 选课的这点时间里它就准备完了（缓存命中时 0.65 秒）。
+        // **只在后端真的是 Whisper 时才预热**——默认是 Apple，那条路上
+        // 一次 Metal 编译都不该发生，否则等于给所有人加一笔用不上的开销。
+        if AppConfig.transcriptionBackend == .whisper {
+            transcription.whisper.warmUp()
+        }
     }
 
     /// 开始转录。术语表在这里灌给识别器。
@@ -52,6 +63,10 @@ final class AppState {
         // 只有一个来源——设置页改了没保存、保存了没起录，都不会串
         transcription.micGain = settings.micGain
         transcription.questionSensitivity = settings.questionSensitivity
+        // 后端同理在起录这一刻定下来。**中途换后端不生效**：换后端要重建
+        // 整条采集链路（analyzer 或滑窗），两边的段语义也不同，中途换会让
+        // 同一份转录里混着两条链路的输出。要换后端就停下再开始
+        transcription.backend = settings.backend
         await transcription.requestPermissions()
         await transcription.start()
     }

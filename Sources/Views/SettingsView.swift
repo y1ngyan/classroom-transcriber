@@ -51,6 +51,12 @@ struct SettingsView: View {
 
                 PillButton(title: "保存", isEnabled: store.hasUnsavedChanges) {
                     store.save()
+                    // 刚把后端保存成 Whisper：立刻开始预热模型。用户接下来多半
+                    // 就是切到转录页点开始录制，十几秒的准备时间正好花在
+                    // 「切页面、摆设备」这段里，而不是花在他盯着按钮的时候
+                    if store.backend == .whisper {
+                        appState.transcription.whisper.warmUp()
+                    }
                 }
             }
 
@@ -76,10 +82,40 @@ struct SettingsView: View {
         @Bindable var store = appState.settings
         return SettingsSection(
             title: "录音与识别",
-            subtitle: "送进识别器之前给麦克风信号做一级软件增益。老师离得远、说话偏小的时候，小声识别率会明显变好。"
-                + "录音存档存的是未加增益的原始音频，不受这一级影响。",
+            subtitle: "决定「录下来的声音怎么变成文字」。识别后端和增益都从下一段录音开始生效；"
+                + "录音存档存的始终是未加增益的原始音频，不受这里影响。",
         ) {
             VStack(alignment: .leading, spacing: 12) {
+                LabeledField(label: "识别后端") {
+                    Picker("", selection: $store.backend) {
+                        ForEach(TranscriptionBackend.allCases) { backend in
+                            Text(backend.label).tag(backend)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 360)
+                }
+
+                Text(store.backend.hint)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                note(
+                    "Whisper 后端跑的是本地模型：不联网、不上传，但要在「开始录制」之前先把模型读进内存。"
+                        + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
+                )
+
+                // 预热结果只在这一节里显示：模型路径、准备用时、「不可用」的原因
+                // 都只对「选了 Whisper 的人」有意义，默认（Apple）时这一行不出现
+                if let line = appState.transcription.whisper.statusLine {
+                    Text(line)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(line.hasPrefix("❌") ? Theme.error : Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 LabeledField(label: "麦克风增益") {
                     Picker("", selection: $store.micGain) {
                         ForEach(MicGainMode.allCases) { mode in

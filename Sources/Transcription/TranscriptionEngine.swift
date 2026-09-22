@@ -128,6 +128,19 @@ final class TranscriptionEngine {
     /// progressive 系列边听边出。timeIndexedProgressive 兼顾实时性与分段时间戳。
     var preset: FileTranscription.PresetChoice = .timeIndexed
 
+    /// 实时转录走哪条链路。**默认 Apple**——理由见 `TranscriptionBackend`。
+    ///
+    /// 由 `AppState.startTranscription` 在起录那一刻写入（和 `micGain` 同一个
+    /// 理由：起录时是什么就是什么），录音中途改它不生效。
+    var backend: TranscriptionBackend = .apple
+
+    /// Whisper 模型引擎（预热 + 持有 + 专属推理队列）。
+    ///
+    /// 放在引擎上而不是 AppState 上：它是「这条录音链路的一个部件」，
+    /// 而界面要能读到它的状态（设置页显示「已就绪 / 不可用」）。
+    /// 只读访问：`appState.transcription.whisper.statusLine`。
+    let whisper = WhisperRuntime()
+
     // MARK: - 内部状态
 
     private var analyzer: SpeechAnalyzer?
@@ -138,6 +151,20 @@ final class TranscriptionEngine {
     private var segmentIndex: [SegmentKey: Int] = [:]
     private var micTap: MicTap?
     private var recorder: WAVRecorder?
+
+    // MARK: - Whisper 链路的内部状态
+
+    /// 这一段录音实际用的后端。`backend` 是「设置」，这个是「这次真的走了哪条」
+    /// ——stop() 要按它决定怎么收尾，而用户在录音中途改设置不该改变已经开始的
+    /// 这一段怎么收尾
+    private var activeBackend: TranscriptionBackend?
+    private var whisperPipeline: WhisperWindowPipeline?
+    private var whisperLoopTask: Task<Void, Never>?
+    /// 因为上一轮超步长而跳过的轮数。不丢音频（下一窗整段覆盖），但界面上
+    /// 出句子的间隔会变长，所以要能报出来
+    private var whisperSkippedRounds = 0
+    /// 每轮的墙钟耗时（含等在队列后面的时间）。纯转写耗时在 pipeline 里
+    private var whisperRoundSeconds: [Double] = []
 
     private struct SegmentKey: Hashable {
         let startMillis: Int
@@ -176,6 +203,15 @@ final class TranscriptionEngine {
         // 落盘用的会话边界:从这一刻起新进的段才算「本次录制」的
         sessionSegmentBase = segments.count
         partStartedAt = Date()
+        activeBackend = backend
+
+        // 后端二选一。Whisper 那条路**不走**下面这一整套：它不需要 locale、
+        // 不需要装系统语言模型、也没有 SpeechAnalyzer 可建（模型是它自己的
+        // 文件）。两条路共用的只有最底下的采集段（音频引擎、tap、存档、增益）
+        if backend == .whisper {
+            await startWhisper()
+            return
+        }
 
         // 1. 确认语言受支持
         //    坑：SpeechTranscriber 吐出的 Locale 标识符不一定是 "zh-CN" 这种形式
@@ -249,16 +285,9 @@ final class TranscriptionEngine {
             return
         }
 
-        // 单声道源格式。多声道 → 单声道不能交给 AVAudioConverter：
-        // 实测 4ch(Quadraphonic) → 1ch 会返回帧数正确、内容全 0 的静音缓冲（RMS 0.0）。
-        // 降噪开启时麦克风恰好是 4 声道，于是整场转录喂进去的都是数字静音。
-        // 所以先按这个格式抽出第 0 声道，再做 1ch → 1ch 转换（这一步实测可靠）。
-        guard let monoFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: micFormat.sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
+        // 单声道源格式。那条「不能交给 AVAudioConverter 下混」的硬约束见
+        // `monoFormat(matching:)`——两条链路共用同一份构造，不许各写一份
+        guard let monoFormat = Self.monoFormat(matching: micFormat) else {
             statusMessage = "❌ 无法构建单声道格式"
             return
         }
@@ -301,7 +330,7 @@ final class TranscriptionEngine {
             micFormat: micFormat,
             monoFormat: monoFormat,
             convertingTo: targetFormat,
-            into: continuation
+            output: .analyzer(continuation)
         ) else { return }
 
         // 7. 开跑
@@ -319,14 +348,208 @@ final class TranscriptionEngine {
         }
     }
 
+    // MARK: - 启动（Whisper 后端）
+
+    /// Whisper 后端的启动路径。
+    ///
+    /// 和 Apple 那条完全分开，只有最底下的采集段共用。三处刻意不共用：
+    /// ① 不建 SpeechAnalyzer、不解析 locale、不装系统语言模型——Whisper 用自己
+    /// 的模型文件，走那一套只会在没装过语言模型的机器上白等一次下载；
+    /// ② 不碰系统语音处理——那是本项目的禁区（`setVoiceProcessingEnabled` 会在
+    /// 约 20 秒后毁掉音频，见 `useVoiceProcessing`），这条链路连开关都不碰；
+    /// ③ 采样目标固定 16kHz 单声道，而不是问 analyzer 要什么格式。
+    private func startWhisper() async {
+        guard await whisper.engineForRecording() != nil else {
+            // **绝不静默退回 Apple**：用户把后端设成 Whisper 就是在等 Whisper
+            // 的结果，悄悄换回系统识别会让「今天怎么突然不准了」变成一个查不
+            // 出来的谜。宁可这里停下、把原因摆在界面上
+            statusMessage = "❌ \(whisper.statusLine ?? "Whisper 引擎不可用")"
+            activeBackend = nil
+            return
+        }
+
+        let audioEngine = AVAudioEngine()
+        self.audioEngine = audioEngine
+        // 这一条链路上系统语音处理是关的（默认就是关，这里显式记一笔：
+        // 「没打开」和「忘了关」在排查时长得一样）
+        voiceProcessingActive = false
+
+        let input = audioEngine.inputNode
+        let micFormat = input.outputFormat(forBus: 0)
+        guard micFormat.sampleRate > 0, micFormat.channelCount > 0 else {
+            statusMessage = "❌ 未找到可用麦克风输入"
+            return
+        }
+        guard let monoFormat = Self.monoFormat(matching: micFormat) else {
+            statusMessage = "❌ 无法构建单声道格式"
+            return
+        }
+        guard let whisperFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: WhisperWindowPipeline.sampleRate,
+            channels: 1,
+            interleaved: false
+        ) else {
+            statusMessage = "❌ 无法构建 16kHz 单声道格式"
+            return
+        }
+
+        formatDescription = "麦克风 \(Self.describe(micFormat)) → 抽第0声道 \(Self.describe(monoFormat))"
+            + " → Whisper \(Self.describe(whisperFormat))"
+
+        // 已经在界面上的段要交给管线：合并器的输入就是「已显示的段 + 本窗结果」。
+        // 传进去的是一份拷贝，之后以管线吐回来的整份为准（见 adoptWhisperSegments）
+        let pipeline = WhisperWindowPipeline(segments: segments)
+        whisperPipeline = pipeline
+        whisperSkippedRounds = 0
+        whisperRoundSeconds.removeAll()
+
+        guard startMicrophone(
+            engine: audioEngine,
+            micFormat: micFormat,
+            monoFormat: monoFormat,
+            convertingTo: whisperFormat,
+            output: .window(pipeline)
+        ) else { return }
+
+        isRunning = true
+        // 首句延迟要写在状态里：Whisper 是批处理模型，头十秒界面上一个字都不会有。
+        // 不说清的话，那十秒看起来就是「按了没反应」。
+        //
+        // 「约 12 秒」不是「窗口 10 秒」——实测（2026-09-22，40 秒真实录音）：
+        // 第一次取窗在 t=3s，但缓冲只有 3 秒，取到的是个 3 秒的**残窗**，
+        // 起点恒为 0；接下来 t=6s、t=9s 两次取窗起点还是 0，被「同一窗不重转」
+        // 的守卫挡掉（那两轮的墙钟 ≈0，这也是「轮次墙钟均 1.81 秒」低于
+        // 「单次转写均 2.15 秒」的原因）。真正第一窗落在 t=12s：缓冲 12 秒、
+        // 窗宽 10 秒、起点 2 秒。所以界面上**先出现的是残窗那句**，
+        // 攒满一窗的稳定节奏要到 12 秒
+        statusMessage = "转录中 · Whisper 本地 · 降噪关 · 增益 \(micGain.shortLabel)"
+            + " · 首句约 12 秒后出现（先攒满 10 秒窗口）"
+        whisperLoopTask = Task { [weak self] in
+            await self?.runWhisperLoop(pipeline: pipeline)
+        }
+    }
+
+    // MARK: - Whisper 滑窗驱动循环
+
+    /// 等一个步长 → 取窗转写 → 合并 → 更新界面。
+    ///
+    /// 循环本身在主 actor 上（界面状态只由主 actor 写），但**转写不在主线程**：
+    /// `whisper.run` 把它放到专属推理队列上，主 actor 在 await 期间是自由的
+    /// （电平表、按钮、切页面都不受影响）。
+    private func runWhisperLoop(pipeline: WhisperWindowPipeline) async {
+        let step = Duration.milliseconds(WhisperWindowPipeline.stepMillis)
+        var scheduled = ContinuousClock.now.advanced(by: step)
+
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(until: scheduled, clock: .continuous)
+            } catch {
+                return   // 被取消
+            }
+            guard !Task.isCancelled else { return }
+
+            let roundStarted = ContinuousClock.now
+            do {
+                if let update = try await advanceWhisper(pipeline) {
+                    adoptWhisperSegments(update.segments)
+                }
+            } catch {
+                // 单窗失败不停链路：下一窗还会覆盖同一段音频（滑窗的好处），
+                // 但要说出来——连续失败时用户能看见原因（比如模型被移走了）
+                statusMessage = "⚠️ Whisper 单窗转写失败: \(error.localizedDescription)"
+            }
+            let roundElapsed = ContinuousClock.now - roundStarted
+            whisperRoundSeconds.append(
+                Double(roundElapsed.components.seconds)
+                    + Double(roundElapsed.components.attoseconds) / 1e18
+            )
+
+            scheduled = scheduled.advanced(by: step)
+            // **超步长就跳过下一轮，不排队。**
+            // 排队看着更「不丢内容」，但滑窗取的是「最近 10 秒」，补跑一个已经
+            // 过期的窗口收益是零——那 10 秒会被下一窗完整覆盖。而代价是延迟随
+            // 录音时长线性增长（一节课一小时就是几百轮积压，越排越久）。
+            // 跳过之后下一窗直接从「现在」起算，延迟有界
+            let now = ContinuousClock.now
+            if scheduled < now {
+                whisperSkippedRounds += 1
+                scheduled = now.advanced(by: step)
+            }
+        }
+    }
+
+    /// 把一轮「取窗 + 转写 + 合并」放到推理队列上跑。nil = 这一轮没攒够/没有新音频
+    private func advanceWhisper(
+        _ pipeline: WhisperWindowPipeline
+    ) async throws -> WhisperWindowPipeline.Update? {
+        try await whisper.run { engine in try pipeline.advance(engine: engine) }
+    }
+
+    /// 把合并器吐出的整份段列表接进引擎状态，并把「这一轮刚定稿」的段推给下游。
+    ///
+    /// 为什么定稿之后那两个动作（提问检测、通知核查）在这里做而不是在合并器里：
+    /// 合并器是纯函数，它只判 `isFinal`；而这两件事需要引擎的状态
+    /// （`questionSensitivity`、回调）。Apple 那条链路也是在 `applyUpdate` 里判
+    /// false→true 之后做这两件事的——两条链路共用同一个出口，下游才不会出现
+    /// 「只有 Apple 段有提问标记」这种一半有一半没有的状态。
+    private func adoptWhisperSegments(_ updated: [TranscriptSegment]) {
+        let wasFinal = Dictionary(
+            segments.map { ($0.id, $0.isFinal) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        segments = updated
+        restoreOrderIfNeeded()
+        // 合并器是按候选顺序追加的，吐回来的顺序不保证与索引一致，必须重建
+        rebuildSegmentIndex()
+
+        for index in segments.indices
+        where segments[index].isFinal && wasFinal[segments[index].id] != true {
+            applyQuestionDetection(at: index)
+            onFinalSegment?(segments[index])
+        }
+    }
+
+    /// Whisper 链路的实测占用率。自检与排障用，界面上不显示
+    var whisperStats: String? {
+        guard let pipeline = whisperPipeline else { return nil }
+        var line = pipeline.statsLine
+        if !whisperRoundSeconds.isEmpty {
+            let mean = whisperRoundSeconds.reduce(0, +) / Double(whisperRoundSeconds.count)
+            line += String(format: " · 轮次墙钟均 %.2f 秒", mean)
+        }
+        if whisperSkippedRounds > 0 {
+            line += " · ⚠️ 超步长跳过 \(whisperSkippedRounds) 轮"
+        }
+        return line
+    }
+
     // MARK: - 麦克风采集
+
+    /// 麦克风格的「单声道版」源格式。
+    ///
+    /// 多声道 → 单声道**不能交给 AVAudioConverter**：实测 4ch(Quadraphonic) → 1ch
+    /// 会返回帧数完全正确、内容全 0 的静音缓冲（RMS 恰好 0.0），不报任何错，
+    /// 表现就是「整场转录一个字都没有」。正确做法是按这个格式先抽出第 0 声道
+    /// （`firstChannelAsMono`），再做 1ch → 1ch 转换。
+    ///
+    /// 两条链路（Apple / Whisper）都从这里取这个格式：这种东西「看着多余、
+    /// 去掉就静默坏掉」，只该有一份。
+    private static func monoFormat(matching micFormat: AVAudioFormat) -> AVAudioFormat? {
+        AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: micFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        )
+    }
 
     private func startMicrophone(
         engine: AVAudioEngine,
         micFormat: AVAudioFormat,
         monoFormat: AVAudioFormat,
         convertingTo targetFormat: AVAudioFormat,
-        into continuation: AsyncStream<AnalyzerInput>.Continuation
+        output: MicTap.Output
     ) -> Bool {
         let input = engine.inputNode
 
@@ -353,7 +576,7 @@ final class TranscriptionEngine {
             sourceFormat: monoFormat,
             converter: converter,
             targetFormat: targetFormat,
-            continuation: continuation,
+            output: output,
             recorder: recorder,
             preamp: preamp
         ) { [weak self] level in
@@ -407,10 +630,23 @@ final class TranscriptionEngine {
     /// 把它封在这个显式承诺「只从音频线程访问」的类里，既过得了并发检查，
     /// 也让 tap 闭包得以彻底脱离主 actor。
     private final class MicTap: @unchecked Sendable {
+
+        /// 麦克风缓冲的去处。**同一时刻只有一个消费者**（接线那一包的硬约束）。
+        ///
+        /// 为什么不能两边都喂：Apple 的 analyzer 和 Whisper 滑窗各自维护自己的
+        /// 时间轴和「这段音频归我」的状态，同时消费会让同一段话在两条链路里
+        /// 各出一份、彼此还看不见对方的进度；而且两边要的格式本来就不同
+        /// （analyzer 的格式由它自己定，Whisper 固定 16kHz），一份转换结果
+        /// 喂不了两边。所以这是个二选一的枚举，不是数组、不是回调列表。
+        enum Output {
+            case analyzer(AsyncStream<AnalyzerInput>.Continuation)
+            case window(WhisperWindowPipeline)
+        }
+
         private let sourceFormat: AVAudioFormat
         private let converter: AVAudioConverter
         private let targetFormat: AVAudioFormat
-        private let continuation: AsyncStream<AnalyzerInput>.Continuation
+        private let output: Output
         private let onLevel: @Sendable (Float) -> Void
         /// 录音存档。为 nil 表示这次不落盘
         private let recorder: WAVRecorder?
@@ -445,7 +681,7 @@ final class TranscriptionEngine {
             sourceFormat: AVAudioFormat,
             converter: AVAudioConverter,
             targetFormat: AVAudioFormat,
-            continuation: AsyncStream<AnalyzerInput>.Continuation,
+            output: Output,
             recorder: WAVRecorder?,
             preamp: AudioPreamp,
             onLevel: @escaping @Sendable (Float) -> Void
@@ -453,7 +689,7 @@ final class TranscriptionEngine {
             self.sourceFormat = sourceFormat
             self.converter = converter
             self.targetFormat = targetFormat
-            self.continuation = continuation
+            self.output = output
             self.recorder = recorder
             self.preamp = preamp
             let filter = HighPassFilter(
@@ -542,7 +778,16 @@ final class TranscriptionEngine {
             lock.unlock()
 
             guard let converted else { return }
-            continuation.yield(AnalyzerInput(buffer: converted))
+            switch output {
+            case .analyzer(let continuation):
+                continuation.yield(AnalyzerInput(buffer: converted))
+            case .window(let pipeline):
+                // 16kHz 单声道直接取样本进攒帧缓冲，不在这里做任何筛选或精简：
+                // 滑窗每步自己取「最近 10 秒」，这里塞进去的都会被它按窗口取走
+                if let samples = WhisperEngine.samples(from: converted) {
+                    pipeline.append(samples)
+                }
+            }
             reportLevel(inputLevel)
         }
 
@@ -830,11 +1075,23 @@ final class TranscriptionEngine {
         guard !staysSorted else { return }
         segments.sort { $0.startTimeMillis < $1.startTimeMillis }
         // 排序后索引失效，重建
+        rebuildSegmentIndex()
+    }
+
+    /// 按 (起始时间, 语言) 重建去重索引。
+    ///
+    /// 用 `uniquingKeysWith` 而不是 `uniqueKeysWithValues`：后者撞上重复键会
+    /// 直接 trap，而进程崩掉这一次录音就整段没了。Apple 那条链路上键不会重复
+    /// （upsert 先按同一个键去重），但 Whisper 是整窗重识别、且合并器会把候选
+    /// 直接追加进列表——同一个起始时间戳出现两段并非不可能。为一种「不该发生、
+    /// 但真发生后果极大」的情况留条不崩的路，比事后解释为什么崩了便宜
+    private func rebuildSegmentIndex() {
         segmentIndex = Dictionary(
-            uniqueKeysWithValues: segments.enumerated().compactMap { idx, seg in
+            segments.enumerated().compactMap { idx, seg in
                 guard let lang = seg.languages.first else { return nil }
                 return (SegmentKey(startMillis: seg.startTimeMillis, language: lang), idx)
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
     }
 
@@ -1243,6 +1500,29 @@ final class TranscriptionEngine {
             statusMessage = "正在收尾…"
         }
 
+        // Whisper 链路的收尾和 Apple 那条同构，只是「定稿」换成了「补最后一窗
+        // + 强制定稿」：
+        //   取消循环 → **等它把正在跑的那一轮跑完** → 补最后一窗 → 定稿 → 落盘
+        // 中间那一步不能省：whisper_full 一次两秒，循环里那一轮可能正跑到一半，
+        // 而它跑完会返回一份「旧的」段列表（不含收尾那一窗的结果）。
+        // 抢先收尾再让它回来覆盖，收尾那一窗就白转（等价于 Apple 那条
+        // 「先定稿再取消」的坑：晚到的结果把已经定稿的内容改回去）
+        if activeBackend == .whisper {
+            let pipeline = whisperPipeline
+            let loopTask = whisperLoopTask
+            whisperLoopTask = nil
+            activeBackend = nil
+            Task { [weak self] in
+                loopTask?.cancel()
+                await loopTask?.value
+                if let pipeline {
+                    await self?.finishWhisper(pipeline)
+                }
+                await self?.completeSession(recordedSeconds: recordedSeconds)
+            }
+            return
+        }
+
         // 顺序很重要：必须先让 analyzer 定稿、等结果消费任务把最后几段吐出来，
         // 再取消它们。反过来写的话，定稿阶段才输出的内容会被整个丢掉
         // ——表现就是「录了半天，结果一段都没有」。
@@ -1258,36 +1538,59 @@ final class TranscriptionEngine {
             }
             for task in tasks { task.cancel() }
             guard let self else { return }
-
-            // 会话落盘必须在这个位置:analyzer 定稿完、消费任务吐完最后
-            // 几段之后——再早存下来的就是不完整的转录(顺序约束同上的注释)
-            if let onSessionComplete = self.onSessionComplete {
-                let newSegments = Array(self.segments[self.sessionSegmentBase...])
-                // 没有新段也没有录音文件,这次录制什么都没留下,不落盘
-                if !newSegments.isEmpty || self.recordingURL != nil {
-                    let draft = SessionDraft(
-                        sessionID: self.sessionID,
-                        recordingFileName: self.recordingURL?.lastPathComponent,
-                        startedAt: self.partStartedAt ?? Date(),
-                        // 存档时长为准;没开存档时用最后一段的结束时间兜底,
-                        // 不然「接着录」的偏移会算出 0,两段的时间轴叠在一起
-                        durationMillis: max(
-                            recordedSeconds * 1000,
-                            newSegments.map(\.endTimeMillis).max() ?? 0
-                        ),
-                        segments: newSegments
-                    )
-                    self.sessionID = onSessionComplete(draft) ?? self.sessionID
-                }
-            }
-
-            guard !self.statusMessage.hasPrefix("❌") else { return }
-            var message = "已停止 · 共 \(self.segments.count) 段"
-            if let url = self.recordingURL {
-                message += " · 已存档 \(url.lastPathComponent)"
-            }
-            self.statusMessage = message
+            await self.completeSession(recordedSeconds: recordedSeconds)
         }
+    }
+
+    /// 收尾那一窗 + 强制定稿，然后把结果接进界面状态。
+    private func finishWhisper(_ pipeline: WhisperWindowPipeline) async {
+        do {
+            let update = try await whisper.run { engine in try pipeline.finish(engine: engine) }
+            adoptWhisperSegments(update.segments)
+        } catch {
+            // 收尾那一窗的音频救不回来是一回事，已经认出来的段落停在「未定稿」
+            // 是另一回事：未定稿的段拿不到质量档位、不会送核查，而用户已经
+            // 没法再录一遍来补上它们了。所以照样定稿，但把失败说出来
+            statusMessage = "❌ Whisper 收尾转写失败：\(error.localizedDescription)（已按已有结果定稿）"
+            adoptWhisperSegments(pipeline.finalizeWithoutTranscribing().segments)
+        }
+    }
+
+    /// 录音收尾的公共后半段：会话落盘 + 状态文案。
+    ///
+    /// 两条链路都走这一份。落盘判据（有没有新段、有没有录音文件）只该有一处，
+    /// 不然迟早出现「Apple 录的课能「接着录」、Whisper 录的不能」这种差别
+    /// ——而那种差别从界面上看不出来，只会表现为「我上次录的呢」。
+    private func completeSession(recordedSeconds: Int) async {
+        // 会话落盘必须在这个位置:analyzer 定稿完 / 滑窗收尾完、最后
+        // 几段已经落地之后——再早存下来的就是不完整的转录(顺序约束同上的注释)
+        if let onSessionComplete {
+            let base = min(sessionSegmentBase, segments.count)
+            let newSegments = Array(segments[base...])
+            // 没有新段也没有录音文件,这次录制什么都没留下,不落盘
+            if !newSegments.isEmpty || recordingURL != nil {
+                let draft = SessionDraft(
+                    sessionID: sessionID,
+                    recordingFileName: recordingURL?.lastPathComponent,
+                    startedAt: partStartedAt ?? Date(),
+                    // 存档时长为准;没开存档时用最后一段的结束时间兜底,
+                    // 不然「接着录」的偏移会算出 0,两段的时间轴叠在一起
+                    durationMillis: max(
+                        recordedSeconds * 1000,
+                        newSegments.map(\.endTimeMillis).max() ?? 0
+                    ),
+                    segments: newSegments
+                )
+                sessionID = onSessionComplete(draft) ?? sessionID
+            }
+        }
+
+        guard !statusMessage.hasPrefix("❌") else { return }
+        var message = "已停止 · 共 \(segments.count) 段"
+        if let url = recordingURL {
+            message += " · 已存档 \(url.lastPathComponent)"
+        }
+        statusMessage = message
     }
 
     /// 等待 stop() 的收尾流程跑完（自检用；UI 不需要，状态自己会刷新）
@@ -1300,6 +1603,11 @@ final class TranscriptionEngine {
     func clear() {
         segments.removeAll()
         segmentIndex.removeAll()
+        // Whisper 那段的状态跟着一起清：上一次录音的滑窗缓冲和统计留着，
+        // 下一次录音的 statsLine 会把两次的数字混在一起报
+        whisperPipeline = nil
+        whisperSkippedRounds = 0
+        whisperRoundSeconds.removeAll()
         // 清空 = 新的一课:会话归属一起断掉,否则下一段转录会
         // 追加进已经翻篇的会话里
         sessionID = nil

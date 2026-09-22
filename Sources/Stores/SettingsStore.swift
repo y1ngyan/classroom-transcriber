@@ -30,6 +30,10 @@ final class SettingsStore {
     /// 讲课陈述里全是「什么」「怎么」，没有这道门槛提问列表会被讲课淹没。
     var questionSensitivity: QuestionSensitivity = .normal
 
+    /// 实时转录后端。**默认 APPLE**，见 `TranscriptionBackend`——
+    /// 这不是「哪个更准」的取舍，是「默认状态下不许把课录丢」的取舍。
+    var backend: TranscriptionBackend = .apple
+
     /// 段落定稿后是否自动联网核查。默认关闭：核查要联网、要花检索和 LLM
     /// 额度，这是用户自己的账。开着的时候每段定稿都会自动跑一次，一节课
     /// 下来是几十次请求——默认替他花掉不合适。关掉不影响手动核查。
@@ -71,6 +75,7 @@ final class SettingsStore {
         micGain = MicGainMode.of(config.micGain)
         questionSensitivity = QuestionSensitivity.of(config.questionSensitivity)
         autoFactCheck = config.autoFactCheck ?? false
+        backend = .of(config.transcriptionBackend)
     }
 
     var configFilePath: String { AppConfig.configFilePath }
@@ -95,6 +100,7 @@ final class SettingsStore {
         config.micGain = micGain.rawValue
         config.questionSensitivity = questionSensitivity.rawValue
         config.autoFactCheck = autoFactCheck
+        config.transcriptionBackend = backend.rawValue
 
         do {
             try AppConfig.save(config)
@@ -118,6 +124,7 @@ final class SettingsStore {
         // 是同一个档，用字符串比会把一个没改过的设置报成「有未保存的改动」
         return micGain != MicGainMode.of(config.micGain)
             || questionSensitivity != QuestionSensitivity.of(config.questionSensitivity)
+            || backend != .of(config.transcriptionBackend)
             || trimmed(deepSeekAPIKey) != config.deepSeekAPIKey
             || trimmed(searchAPIKey) != config.searchAPIKey
             || trimmed(cosBucket) != config.cosBucket
