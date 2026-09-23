@@ -113,6 +113,41 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         return Update(segments: final.segments, changes: changes + final.changes)
     }
 
+    /// 丢掉本窗的幻觉段。判据在 `WhisperHallucination`，这里只负责
+    /// 「把这一窗的音频电平喂给它」。
+    ///
+    /// 被丢的段**记进 `hallucinationLog`**。理由：删用户的转录内容是可见的删除，
+    /// 「这段为什么没了」必须答得上来，不能静默丢。
+    /// （今天答这个问题的只有探针，界面还没接——见 `hallucinationLog` 的注释）
+    private func filterHallucinations(
+        _ segments: [WhisperSegment],
+        windowSamples: [Float]
+    ) -> [WhisperSegment] {
+        let floor = WhisperHallucination.speechFloor(
+            samples: windowSamples, sampleRate: Self.sampleRate
+        )
+        return segments.filter { segment in
+            let verdict = WhisperHallucination.verdict(
+                text: segment.text,
+                noSpeechProbability: segment.noSpeechProbability,
+                audioLevel: WhisperHallucination.level(
+                    of: segment, in: windowSamples, sampleRate: Self.sampleRate
+                ),
+                silenceFloor: floor
+            )
+            if case .keep = verdict { return true }
+            hallucinationLog.append("丢掉「\(segment.text)」— \(verdict)")
+            return false
+        }
+    }
+
+    /// 被丢掉的幻觉，按时间顺序。
+    ///
+    /// **当前只有一个读者**：探针 `--whisper-window-file`（`WhisperWindowFileRun`
+    /// 打「生产链路的幻觉过滤」那一段）。界面还没有读它——所以「用户能看到
+    /// 删了什么」这件事**今天还没做到**，这里记一笔，别把注释写成已经做到了
+    private(set) var hallucinationLog: [String] = []
+
     /// 只强制定稿、不再转写。
     ///
     /// 单独拆出来是给收尾转写失败时兜底：那一段音频救不回来是一回事，
@@ -140,7 +175,10 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         engine: WhisperEngine
     ) throws -> Update {
         let started = ContinuousClock.now
-        let recognized = try engine.transcribe(windowSamples)
+        let raw = try engine.transcribe(windowSamples)
+        // 幻觉过滤放在**合并之前**：合并器会把「同一句的多次识别」揉成一个段，
+        // 幻觉一旦进了合并器就可能和真话粘在一起，那时再按段判就判不干净了。
+        let recognized = filterHallucinations(raw, windowSamples: windowSamples)
         recognizedConfidences.append(contentsOf: recognized.flatMap(\.confidences))
         let elapsed = ContinuousClock.now - started
         transcriptionSeconds.append(

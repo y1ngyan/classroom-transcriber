@@ -38,6 +38,10 @@ run() { # run <名字> <参数…>
     printf '  ❌ %-34s exit=%s\n' "$name" "$code"
     # 134 = SIGABRT（ggml 静态析构断言），单独点出来
     [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
+    # 133 = SIGTRAP。核验者 2026-09-24 在这次改动上见过**一次**：`--whisper-prewarm`
+    # 首跑 133，随后重跑（整脚本 1 次 + prewarm 单独 3 次）全是 0，未能复现。
+    # 只覆盖 134 的提示会让人以为 133 是另一类 bug，所以这里也点一句
+    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：这台 8GB 机器上见过偶发（未能复现），**先重跑一次再当 bug**\n'
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
   fi
@@ -46,6 +50,11 @@ run() { # run <名字> <参数…>
 echo "════ 纯本地入口（不需要模型 / 网络 / 麦克风）════"
 run "--selftest"                    --selftest
 run "--quality-selftest"            --quality-selftest
+run "--hallucination-selftest"      --hallucination-selftest
+# 离线重算入口用固定夹具跑（夹具说明见 tools/probes/fixtures/hallucination_replay.log）。
+# 它值得覆盖：这个入口要读文件、解析、再走一遍判据，正是「输出看着对但进程 abort」
+# 那类缺陷的高发形状
+run "--hallucination-replay（夹具）"   --hallucination-replay tools/probes/fixtures/hallucination_replay.log
 run "--split-selftest"              --split-selftest
 run "--punct-selftest"              --punct-selftest
 run "--dedup-selftest"              --dedup-selftest

@@ -446,6 +446,43 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 无头幻觉治理自检：--hallucination-selftest（纯函数，不依赖模型/麦克风）
+        if CommandLine.arguments.contains("--hallucination-selftest") {
+            for line in WhisperHallucination.selfTest() {
+                print(line)
+            }
+            exitReleasingGgml()
+        }
+
+        // 幻觉判据的离线重算：--hallucination-replay <探针日志> [<日志> …]
+        //
+        // 为什么要有：判据改一次就要重跑一遍 whisper 才有对照，一条 3 分钟的
+        // 录音两分半——而判据是纯函数，输入（文本/电平/静音门）早就被探针写进
+        // TSV 了。这个入口读那些日志、调**同一份**判据重算，所以「重算出来的数」
+        // 和「生产会做的事」是同一回事（外面另写一份 Python 就会漂）。
+        // 不需要模型、麦克风、网络。
+        if CommandLine.arguments.contains("--hallucination-replay") {
+            let args = CommandLine.arguments
+            let start = args.firstIndex(of: "--hallucination-replay").map { $0 + 1 } ?? args.count
+            let logs = Array(args.dropFirst(start))
+            guard !logs.isEmpty else {
+                print("用法：--hallucination-replay <探针日志> [更多日志 …]")
+                print("（日志由 --whisper-window-file … --probe-only 产生）")
+                exitReleasingGgml(1)
+            }
+            for path in logs {
+                guard let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+                    print("❌ 读不了 \(path)")
+                    continue
+                }
+                let label = (path as NSString).lastPathComponent.replacingOccurrences(of: ".log", with: "")
+                for line in HallucinationReplay.report(log: text, label: label) {
+                    print(line)
+                }
+            }
+            exitReleasingGgml()
+        }
+
         // 无头语义切分自检：--split-selftest（纯函数，不依赖任何设备）
         if CommandLine.arguments.contains("--split-selftest") {
             for line in TranscriptSplitter.selfTest() {

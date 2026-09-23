@@ -41,6 +41,12 @@ import whisper
 ///   看每条候选线会把多少段判成「不可信」。
 /// - `--head <秒>`：只跑前 N 秒（问「开头几秒怎么样」时不用把整条跑完，
 ///   输出里会标明覆盖率的分母是这 N 秒）。
+/// - `--suppress-regex <模式>`：把模式交给 whisper 的 `suppress_regex`。
+///   **必须显式传才启用**，因为上游语义（整 token 精确匹配、每 token 遍历
+///   整个词表、模式非法即 abort）使它的效果和代价都得先量再说，见
+///   `WhisperEngine.suppressRegexCaveat`。探针会单独报单窗耗时以便对照。
+/// - 探针输出的末尾会附**幻觉治理的改动前后对照**（`hallucinationSection`），
+///   一趟跑出两条臂。生产链路自己的丢弃记录则由滑窗那一趟打印。
 enum WhisperWindowFileRun {
 
     /// 喂音频的块长。比 4096 帧的回调块（约 85ms）粗、比步长细：
@@ -78,6 +84,10 @@ enum WhisperWindowFileRun {
         /// 对最慢的 N 窗做「关掉 temperature fallback」的因果对照（0 = 不做）。
         /// 会**再开一个 whisper context**，所以要显式要求
         var fallbackProbeCount = 0
+        /// `--suppress-regex <模式>`：把模式交给 whisper 的 `suppress_regex`。
+        /// **必须显式传才会启用**——上游语义是整 token 精确匹配、且每个生成
+        /// token 遍历一遍词表，代价和效果都要先量。见 `WhisperEngine.suppressRegexCaveat`
+        var suppressRegex: String?
 
         static func parse(_ arguments: [String]) -> Options {
             var options = Options()
@@ -104,6 +114,7 @@ enum WhisperWindowFileRun {
                 options.fallbackProbeCount = n
             }
             if let raw = value("--label") { options.label = raw }
+            if let raw = value("--suppress-regex") { options.suppressRegex = raw }
             options.timing = arguments.contains("--timing")
             options.dumpAll = arguments.contains("--dump-all")
             options.probeOnly = arguments.contains("--probe-only")
@@ -161,6 +172,9 @@ enum WhisperWindowFileRun {
         var firstSegmentTrace: [(afterFeedSeconds: Double, text: String)] = []
         /// 每个 id 的文本被改写过几次（合并器在同一段上的覆盖次数）
         var revisionCounts: [UUID: Int] = [:]
+        /// 生产链路丢掉的幻觉段（`WhisperWindowPipeline.hallucinationLog`）。
+        /// 从管线自己那儿读，不是从最终段列表反推——反推不出来
+        var hallucinations: [String] = []
 
         var realWindows: [WindowTrace] { windows.filter { $0.startMillis != nil } }
     }
@@ -427,6 +441,17 @@ enum WhisperWindowFileRun {
         lines.append("")
         lines.append(contentsOf: duplicateSection(ordered: ordered, round: round))
 
+        // 生产链路的幻觉过滤**必须在这一趟里看得见**：`--probe-only` 那条路
+        // 是绕开生产链路的离线对照，它证明不了 `WhisperWindowPipeline` 里
+        // 那一句真的接上了。所以这里把管线自己的丢弃记录打出来。
+        lines.append("")
+        if round.hallucinations.isEmpty {
+            lines.append("─── 生产链路的幻觉过滤：这一趟没丢任何段 ───")
+        } else {
+            lines.append("─── 生产链路的幻觉过滤：丢了 \(round.hallucinations.count) 段 ───")
+            for entry in round.hallucinations { lines.append("  \(entry)") }
+        }
+
         let preview = options.dumpAll ? ordered.count : min(12, ordered.count)
         lines.append("")
         lines.append(options.dumpAll
@@ -584,6 +609,7 @@ enum WhisperWindowFileRun {
         round.finalized = final.segments.filter(\.isFinal).count
         round.guardTrips = pipeline.guardTrips
         round.confidences = pipeline.recognizedConfidences
+        round.hallucinations = pipeline.hallucinationLog
         round.wallSeconds = secondsSince(runStarted)
         return round
     }
@@ -608,6 +634,25 @@ enum WhisperWindowFileRun {
         let lowRatio: Double
         let startMillis: Int
         let chars: [Double]
+        /// whisper 自己的「这段没语音」判断。和 `mean` 是两回事——
+        /// 幻觉段的 `mean` 可以到 1.00 而它整段没语音
+        let noSpeech: Double
+        /// 这一段对应音频的 RMS，**由本进程自己从样本算**，不依赖 whisper。
+        /// 判「不许误杀」要靠它：它是独立于被检验对象的第二个视角
+        let level: Double
+        /// 该段的静音门（同一窗内的相对基准，见 `speechFloor`）
+        let floor: Double
+    }
+
+    /// 电平与静音门的实现共用 `WhisperHallucination` 那一份——**必须共用**：
+    /// 生产链路和探针要是各算各的，探针量出来的误杀率就不能代表生产的行为了，
+    /// 那样整个判据就作废。
+    private static func speechFloor(samples: [Float]) -> Double {
+        WhisperHallucination.speechFloor(samples: samples, sampleRate: WhisperWindowPipeline.sampleRate)
+    }
+
+    private static func level(of segment: WhisperSegment, in samples: [Float]) -> Double {
+        WhisperHallucination.level(of: segment, in: samples, sampleRate: WhisperWindowPipeline.sampleRate)
     }
 
     private static func confidenceProbe(
@@ -627,7 +672,20 @@ enum WhisperWindowFileRun {
         let stepMillis = Int(options.probeStepSeconds * 1000)
         var fed = 0
         var nextWindowAt = stepMillis
-        var windows: [(index: Int, startMillis: Int, segments: [WhisperSegment])] = []
+        var windows: [(
+            index: Int, startMillis: Int, segments: [WhisperSegment],
+            floor: Double, levels: [Double]
+        )] = []
+        /// 每一窗的转写耗时。`suppress_regex` 开着时用来量它的代价
+        var probeWindowSeconds: [Double] = []
+
+        if let pattern = options.suppressRegex {
+            lines.append("  ⚠️ suppress_regex 已启用：\(pattern)")
+            lines.append("     上游语义是**整 token 精确匹配**（非子串），且每生成一个 token 都会")
+            lines.append("     遍历整个词表并重新构造一次 std::regex（whisper.cpp v1.9.4 :6373）。")
+            lines.append("     所以下面这一趟的耗时要和不开时对比着看——见末尾的单窗耗时对比。")
+        }
+
 
         while fed < samples.count {
             let end = min(fed + chunk, samples.count)
@@ -642,35 +700,65 @@ enum WhisperWindowFileRun {
                 durationSeconds: WhisperWindowPipeline.windowSeconds,
                 sampleRate: WhisperWindowPipeline.sampleRate
             ) else { continue }
-            let recognized = try engine.transcribe(window.samples)
+            // 单独计时：`suppress_regex` 的代价必须能和「不开」直接比，
+            // 混进整趟耗时里就分不出来了
+            let windowStarted = ContinuousClock.now
+            let recognized = try engine.transcribe(window.samples, suppressRegex: options.suppressRegex)
+            let windowElapsed = ContinuousClock.now - windowStarted
+            probeWindowSeconds.append(Double(windowElapsed.components.seconds)
+                + Double(windowElapsed.components.attoseconds) / 1e18)
             guard !recognized.isEmpty else { continue }
-            windows.append((windows.count + 1, window.startMillis, recognized))
+            // 电平必须在这里算：`window.samples` 是这几秒的音频，出了这个循环
+            // 就被下一窗覆盖了。为此不缓存整段音频——一条 45 分钟的录音
+            // 逐窗存样本要 170MB 量级，而电平一个 Double 就够
+            windows.append((
+                windows.count + 1, window.startMillis, recognized,
+                speechFloor(samples: window.samples),
+                recognized.map { level(of: $0, in: window.samples) }
+            ))
         }
 
         // 逐段打：文本在前，统计量在后，方便直接肉眼判「这段是不是崩坏」
         var all: [ProbeSegment] = []
         for window in windows {
-            lines.append(String(format: "  窗 %d · 起点 %.1f 秒 · %d 段",
-                                window.index, Double(window.startMillis) / 1000, window.segments.count))
-            for segment in window.segments {
+            lines.append(String(format: "  窗 %d · 起点 %.1f 秒 · %d 段 · 静音门 %.5f",
+                                window.index, Double(window.startMillis) / 1000,
+                                window.segments.count, window.floor))
+            for (offset, segment) in window.segments.enumerated() {
                 let mean = segment.averageConfidence ?? 0
                 let lowRatio = segment.confidences.isEmpty ? 0
                     : Double(segment.confidences.filter { $0 < TranscriptQualityAssessor.lowConfidenceThreshold }.count)
                         / Double(segment.confidences.count)
                 let grade = segment.grade?.label ?? "—"
+                let segLevel = offset < window.levels.count ? window.levels[offset] : 0
+                // 无语音这一列**用 6 位小数**：实测它全是 0.0000，但 0.0000 在 4 位
+                // 精度下既可能是「真是 0」也可能是「1/51864≈0.0000193」——这两种
+                // 情况的结论完全相反（前者说明这条臂在本项目里是死的），
+                // 4 位小数分不开它们。别把它调回 %.2f
                 lines.append(String(
-                    format: "    [%5.3f / 低%3.0f%% / %@] %@",
-                    mean, lowRatio * 100, grade, segment.text
+                    format: "    [%5.3f / 低%3.0f%% / %@ / 无语音%.6f / 电平%.5f%@] %@",
+                    mean, lowRatio * 100, grade, segment.noSpeechProbability, segLevel,
+                    segLevel < window.floor ? " 空" : "", segment.text
                 ))
                 all.append(ProbeSegment(
                     text: segment.text, mean: mean, lowRatio: lowRatio,
-                    startMillis: window.startMillis, chars: segment.confidences
+                    startMillis: window.startMillis, chars: segment.confidences,
+                    noSpeech: segment.noSpeechProbability, level: segLevel, floor: window.floor
                 ))
             }
         }
 
         lines.append("")
         lines.append("  共 \(windows.count) 窗 · \(all.count) 段（生产路径会把重叠窗的同一句合并掉，所以这个数大于最终段数）")
+        if !probeWindowSeconds.isEmpty {
+            let sorted = probeWindowSeconds.sorted()
+            let total = probeWindowSeconds.reduce(0, +)
+            lines.append(String(
+                format: "  单窗转写耗时：中位 %.3f 秒 / 均 %.3f 秒 / 最大 %.3f 秒 / 合计 %.1f 秒%@",
+                sorted[sorted.count / 2], total / Double(sorted.count), sorted.last ?? 0, total,
+                options.suppressRegex == nil ? "" : " ← suppress_regex 已启用，基线见不带该参数的同一命令"
+            ))
+        }
         if !all.isEmpty {
             lines.append(contentsOf: confidenceDistribution("逐段平均置信度", all.map(\.mean)))
             lines.append(contentsOf: confidenceDistribution("逐段低置信占比", all.map(\.lowRatio)))
@@ -701,19 +789,111 @@ enum WhisperWindowFileRun {
             lines.append(contentsOf: sweep(all))
         }
 
+        if !all.isEmpty {
+            lines.append("")
+            lines.append(contentsOf: hallucinationSection(all))
+        }
+
         // 机器可读的一份。人工判读看上面的表就够了，但**阈值标定要做自助法
         // 置信区间**，那需要每段的原始逐字符值，从格式化过的表里反解既脆又
         // 容易和「美观」的格式串纠缠。所以另出一份 TSV，单独一行一段。
         if !all.isEmpty {
             lines.append("")
-            lines.append("─── TSV（起点毫秒 / 段均值 / 低置信占比 / 逐字符置信度 / 文本；制表符分隔）───")
+            lines.append("─── TSV（起点毫秒 / 段均值 / 低置信占比 / 逐字符置信度 / 文本 / 无语音概率 / 电平 / 静音门；制表符分隔）───")
             for segment in all {
                 let chars = segment.chars.map { String(format: "%.4f", $0) }.joined(separator: ",")
+                // 后三列是**追加**的，前五列的位置和含义没动——已有的解析脚本
+                // （`tools/probes/p2_analyze.py` 取前五列）不用改就能继续跑
+                //
+                // ⚠️ 这个列定义在 `HallucinationReplay.parse` 里有个副本，
+                // 加列/改序要两处一起改（那边靠上下两条哨兵行定位，不猜格式）
                 lines.append("\(segment.startMillis)\t\(String(format: "%.4f", segment.mean))\t"
-                             + "\(String(format: "%.4f", segment.lowRatio))\t\(chars)\t\(segment.text)")
+                             + "\(String(format: "%.4f", segment.lowRatio))\t\(chars)\t\(segment.text)"
+                             + "\t\(String(format: "%.6f", segment.noSpeech))"
+                             + "\t\(String(format: "%.5f", segment.level))"
+                             + "\t\(String(format: "%.5f", segment.floor))")
             }
             lines.append("─── TSV 结束 ───")
         }
+        return lines
+    }
+
+    /// 幻觉治理的**改动前后对照**。
+    ///
+    /// 为什么在探针里做而不是另写一个工具：探针这一趟手里同时有
+    /// 「引擎原始输出」和「每段的音频电平」，于是**一趟跑出两条臂**——
+    /// 原始段数就是改动前，套上 `WhisperHallucination` 之后就是改动后。
+    /// 两次跑同一条录音反而有风险：whisper 的解码在浮点上不是逐位确定的。
+    ///
+    /// **「不许误杀」的对照基准**：音频电平 ≥ 本窗静音门的段 = 「这一段确实
+    /// 有人在出声」。它是独立于 whisper 的第二个视角（whisper 是**被检验对象**，
+    /// 不能拿它自己的判断当基准），所以「被丢掉的段里有几个是这种」直接就是
+    /// 误杀的**上界**。
+    ///
+    /// 为什么只是上界、不是精确值：电平高不等于语音（音乐、音效、掌声也高）。
+    /// 所以这里把丢掉的响段**原文打出来**让人判——数字给上界，判读交给人。
+    /// 反过来「光看数字就说误杀率 = 0」是自欺：漏掉的误杀定义上就看不见。
+    private static func hallucinationSection(_ all: [ProbeSegment]) -> [String] {
+        var lines = ["─── 幻觉治理（改动前 = 引擎原始输出；改动后 = WhisperHallucination 过滤）───"]
+
+        var templateHits = 0
+        var annotationHits = 0
+        var droppedLoud = 0
+        var dropped: [(ProbeSegment, WhisperHallucination.Verdict)] = []
+
+        for segment in all {
+            let verdict = WhisperHallucination.verdict(
+                text: segment.text,
+                noSpeechProbability: segment.noSpeech,
+                audioLevel: segment.level,
+                silenceFloor: segment.floor
+            )
+            switch verdict {
+            case .keep: continue
+            case .dropSubtitleTemplate: templateHits += 1
+            case .dropNonSpeechAnnotation: annotationHits += 1
+            }
+            dropped.append((segment, verdict))
+            // 「响段被丢」= 误杀上界。电平低于门的段被丢是预期行为
+            if segment.level >= segment.floor { droppedLoud += 1 }
+        }
+
+        let kept = all.count - dropped.count
+        let loudTotal = all.filter { $0.level >= $0.floor }.count
+        lines.append(String(
+            format: "  改动前 %d 段 → 改动后 %d 段（丢 %d：模板 %d / 非语音注释 %d）",
+            all.count, kept, dropped.count, templateHits, annotationHits
+        ))
+        lines.append(String(
+            format: "  其中「有语音电平」的段：改动前 %d → 改动后 %d（被丢的响段 = 误杀上界 %d）",
+            loudTotal, loudTotal - droppedLoud, droppedLoud
+        ))
+        lines.append("  机器可读：HALLU_SUMMARY\t\(all.count)\t\(kept)\t\(dropped.count)\t\(templateHits)\t\(annotationHits)\t\(loudTotal)\t\(loudTotal - droppedLoud)")
+
+        // 重叠窗会把同一处幻觉重复计入（滑窗每 3 秒重转一次 10 秒音频），
+        // 所以上面的计数是「窗·段」次数，不是「几处幻觉」。为了不把数字吹大，
+        // 另给一个按文本去重的数——**两个数都要报，只说小的那个是藏**。
+        let distinctDropped = Set(dropped.map { WhisperHallucination.normalize($0.0.text) }).count
+        lines.append("  ⚠️ 上面是「窗·段」次数：重叠窗会把同一处幻觉重复计入。按文本去重后是 \(distinctDropped) 处")
+
+        if dropped.isEmpty {
+            lines.append("  （本录音没有命中任何一条）")
+        } else {
+            lines.append("  丢掉的全部内容（逐条看，响段要人工确认到底该不该丢）：")
+            for (segment, verdict) in dropped {
+                let kind = switch verdict {
+                case .dropSubtitleTemplate(let marker): "模板:\(marker)"
+                case .dropNonSpeechAnnotation: "注释"
+                case .keep: "?"
+                }
+                lines.append(String(
+                    format: "    [%@ / 无语音%.6f / 电平%.5f vs 门%.5f%@] %@",
+                    kind, segment.noSpeech, segment.level, segment.floor,
+                    segment.level >= segment.floor ? " ⚠响段" : "", segment.text
+                ))
+            }
+        }
+        lines.append("  注：`suppress_regex` 那条臂不在这一趟里——它作用在解码期，要单独跑（见 --suppress-regex）")
         return lines
     }
 

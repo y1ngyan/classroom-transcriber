@@ -225,11 +225,45 @@ final class WhisperEngine: @unchecked Sendable {
         if let context { GgmlTeardown.release(context) }
     }
 
+    /// `suppress_regex` 的语义与代价（**读的是上游源码**，whisper.cpp v1.9.4
+    /// `src/whisper.cpp:6373-6380`，不是猜的）。
+    ///
+    /// 四条，每条都会改变「值不值得用」的结论：
+    ///
+    /// 1. **整 token 精确匹配，不是子串**。上游用的是 `std::regex_match(token, re)`
+    ///    ——`regex_match` 要求**整个 token 文本**匹配。所以「谢谢大家收看」这类
+    ///    多词模板只有当它**正好是一个 token** 时才会被压掉，中文 BPE 下基本
+    ///    不会发生。它实际能压掉的是**单个 token 的词**（「订阅」「频道」可能行）。
+    /// 2. **每个生成 token 都把整个词表过一遍**：那个 `for (token_to_id)` 在
+    ///    采样函数里，而采样函数**每出一个 token 调一次**。约 5.2 万个 token ×
+    ///    每次生成，代价是 O(词表) 的正则匹配，且
+    /// 3. **正则每次都要重新构造**：`std::regex re(...)` 写在校验循环**内部**，
+    ///    没有缓存。构造一个 `std::regex` 是重操作，再乘以 token 数。
+    /// 4. **正则非法 = 进程 abort**：构造函数抛 `std::regex_error`，C++ 侧没有
+    ///    任何 catch，`std::terminate` 直接终止进程。**传进来的模式必须是合法的
+    ///    ECMAScript 正则**，不能靠「反正匹配不上就算了」。
+    ///
+    /// 所以生产默认**不启用**；要用必须是「单个 token 的词 + 实测过耗时可接受」。
+    /// 词表层面的模板治理由 `WhisperHallucination` 在文本层做——那一层能匹配
+    /// 任意子串，也不依赖分词。
+    static let suppressRegexCaveat = """
+    suppress_regex 是整 token 精确匹配（非子串），每个生成 token 会遍历整个词表 \
+    并重新构造一次 std::regex，模式非法会让进程 abort。见 whisper.cpp v1.9.4 \
+    src/whisper.cpp:6373。
+    """
+
     /// 转一段 16kHz 单声道 Float32 PCM。
     ///
-    /// - Parameter language: 课堂是中文为主，默认 zh
+    /// - Parameters:
+    ///   - language: 课堂是中文为主，默认 zh
+    ///   - suppressRegex: 交给 whisper 的 `suppress_regex`。**默认 nil（不启用）**——
+    ///     实测语义和代价都不如预期，见 `Self.suppressRegexCaveat`
     /// - Returns: 转出来的段（含时间范围和逐字符置信度），文本已经是简体
-    func transcribe(_ samples: [Float], language: String = "zh") throws -> [WhisperSegment] {
+    func transcribe(
+        _ samples: [Float],
+        language: String = "zh",
+        suppressRegex: String? = nil
+    ) throws -> [WhisperSegment] {
         lock.lock()
         defer { lock.unlock() }
 
@@ -253,6 +287,12 @@ final class WhisperEngine: @unchecked Sendable {
         // 限制一下让输出更接近自然句
         params.max_len = 60
 
+        // suppress_regex 的 C 字符串同样要在 whisper_full 期间存活。
+        // 默认不启用：见 suppressRegexCaveat
+        let regexCString = suppressRegex.flatMap { strdup($0) }
+        defer { if let regexCString { free(regexCString) } }
+        params.suppress_regex = regexCString.map { UnsafePointer($0) }
+
         var mutable = samples
         let code = mutable.withUnsafeMutableBufferPointer { buf in
             whisper_full(context, params, buf.baseAddress, Int32(buf.count))
@@ -275,7 +315,8 @@ final class WhisperEngine: @unchecked Sendable {
                 endMillis: Int(t1) * 10,
                 confidences: Self.spreadTokenProbabilities(
                     Self.tokenProbabilities(context: context, segment: i)
-                )
+                ),
+                noSpeechProbability: Double(whisper_full_get_segment_no_speech_prob(context, i))
             ))
         }
         return result
@@ -575,6 +616,22 @@ struct WhisperSegment: Equatable {
     /// Apple 那条链路的逐字符置信度是框架原生给的，这里是它的等价物——
     /// 档位判定走同一个 `TranscriptQualityAssessor`
     var confidences: [Double] = []
+
+    /// whisper 自己对「这一段里没有语音」的判断（0–1，`no_speech_prob`）。
+    ///
+    /// **它和 `confidences` 是两回事，不能互相替代**：置信度问的是「这些字
+    /// 我认得有多准」，这个问的是「这里的音频到底有没有人在说话」。幻觉段
+    /// 两者会背离——实测 `(音乐)` 这类段的平均置信度能到 1.00，而它整段都
+    /// 没有语音。
+    ///
+    /// ⚠️ **但 `WhisperHallucination` 今天并没有用它**（2026-09-24 改正：这里
+    /// 原来写着「用它做非语音注释的佐证之一」，是过期的）。这个字段实测恒 0，
+    /// 是条死臂——三份证据和取数路径的核查都在
+    /// `WhisperHallucination.noSpeechProbabilityIsInert` 的 doc 注释里。
+    /// 字段本身留着，是因为链条（引擎 → 段落 → 探针 TSV）已经接通、报告要用它
+    ///
+    /// 默认 0 是给「不由 whisper 直接产出」的段用的（如合并器的输出段）
+    var noSpeechProbability: Double = 0
 
     /// 这段的档位。没拿到置信度时返回 nil（不乱判）
     var grade: TranscriptGrade? {
