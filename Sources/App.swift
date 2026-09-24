@@ -2,6 +2,9 @@ import SwiftUI
 import Speech
 import AVFoundation
 
+// `HeadlessEntry` 在 Sources/HeadlessEntry.swift——**故意不在这个文件里**，
+// 因为 `AppState.swift` 要引用它，而三个探针脚本组源码表时排除本文件（见那里的注释）
+
 @main
 struct ClassroomTranscriberApp: App {
     init() {
@@ -159,12 +162,26 @@ struct ClassroomTranscriberApp: App {
                 // 退出前放掉引擎。走正规所有权这一步是**为了验它**——这条自检
                 // 要覆盖的就是「warmUp 之后 unload 能不能干净收场」。
                 //
-                // 但**不能靠它来避免 abort**：它放掉的只是本对象持有的那一份，
-                // 而这条路上 App 照常启动，`AppState` 会按配置预热**另一份**
-                // （实测：这一步调过之后仍然 exit=134）。真正的兜底是
-                // `exitReleasingGgml()`——它放掉进程里所有 context，再卸后端
+                // 但**不能靠它来避免 abort**：它放掉的只是本对象持有的那一份。
+                // （这条路上 `AppState` 曾经也按配置预热一份，所以这一步调过之后
+                // 仍然 exit=134；那份预热现在在无头入口里关掉了，见 `HeadlessEntry`。
+                // 但兜底不因此改为「靠所有权」——真正的兜底是 `exitReleasingGgml()`，
+                // 它放掉进程里所有 context，再卸后端）
                 await MainActor.run { runtime.unload() }
                 print("已放掉本对象持有的引擎（退出前必须做，否则 ggml 静态析构会 abort）")
+
+                // 133 那条判据的**正面**证据：这个进程一共构造了几份 ggml context。
+                // 无头入口应当是 1（`AppState` 不再预热，入口自己那份是唯一的）。
+                // 等一秒再读，是为了让「万一还有第二份」来得及把它的构造登记上——
+                // 这个数要能看见第二份才有意义，否则它永远是 1，等于没测
+                try? await Task.sleep(for: .seconds(1))
+                let stats = GgmlTeardown.constructionStats
+                // 「不是 1」的三种读法都写在括号里：核验者 2026-09-24 指出，
+                // 只说「应为 1」会把「模型没就位」（0）和「同一来源重试」（2）
+                // 一起误导成「又冒出一个构造来源」。读法详见 `GgmlTeardown.constructed`
+                print("🔎 构造 ggml context 次数: \(stats.constructed)（无头入口应为 1；0 = 模型没就位、构造没开始；≥2 = 多了一个来源，也见同来源重试）")
+                // 峰值只打不断言，理由见 `GgmlTeardown.peakInside`
+                print("🔎 构造期同时在造的峰值: \(stats.peakInside)（≥2 就是 133 那个形状；顺序两次则为 1）")
                 exitReleasingGgml()
             }
         }
@@ -186,6 +203,17 @@ struct ClassroomTranscriberApp: App {
             if semaphore.wait(timeout: .now() + 1800) == .timedOut {
                 print("❌ 离线跑超时")
             }
+            // 同 `--whisper-prewarm` 报同一个计数（那是 133 的正面判据，见那边的
+            // 注释）。**但这一条 `exit_codes.sh` 不断言它**，只打出来给人看：
+            // 这条入口把主线程堵在 semaphore 上，`AppState` 那条预热是 MainActor
+            // 上的 Task，压根没机会跑——把 fix ① 拿掉重编，这里照样打 1（实测）。
+            // 一个不会红的断言不配当判据（见 exit_codes.sh 里的同一句）
+            //
+            // 带 `--fallback-probe N` 时**本来就该是 2**（那条探针要另开一个
+            // context 来做对照），别把它当回归
+            let windowStats = GgmlTeardown.constructionStats
+            print("🔎 构造 ggml context 次数: \(windowStats.constructed)（无头入口应为 1；0 = 模型没就位；带 --fallback-probe 时另开 context，则为 2）")
+            print("🔎 构造期同时在造的峰值: \(windowStats.peakInside)（≥2 就是 133 那个形状；顺序两次则为 1）")
             exitReleasingGgml()
         }
 

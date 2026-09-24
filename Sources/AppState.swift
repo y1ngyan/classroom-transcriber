@@ -46,7 +46,13 @@ final class AppState {
         // 选课的这点时间里它就准备完了（缓存命中时 0.65 秒）。
         // **只在后端真的是 Whisper 时才预热**——默认是 Apple，那条路上
         // 一次 Metal 编译都不该发生，否则等于给所有人加一笔用不上的开销。
-        if AppConfig.transcriptionBackend == .whisper {
+        //
+        // **无头入口不预热**：那些入口自己在 `App.init` 里构造了引擎，这里再预热
+        // 一份就是「同一个进程里两个 ggml context 并发初始化」——133（SIGTRAP）
+        // 的根因。而 `AppState` 是 `App` 的 `@State` 属性、默认值先于 `init()` 体
+        // 求值，所以这个判断**必须在预热这一侧**做，放在无头开关那一侧来不及
+        // （详见 `HeadlessEntry`）。判据也在那边，一处就够
+        if AppConfig.transcriptionBackend == .whisper, !HeadlessEntry.isActive {
             transcription.whisper.warmUp()
         }
     }

@@ -1096,15 +1096,23 @@ enum WhisperWindowFileRun {
         // 它一边打 −1.00、一边跑 −10，三档输出完全相同却没人看得出来。
         lines.append("  ⚠️ 每个档位的参数写死在各自的 variant 里，不要读上面那行的默认值当本档参数")
 
-        ggml_backend_load_all()
-        var contextParams = whisper_context_default_params()
-        contextParams.use_gpu = true
-        guard let context = whisper_init_from_file_with_params(
-            WhisperEngine.resolvedModelURL.path, contextParams
-        ) else {
+        // 另开 context 也要走**进程级**锁（`GgmlTeardown.construct`）：这两步动的
+        // 是进程级的后端注册表、堆和 Metal residency set，和别处正在跑的一次构造
+        // 并发就是这个缺陷（133 的堆损坏，见 `GgmlTeardown.lock`）。
+        // 释放同理要持锁，而这份 context 没登记进 `live`（它由下面的 defer 自己放），
+        // 所以走 `freeTransient` 而不是 `release`
+        let context: OpaquePointer? = GgmlTeardown.construct {
+            ggml_backend_load_all()
+            var contextParams = whisper_context_default_params()
+            contextParams.use_gpu = true
+            return whisper_init_from_file_with_params(
+                WhisperEngine.resolvedModelURL.path, contextParams
+            )
+        }
+        guard let context else {
             return lines + ["  ❌ 另开 context 失败（模型路径 \(WhisperEngine.resolvedModelURL.path)）"]
         }
-        defer { whisper_free(context) }
+        defer { GgmlTeardown.freeTransient(context) }
 
         let windowFrames = Int(WhisperWindowPipeline.windowSeconds * WhisperWindowPipeline.sampleRate)
         let ranked = round.realWindows.sorted { $0.elapsedSeconds > $1.elapsedSeconds }.prefix(count)

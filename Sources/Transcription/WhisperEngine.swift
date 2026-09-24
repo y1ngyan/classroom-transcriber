@@ -4,27 +4,152 @@ import whisper
 
 /// 进程退出前的 ggml 清理 —— **所有 `exit()` 都必须走 `exitReleasingGgml`**。
 ///
-/// **为什么必须是全局的**：whisper context 从来不只有一份。GUI 启动时 `AppState`
-/// 会按配置预热一份（`AppState` 里那个 `warmUp()`），无头入口又各自构造一份，
-/// `--mic-selftest` 那条路上两者**同时**存在。而 ggml 的 Metal 后端在静态析构时
+/// **为什么必须是全局的**：一个进程里可以有不只一份 context（GUI 启动时 `AppState`
+/// 按配置预热的那份、无头入口自己造的那份、`--fallback-probe` 临时另开的那份），
+/// 而「还活着的有哪几份」调用方算不出来。ggml 的 Metal 后端在静态析构时
 /// 断言 `[rsets->data count] == 0`：**只要还有任意一份 context 活着**，进程就以
 /// abort 结束（实测 exit=134，栈在 `__cxa_finalize_ranges` → `ggml_metal_device_free`）。
 ///
 /// 所以「放掉自己那一个」是不够的。`--whisper-prewarm` 明明已经调过
 /// `runtime.unload()` 却仍然 134，正是因为它放掉的是自检自己造的那一份，而
-/// AppKit 那条路上 `AppState` 造的那一份还活着。清理必须能找到**所有** context。
+/// AppKit 那条路上 `AppState` 造的那一份还活着。（那份现在不在无头入口里预热了，
+/// 见 `HeadlessEntry`——但「谁还活着」本来就不该由每个出口各自去算，
+/// 这条规则留着的理由是这个。）清理必须能找到**所有** context。
 ///
 /// **顺序是硬约束**：先 `whisper_free`（把 buffer 还给后端，residency set 才空得
 /// 下来），再 `ggml_backend_unload`。反过来会在后端已拆的情况下 free context。
 enum GgmlTeardown {
 
-    private static let lock = NSLock()
+    /// 进程级唯一的一把锁，管两件事：① `live` 表；② **ggml context 的构造与销毁**。
+    ///
+    /// **为什么保护 context 的锁必须是进程级的**（2026-09-24 的 133 现场，见
+    /// `docs/Whisper推进报告.md` §3.3）：两条线程同时卡在
+    /// `whisper_init_from_file_with_params` 里——一条走到
+    /// `ggml_backend_alloc_ctx_tensors_from_buft` 分配，另一条走到
+    /// `ggml_metal_buffer_rset_init` 往 Metal residency set 里注册——libmalloc 随后报
+    /// 「BUG IN CLIENT OF LIBMALLOC: memory corruption of free block」，`brk` 自检
+    /// 把它抓成 SIGTRAP（exit=133）。`WhisperEngine` 自己那把 `lock` 只管得住
+    /// **实例内部**，管不住「两个实例同时在造 context」；而 ggml 的堆、Metal 的
+    /// residency set、后端注册表**都是进程级的**，保护它们的锁也必须是。
+    /// 把 `AppState` 在无头入口里的预热关掉（见 `HeadlessEntry`）只是「少一个来源」，
+    /// 真要挡住这一整类缺陷，靠的是这把锁。
+    ///
+    /// **递归锁**：`WhisperEngine.init` 在 `construct` 的闭包**里面**调 `adopt`
+    /// （登记必须和构造同一个临界区，理由见那边），同一条线程重入这一把，
+    /// 所以不能用 `NSLock`。
+    private static let lock = NSRecursiveLock()
+
     /// 还活着的 context。`OpaquePointer` 可哈希，正好当身份用。
     ///
     /// `nonisolated(unsafe)` 的依据：**每一次**读写都在 `lock` 里（`adopt` / `release`
-    /// / `releaseAll` 三个入口无一例外），所以这里的可变全局状态是安全的。
-    /// Swift 6 看不出「调用方都记得加锁」，只能靠这个显式承诺。
+    /// / `releaseAll` / `construct` / `constructionStats` 无一例外），所以这里的可变
+    /// 全局状态是安全的。Swift 6 看不出「调用方都记得加锁」，只能靠这个显式承诺。
     nonisolated(unsafe) private static var live: Set<OpaquePointer> = []
+
+    /// 这个进程一共**进过几次构造临界区**。只增不减。
+    ///
+    /// 存在的理由：133 的根因是「同一个进程里两个 ggml context 并发初始化写坏堆」，
+    /// 而这件事在输出上完全看不出来——两份各自跑得好好的，只有堆被写坏的那一刻
+    /// 才现形，而且是竞态。有了这个计数，「这个无头入口到底造了几份」就从一次
+    /// 撞运气的观测变成一行**可以直接断言**的字面量（`exit_codes.sh` 断言它 = 1）。
+    ///
+    /// **它数的是「构造尝试」，不是「成功造出的 context」**（自增在 body 之前），
+    /// 所以读「不是 1」的时候先排除两种良性情形，别一律当成「又冒出一个来源」
+    /// ——核验者 2026-09-24 指出的假阳性路径：
+    ///   · **0**：模型没就位（`WhisperRuntime.warmUp` / `WhisperEngine.init` 都在
+    ///     更早的 guard 里就返回了），一次构造都没开始，跟并发无关；
+    ///   · **2**：同一个来源重试。`--whisper-prewarm` 刻意调两次 `warmUp()`，
+    ///     第一次失败后 `warmupTask` 归零、`engine` 仍为 nil，第二次会真的重试
+    ///     （见 `WhisperRuntime.warmUp` 的 guard）——那是**顺序**两次，不是并发。
+    /// 真正的并发来源（去掉 fix ① 那种）也是 2，所以这个数分不出「重试」和「两个
+    /// 来源」；要分那一刀得看下面那个峰值。
+    nonisolated(unsafe) private static var constructed = 0
+
+    /// 这一刻在临界区里的线程数，以及全进程见过的最大同时在造数。只增不减。
+    ///
+    /// `peakInside` 是**直接**的危险度量：「两个 ggml context 同时初始化」就是它 ≥ 2。
+    /// 打印它、但**不拿它当断言**，理由是它会漏：无头入口两次构造**顺序**发生时
+    /// （预热一份、入口自己再一份）峰值仍是 1，而那正是去掉 fix ① 后的形状——
+    /// 也就是说它抓得到「并发」，抓不到「多了一个来源」。没有验过会红的注入实验
+    /// 就不配当判据（这个项目里「没验过会红的守卫不配当守卫」是规矩），所以两处
+    /// 入口只打给人看：真出了 133 而「次数」是 1，峰值会告诉你锁到底有没有兜住。
+    nonisolated(unsafe) private static var inside = 0
+    nonisolated(unsafe) private static var peakInside = 0
+
+    /// 上面两个计数的读法。一次取锁读一对。
+    static var constructionStats: (constructed: Int, peakInside: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (constructed, peakInside)
+    }
+
+    /// 在进程级锁里构造 ggml context。**整段构造都必须持锁**：
+    /// `ggml_backend_load_all()` 会改全局的后端注册表，`whisper_init…` 会从进程级的
+    /// 堆和 Metal residency set 里分配——两件事都不能和另一次构造（或销毁）并发。
+    ///
+    /// 锁放在这一层而不是各个调用方，是因为构造点不止一处（`WhisperRuntime` 的
+    /// 预热、`WhisperWindowFileRun` 的直接构造、`--fallback-probe` 的临时 context），
+    /// 每个调用方各记一次迟早会漏一个——133 就是这么来的。
+    static func construct<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        constructed += 1
+        inside += 1
+        peakInside = max(peakInside, inside)
+        defer { inside -= 1 }   // 先于 unlock（defer 逆序执行）
+        return try body()
+    }
+
+    /// 「这把锁真的互斥吗」的**正面判据**（`--whisper-selftest` 里跑，**不碰 ggml**）。
+    ///
+    /// 为什么需要它：133 是竞态——把 `construct` 里的锁拿掉、重新编译，再连跑几遍
+    /// 入口大概率照样全绿，那正是这个缺陷当初能溜进来的原因。所以「锁还在不在」
+    /// 不能靠连跑入口来证，得有一个**确定性**判据：让两条线程同时去拿锁，看有没有
+    /// 任何一刻两个都在里面。真重叠了必然返回 false，与运气无关。
+    ///
+    /// 刻意不碰 ggml：`construct` 只是个带锁的壳，body 里干什么都行，所以这条判据
+    /// 在不需要模型的自检里就能跑。两条线程先在门口集合（都到齐了才放行）再一起
+    /// 冲，这样「同时」不靠调度运气；锁里停 0.2 秒，给另一条线程足够时间撞上来
+    /// （互斥成立时两段串起来 ~0.4 秒，不成立则 ~0.2 秒且计数为 2）
+    static func mutualExclusionProbe() -> Bool {
+        final class Box: @unchecked Sendable {
+            let lock = NSLock()
+            var inside = 0
+            var maxInside = 0
+            var arrived = 0
+        }
+        let box = Box()
+        let gate = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        for _ in 0..<2 {
+            DispatchQueue.global(qos: .userInitiated).async(group: group) {
+                box.lock.lock()
+                box.arrived += 1
+                let bothHere = box.arrived == 2
+                box.lock.unlock()
+                if bothHere {
+                    gate.signal()
+                    gate.signal()
+                }
+                gate.wait()
+
+                construct {
+                    box.lock.lock()
+                    box.inside += 1
+                    box.maxInside = max(box.maxInside, box.inside)
+                    box.lock.unlock()
+
+                    Thread.sleep(forTimeInterval: 0.2)
+
+                    box.lock.lock()
+                    box.inside -= 1
+                    box.lock.unlock()
+                }
+            }
+        }
+        group.wait()
+        return box.maxInside == 1
+    }
 
     /// 登记新造的 context（`WhisperEngine.init` 造完就登记）
     static func adopt(_ context: OpaquePointer) {
@@ -35,14 +160,25 @@ enum GgmlTeardown {
 
     /// 放掉一个 context。**幂等**——已经放过的返回 false，不会再 free 一次。
     /// 所以 `WhisperEngine.deinit` 和退出清理谁先跑，都不会重复释放。
+    ///
+    /// `whisper_free` 也在锁里跑：还 buffer 会动进程级的 residency set，
+    /// 和另一次构造并发就是同一个堆损坏（见 `lock` 的注释）
     @discardableResult
     static func release(_ context: OpaquePointer) -> Bool {
         lock.lock()
-        let owned = live.remove(context) != nil
-        lock.unlock()
-        guard owned else { return false }
+        defer { lock.unlock() }
+        guard live.remove(context) != nil else { return false }
         whisper_free(context)
         return true
+    }
+
+    /// 放掉一个**没登记进 `live`**的 context——给「自己造、自己 defer 放」的探针
+    /// 路径用（`WhisperWindowFileRun.fallbackProbe`）。同样必须持锁：释放动的是
+    /// 进程级的 residency set，和构造并发一样会写坏堆。
+    static func freeTransient(_ context: OpaquePointer) {
+        lock.lock()
+        defer { lock.unlock() }
+        whisper_free(context)
     }
 
     /// 放掉**所有**还活着的 context，再卸掉动态加载的 ggml 后端。幂等，可重复调。
@@ -51,10 +187,15 @@ enum GgmlTeardown {
     /// 没有这个数字，出问题时只能看见一个 exit=134，看不见是谁没放。
     @discardableResult
     static func releaseAll() -> (contexts: Int, backends: [String]) {
+        // 全程持锁。**代价说清楚**：退出路径上最多会等一次正在跑的构造结束
+        // （冷启动 17 秒），界面表现为「退出时卡一下」。等，是因为反过来做就是
+        // 「在别人写堆的时候去 free context」——那正是要根治的那个故障。
+        // 卡一下难看，写坏堆是数据事故
         lock.lock()
+        defer { lock.unlock() }
+
         let pending = live
         live.removeAll()
-        lock.unlock()
 
         // 先 context 后后端，顺序不能反（见类型注释）
         for context in pending {
@@ -319,18 +460,31 @@ final class WhisperEngine: @unchecked Sendable {
         // make_buft_list 里 GGML_ASSERT(device) failed 直接崩，
         // 而且崩在 C++ 里看不出原因（2026-09-21 实测的 abort 栈：
         // whisper_init_from_file_with_params → make_buft_list → ggml_abort）
-        ggml_backend_load_all()
+        //
+        // 整段持**进程级**锁（理由见 `GgmlTeardown.lock`）：这两步都在改进程级的东西
+        // ——后端注册表、堆、Metal residency set。两个实例同时走到这里就是 133
+        //
+        // **登记（`adopt`）也在同一个临界区里**，不放在 `construct` 返回之后：
+        // 分开写的话，中间那条缝里退出清理可能刚好拿锁、把 `live` 清空并 free 完，
+        // 紧接着这个 context 被记进一张没人再看的表——进程照样以 134 收场。
+        // 缝很窄（核验者 2026-09-24 从读码指出，没构造出实跑反例），但关掉它
+        // 不要钱：这也是 `lock` 必须是**递归**锁的原因（同一条线程重入）
+        let ctx: OpaquePointer? = GgmlTeardown.construct {
+            ggml_backend_load_all()
 
-        var params = whisper_context_default_params()
-        params.use_gpu = true
+            var params = whisper_context_default_params()
+            params.use_gpu = true
 
-        guard let ctx = whisper_init_from_file_with_params(modelURL.path, params) else {
+            let created = whisper_init_from_file_with_params(modelURL.path, params)
+            // 退出清理要能找到**所有** context，不只是本对象这一份（见 `GgmlTeardown`）
+            if let created { GgmlTeardown.adopt(created) }
+            return created
+        }
+
+        guard let ctx else {
             throw WhisperError.initFailed
         }
         context = ctx
-        // 登记进全局表。退出清理要能找到**所有** context，不只是本对象这一份
-        // （理由见 `GgmlTeardown`）
-        GgmlTeardown.adopt(ctx)
     }
 
     deinit {
@@ -608,7 +762,7 @@ final class WhisperEngine: @unchecked Sendable {
     /// 不跑推理：模型 514MB、加载就要半秒，自检应该是随手能跑的东西。
     /// 真推理的端到端验证走独立探针（把本文件编译进探针跑真实录音）。
     static func selfTest() -> [String] {
-        var lines: [String] = ["Whisper 引擎自检（繁简转换 + 概率聚合 + 缺模型分支 · 纯本地，不跑推理、不发网络请求）"]
+        var lines: [String] = ["Whisper 引擎自检（繁简转换 + 概率聚合 + 构造锁互斥 + 缺模型分支 · 纯本地，不跑推理、不发网络请求）"]
         var allPassed = true
 
         func check(_ name: String, _ condition: Bool, _ detail: String) {
@@ -715,7 +869,19 @@ final class WhisperEngine: @unchecked Sendable {
             check("模型缺失 → 抛 modelMissing", false, "抛了别的错：\(error)")
         }
 
-        // --- 四、当前模型就位情况（如实报告，不是缺陷）---
+        // --- 四、ggml 构造锁的互斥性（133「并发写坏堆」的正面判据）---
+        //
+        // 为什么是「两条线程同时进锁看有没有重叠」而不是再连跑几遍入口：133 是
+        // 竞态，而「修好了」和「这次没撞上」在单次运行里长得一模一样。这条是
+        // **确定性**的：真重叠必然被抓到，跟运气无关。
+        //
+        // 它也**不碰 ggml**（`construct` 只是个带锁的壳），所以能在不需要模型的
+        // 自检里跑——上面那条「造一份 context 要 17 秒」的冷启动窗口，是连跑
+        // 入口永远压不到的地方
+        check("构造锁·两条线程不重叠", GgmlTeardown.mutualExclusionProbe(),
+              "同时进锁，锁内最大并发数应为 1")
+
+        // --- 五、当前模型就位情况（如实报告，不是缺陷）---
         if isModelReady {
             let size = (try? FileManager.default.attributesOfItem(atPath: modelPath.path)[.size] as? Int64) ?? 0
             lines.append("  ℹ️ 模型已就位 · \(modelPath.path) · \(String(format: "%.1f", Double(size) / 1_000_000)) MB")

@@ -7,12 +7,17 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
+# **两个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+#   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
+#   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
+#     而自检失败**不改退出码**，不看输出就等于没测
+#
 # 用法：
 #   ./tools/probes/exit_codes.sh            # 不碰麦克风的入口（默认）
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0。
+# 退出码 0 = 跑到的入口全部 exit=0、且两个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -58,12 +63,65 @@ run() { # run <名字> <参数…>
     # 共用进程级的堆和 Metal residency set，堆被写坏，libmalloc 自检把它抓了。
     # 是**竞态**，所以偶发：冷启动那份 init 要 17 秒，窗口最宽，首跑最容易撞上。
     #
-    # 怎么读这条判据（根治之前）：孤立的、只在会加载模型的入口出现、重跑即消失的
-    # 133 = **已知假红**（成因确定，见上），重跑一次即可；重跑还出，或出现在不
-    # 加载模型的入口、或伴随别的信号（134/139），按真 bug 处理。
-    # 根治方案（两处，需真跑验证，未落地）：① 无头入口里别让 `AppState` 预热；
-    # ② 把「ggml context 的构造与销毁」串行化在一把**进程级**锁上。
-    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：已知假红（两个 runtime 并发 whisper_init 写坏堆，竞态）——**先重跑一次再当 bug**；根因与读法见本文件注释\n'
+    # **根治已落码**（2026-09-24 第二版，两处）：
+    #   ① 无头入口不预热 `AppState`（`HeadlessEntry.isActive`）；
+    #   ② ggml context 的**构造与销毁**串行化在一把进程级锁上（`GgmlTeardown.lock`）。
+    # 所以现在再出 133 **不再是「已知假红」，按真 bug 查**：
+    #   · 先看这一条留下的「构造 ggml context 次数 / 同时在造的峰值」（那两行是
+    #     为 133 加的）。**次数 ≥ 2** 说明又冒出了一个构造来源（新的预热点、新的
+    #     直构点），那正是要修的地方，别去怪 whisper。但**次数 0 不是这个意思**：
+    #     那是模型没就位、一次构造都没开始（`WhisperRuntime.warmUp` 在更早的 guard
+    #     就返回了），跟并发无关——先去看模型在不在，别去翻构造点；
+    #   · 次数是 1 还出 133，看**峰值**：峰值 ≥ 2 说明真的有两条线程同时在造，
+    #     那是锁没兜住（或绕过锁的第 4 个构造点，见核验报告 §F）；峰值是 1 才是
+    #     「损坏来自锁没盖到的地方」（推理期？别的库？）。两种都去
+    #     `~/Library/Logs/DiagnosticReports/` 翻现场，按栈查，别猜。
+    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：并发写坏堆那一类（根治已落码，见本文件注释）——按**真 bug** 查，先看 context 计数是不是 1\n'
+    printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# 同 `run`，但**额外断言输出里有这么一行**。给两类情况用：
+#   · `--whisper-prewarm` 的「构造 ggml context 次数: 1」——133 的**正面**判据：
+#     「这次没崩」是运气，「只造了一份」才是结论（根因就是同一个进程里两份并发
+#     初始化，见上面 133 分支）。
+#   · `--whisper-selftest` 的总结行——那条自检里有「构造锁·两条线程不重叠」，
+#     它是锁还在不在的**确定性**判据（连跑入口压不到 17 秒冷启动那个窗口，
+#     而这条一撞就抓）。自检**失败不改退出码**，所以只有断言输出才看得见它。
+#
+# 两个断言都用 `grep -F`（固定串）而不是正则：要断言的串里有 `:` `（` 这些字符，
+# 正则下要转义，而这条脚本要在 macOS 的 bash 3.2 上跑
+#
+# 为什么只在这两处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
+# 这两个都验过——把 fix ① 拿掉重编，prewarm 那条立刻报「计数不是 1 ⇐ 次数: 2」；
+# 把 `construct` 里的锁拿掉重编，selftest 那条立刻报 ❌。而
+# `--whisper-window-file --head 20` **验不过**：它照样打 1（那条入口把主线程堵在
+# semaphore 上，`AppState` 那条预热是 MainActor 上的 Task，根本没机会跑），
+# 所以那边保持普通的 `run`，只用退出码当判据。
+#
+# 后一条「同时在造的峰值」（`--whisper-prewarm` / `--whisper-window-file` 都打）
+# 也**不**断言，理由同上一段：它抓不到「顺序发生两个来源」那种形状（那时峰值是 1）。
+# 打出来是给「次数是 1 却仍然 133」那种现场用的，见上面 133 分支的读法
+run_assert() { # run_assert <名字> <输出里必须出现的行> <参数…>
+  local name="$1"; shift
+  local want="$1"; shift
+  local out code
+  out="$("$BIN" "$@" 2>&1)"
+  code=$?
+  if [ "$code" != "0" ]; then
+    printf '  ❌ %-34s exit=%s\n' "$name" "$code"
+    [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
+    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：见上面 133 分支的读法（先看 context 计数）\n'
+    printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if printf '%s' "$out" | grep -qF "$want"; then
+    printf '  ✅ %-34s exit=0 · 断言命中\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf '  ❌ %-34s exit=0，但输出里没有「%s」\n' "$name" "$want"
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
   fi
@@ -90,13 +148,15 @@ run "--glossary-suggest-selftest"   --glossary-suggest-selftest
 run "--question-selftest"           --question-selftest
 run "--preamp-selftest"             --preamp-selftest
 run "--hp-selftest"                 --hp-selftest
-run "--whisper-selftest"            --whisper-selftest
+# 这条自检里有「构造锁·两条线程不重叠」（133 那个并发缺陷的确定性判据）。
+# 自检失败**不改退出码**，所以只看退出码等于没看这条判据——断言总结行
+run_assert "--whisper-selftest" "✅ Whisper 引擎自检通过" --whisper-selftest
 run "--whisper-window-selftest"     --whisper-window-selftest
 run "--whisper-buffer-selftest"     --whisper-buffer-selftest
 
 echo
 echo "════ 要真模型的入口（会加载 539MB 模型）════"
-run "--whisper-prewarm"             --whisper-prewarm
+run_assert "--whisper-prewarm" "构造 ggml context 次数: 1（" --whisper-prewarm
 if [ -n "$SAMPLE" ]; then
   run "--whisper-window-file --head 20" --whisper-window-file "$SAMPLE" --head 20
 else
@@ -120,6 +180,9 @@ if [ "${WITH_MIC:-0}" = "1" ]; then
 fi
 
 echo
-echo "──── 合计：exit=0 的有 $PASS 个，非 0 的有 $FAIL 个 ────"
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过" || echo "❌ 有入口退出码不为 0（134 就是 ggml 静态析构 abort）"
+echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
+# 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
+# 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含两个断言）" \
+                  || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"
