@@ -90,6 +90,54 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     }
 }
 
+// MARK: - 说话人（C 包）
+
+/// 一个 diar 段：某个人在某段区间上说话。**时间轴是会话轴**（helper 按
+/// `--offset-ms` 把每个片段摆到会话时间轴上，不是顺序拼接），与
+/// `RecordingSession.absoluteRange` 同一个基准——映射时**不要再加一次 offset**。
+///
+/// `startMillis`/`endMillis` 是半开区间 `[start, end)`：`start == end` 是零长段，
+/// 映射时直接丢掉（它不是「说了 0 秒」，是数据不足）。
+struct SpeakerSpan: Codable, Equatable {
+    /// 原样保留 helper 的 `S1`/`S2`（FluidAudio 的 `TimedSpeakerSegment.speakerId`）。
+    /// 节课内编号在 diarize 跑完时分配一次，之后不变
+    var speakerId: String
+    var startMillis: Int
+    var endMillis: Int
+    /// helper 给这段打的把握（0–1）。**只用来诊断**，不参与归属判定——
+    /// 判定用的是重叠时长，见 `SpeakerMapper`（`qualityScore` 低不代表这段不算数）
+    var qualityScore: Double
+}
+
+/// 一次说话人识别的完整结果，挂在会话上。**真相来源**：
+/// `TranscriptSegment.speakerId` 这些是从它算出来的产物，可重算、可丢。
+///
+/// 命名避开 FluidAudio 的 `DiarizationResult`：主 App 不链 FluidAudio
+/// （helper 是独立进程），同名会让人误以为两者可以互转。
+///
+/// 两个新类型都用**合成 Codable**，这是刻意的：它们本身就是新类型，
+/// 磁盘上不存在「没有这些键的旧文件」，所以没有 `TranscriptSegment` 那种
+/// 「缺键 → 整条会话读不出来」的问题。**将来给它们加字段时才需要手写解码**
+/// （`decodeIfPresent`），别等到出事才想起来
+struct SpeakerDiarization: Codable, Equatable {
+    /// helper 信封的 schema 版本。缺键视作 0，而 **0 不当可用**——
+    /// 「没版本号」和「版本 1」必须分得开，否则将来加字段时无法判断怎么解
+    var schemaVersion: Int
+    /// 产出这份结果的 helper 构建标识，写进存档便于回溯「这批标签是谁算的」
+    var helperBuild: String
+    var ranAt: Date
+    /// helper 报的音频总时长（秒）。与本地 `durationMillis` 对不上说明音频被换过
+    var audioSeconds: Double
+    var speakerCount: Int
+    /// 原始 label 按「首次出现时间」升序。节课内编号（`S1,S2…`）就是按它定的
+    var speakerOrder: [String]
+    var segments: [SpeakerSpan]
+    /// 音频指纹（串起各片段的文件名/偏移/时长再哈希）。回答「这份结果还算不算数」：
+    /// 重新转录不动音频 → 指纹不变 → 结果继续有效；追加了一段录音 → 指纹变 →
+    /// 旧片段保留已物化的标签，新片段一律 nil
+    var partFingerprint: String
+}
+
 /// 一段连续的录音（一次「开始 → 停止」）。
 ///
 /// **为什么 segments 按片段分组、时间存相对值**：「接着录」会在同一条

@@ -7,17 +7,18 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **两个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **三个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
+#   · `--speaker-mapping-selftest`：C 包的映射规则总结行——同一种情形（见那里的注释）
 #
 # 用法：
 #   ./tools/probes/exit_codes.sh            # 不碰麦克风的入口（默认）
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且两个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且三个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -139,6 +140,12 @@ run "--split-selftest"              --split-selftest
 run "--punct-selftest"              --punct-selftest
 run "--dedup-selftest"              --dedup-selftest
 run "--session-selftest"            --session-selftest
+# C 包的映射规则（人物归属 + 旧会话缺键兜底）全在这条自检里。夹具是内存里造的，
+# 不碰真会话——真会话那条要人手动带 --session-file，不进这个自动扫（它依赖
+# Application Support 里的现存文件，换台机器就没有了）。
+# 退出码跟着红绿走，所以本来 run 就够；再钉一句总结行，是为了防「退出码对了、
+# 用例根本没跑」——判据一条都没执行时进程也是 0 退出
+run_assert "--speaker-mapping-selftest" "✅ 说话人映射自检通过" --speaker-mapping-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -183,6 +190,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含两个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含三个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

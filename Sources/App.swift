@@ -569,6 +569,27 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 说话人映射自检：--speaker-mapping-selftest [--session-file <会话 json>]
+        // （纯函数 + 旧会话解码；不联网、不加载模型、不碰麦克风、不发声）
+        //
+        // 带 `--session-file` 时**额外**拿一条现存会话文件解码一遍（**只读，不写回**）：
+        // 自检里那份「旧格式」夹具是我自己造的，而磁盘上那些是 App 真正写下的东西，
+        // 两者不是一回事。这个开关存在的唯一目的就是把后者也过一遍
+        //
+        // **退出码跟着红绿走**（`SpeakerMapper.SelfTestResult`）：`--whisper-selftest`
+        // 那边踩过的坑——自检失败不改退出码，于是只看退出码的探针**分不出这个入口
+        // 是红的还是绿的**。新入口不重复它
+        if CommandLine.arguments.contains("--speaker-mapping-selftest") {
+            let args = CommandLine.arguments
+            var sessionFile: String?
+            if let i = args.firstIndex(of: "--session-file"), i + 1 < args.count {
+                sessionFile = args[i + 1]
+            }
+            let result = SpeakerMapper.selfTest(sessionFile: sessionFile)
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 真实录音回归重复段去重：--dedup-file <wav>
         // 走引擎的 upsert（实时同款 progressive 预设），同时用旧逻辑离线重放
         // 作对照——--transcribe-file 只打印定稿结果，复现不了重复段

@@ -28,6 +28,28 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
     /// nil 表示没评（识别器没给置信度 / 还没定稿）。
     var qualityGrade: TranscriptGrade?
 
+    // MARK: - 说话人（C 包）
+    //
+    // 三个字段都是「映射的产物」，真相来源是 `RecordingSession.diarization`：
+    // 重新转录、重新映射都能把它们整批重算出来。所以它们可以丢、可以空，
+    // 丢了不算数据事故——但**不能读不出来**（见下面的手写解码）。
+
+    /// 归属的说话人标签（`S1` / `S2`…，节课内编号）。
+    ///
+    /// **`nil` 是「没标」，且「没标」只由它表达。** 不要把 `speakerOverlapRatio == 0`
+    /// 或 `speakerMixed` 反推成「没标」——那是两件事，混用会让「覆盖恰好为 0」
+    /// 和「判定为不标」再也分不开。界面按这个字段决定显不显示说话人
+    /// （拍板第 6 条：置信低就不显示，不显示错的是诚实的）。
+    var speakerId: String?
+    /// winner 覆盖率。**只有 `speakerId != nil` 时有意义**；没标时为 nil。
+    ///
+    /// 用 Optional 而不是「没标时写 0」：0 是一个合法的覆盖率读数，用它兼职
+    /// 「没有值」会让下游分不清「算出来是 0」和「没算」。
+    var speakerOverlapRatio: Double?
+    /// 本段内第二个人也占了可观时长（判定见 `SpeakerMapper`）。
+    /// 与 `speakerId` 相互独立：可以「有归属 + 多人」，也可以「无归属 + 多人」
+    var speakerMixed: Bool = false
+
     init(
         id: UUID = UUID(),
         text: String,
@@ -44,6 +66,48 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
         self.endTimeMillis = endTimeMillis
         self.timestamp = timestamp
         self.languages = languages
+    }
+
+    // MARK: - 向后兼容
+
+    /// 手写解码。**不能用合成的**，这条是 C 包里最容易翻车的地方。
+    ///
+    /// Swift 合成的解码器对「有默认值但 JSON 缺键」的非可选属性**不会回落默认值**，
+    /// 直接抛 `keyNotFound`——合成器只认属性是不是 Optional，不认等号后面那个默认值。
+    /// 实测：`struct S: Codable { var text: String; var questionLevel = 0 }` 解 `{"text":"hi"}` 会失败。
+    ///
+    /// 为什么这次非要兜住：`RecordingPart.segments` 是硬解，一段失败整条会话就读不出来，
+    /// 用户看到的是「那条录音从列表里消失了」——而这条会话明明还在磁盘上。
+    /// C 包之前的实际影响是 0（现存 1686/1686 段都有 `questionLevel`），但这次要加
+    /// 3 个字段，新写的会话必然带它们，**旧会话必然不带**，所以兜底是必须的。
+    ///
+    /// 兜底范围的划法：**一直存在的字段仍然必需**（缺了说明文件坏了，该抛出来），
+    /// 只有「后加的、有默认值的」才 `decodeIfPresent`。范围就下面这几个，别顺手扩大——
+    /// 把必需字段也兜成默认值，等于把「文件坏了」变成「读出一些空段」，那是更坏的失败。
+    private enum CodingKeys: String, CodingKey {
+        case id, text, isFinal, startTimeMillis, endTimeMillis, timestamp, languages
+        case questionLevel, coreQuestion, qualityGrade
+        case speakerId, speakerOverlapRatio, speakerMixed
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        text = try c.decode(String.self, forKey: .text)
+        isFinal = try c.decode(Bool.self, forKey: .isFinal)
+        startTimeMillis = try c.decode(Int.self, forKey: .startTimeMillis)
+        endTimeMillis = try c.decode(Int.self, forKey: .endTimeMillis)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        languages = try c.decode([String].self, forKey: .languages)
+
+        // 后加的非可选字段：缺键回落到属性默认值
+        questionLevel = try c.decodeIfPresent(Int.self, forKey: .questionLevel) ?? 0
+        speakerMixed = try c.decodeIfPresent(Bool.self, forKey: .speakerMixed) ?? false
+        // 后加的可选字段：缺键就是 nil（也正是「没标」「没评」的原意）
+        coreQuestion = try c.decodeIfPresent(String.self, forKey: .coreQuestion)
+        qualityGrade = try c.decodeIfPresent(TranscriptGrade.self, forKey: .qualityGrade)
+        speakerId = try c.decodeIfPresent(String.self, forKey: .speakerId)
+        speakerOverlapRatio = try c.decodeIfPresent(Double.self, forKey: .speakerOverlapRatio)
     }
 
     var durationMillis: Int { max(0, endTimeMillis - startTimeMillis) }
