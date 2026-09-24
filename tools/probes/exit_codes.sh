@@ -38,10 +38,32 @@ run() { # run <名字> <参数…>
     printf '  ❌ %-34s exit=%s\n' "$name" "$code"
     # 134 = SIGABRT（ggml 静态析构断言），单独点出来
     [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
-    # 133 = SIGTRAP。核验者 2026-09-24 在这次改动上见过**一次**：`--whisper-prewarm`
-    # 首跑 133，随后重跑（整脚本 1 次 + prewarm 单独 3 次）全是 0，未能复现。
-    # 只覆盖 134 的提示会让人以为 133 是另一类 bug，所以这里也点一句
-    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：这台 8GB 机器上见过偶发（未能复现），**先重跑一次再当 bug**\n'
+    # 133 = SIGTRAP。**这不是「另一个 134」**，成因已经查到根，别再猜：
+    #
+    # 2026-09-24 核验者见过一次（`--whisper-prewarm` 首跑，重跑全 0）。当晚就从
+    # `~/Library/Logs/DiagnosticReports/ClassroomTranscriber-2026-09-24-013855.ips`
+    # 里挖到了现场：`EXC_BREAKPOINT / SIGTRAP`，libsystem_malloc 报
+    # 「BUG IN CLIENT OF LIBMALLOC: memory corruption of free block」。
+    # 出事的线程在 `WhisperRuntime.warmUp()` 的 inference 队列里、正走
+    # `whisper_init_from_file_with_params` → `ggml_backend_alloc_ctx_tensors_from_buft`
+    # → `alloc_tensor_range`；**同一份报告里另一条线程的栈是同一个形状，一直同到
+    # `closure #1 in closure #1 in closure #1 in WhisperRuntime.warmUp()` 那个闭包名**
+    # ——两条线程是两次独立的 `WhisperEngine.init`（inferenceQueue 是串行的，
+    # 一条队列跑不出两条线程）。
+    #
+    # 两条并发的 `whisper_init` 从哪来：`AppState()` 是 `@main` App 的 `@State`
+    # 属性，**属性默认值先于 `init()` 体求值**（实测确认），而无头开关全在
+    # `init()` 里判——所以每个无头入口都先按配置（本机 `transcriptionBackend`
+    # = whisper）起了一次后台预热，入口自己再构造一份。两个 context 并发初始化
+    # 共用进程级的堆和 Metal residency set，堆被写坏，libmalloc 自检把它抓了。
+    # 是**竞态**，所以偶发：冷启动那份 init 要 17 秒，窗口最宽，首跑最容易撞上。
+    #
+    # 怎么读这条判据（根治之前）：孤立的、只在会加载模型的入口出现、重跑即消失的
+    # 133 = **已知假红**（成因确定，见上），重跑一次即可；重跑还出，或出现在不
+    # 加载模型的入口、或伴随别的信号（134/139），按真 bug 处理。
+    # 根治方案（两处，需真跑验证，未落地）：① 无头入口里别让 `AppState` 预热；
+    # ② 把「ggml context 的构造与销毁」串行化在一把**进程级**锁上。
+    [ "$code" = "133" ] && printf '       ↑ SIGTRAP：已知假红（两个 runtime 并发 whisper_init 写坏堆，竞态）——**先重跑一次再当 bug**；根因与读法见本文件注释\n'
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
   fi

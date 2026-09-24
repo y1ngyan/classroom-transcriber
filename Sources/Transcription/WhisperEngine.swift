@@ -165,6 +165,120 @@ final class WhisperEngine: @unchecked Sendable {
         FileManager.default.fileExists(atPath: resolvedModelURL.path)
     }
 
+    // MARK: - 解码期的「重试链」（原 spec §3）
+
+    /// whisper.cpp 的 temperature fallback 在**安静 / 音乐 / 噪声窗**上空转，
+    /// 把单窗从 ~2 秒拖到 17 秒。这里是这条链的取值和关掉它的依据。
+    ///
+    /// ## 机制（源码行，不是「一般来说」）
+    ///
+    /// whisper.cpp **v1.9.4**（brew 装的 `whisper-cpp`，`src/whisper.cpp`）：
+    /// - **:6081** `/*.temperature_inc =*/ 0.2f` —— 默认就开着链；
+    /// - **:6988** `for (float t = params.temperature; t < 1.0f + 1e-6f; t += params.temperature_inc)`
+    ///   —— 于是 `temperatures = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]`，**最多 6 次完整解码**；
+    /// - **:7174** `for (int it = 0; it < (int) temperatures.size(); ++it)` —— 就是这条循环；
+    /// - **:7667** 熵闸：`result_len > 32 && entropy < entropy_thold`（默认 2.4）→ `n_fail_h++`；
+    /// - **:7695** logprob 闸：`it != last && (failed || (avg_logprobs < logprob_thold && no_speech_prob < no_speech_thold))`
+    ///   （默认 -1.0 / 0.6）→ `n_fail_p++`；
+    /// - **:7691** 只有 `success` 才 `break` —— **不合格就一路升到 t=1.0**，
+    ///   所以最坏的窗要做满 6 趟，而 t=1.0 那趟的结果无论多差都会被接受。
+    ///
+    /// ## 实测：空转的是 logprob 闸，熵闸一次都没触发（2026-09-24）
+    ///
+    /// `--fallback-probe` 量 9/18 那条录音的三个慢窗，whisper 自己打的
+    /// `fallbacks = N p / M h`（毫秒；`batchd` 是解码器算图，`encode` 是编码器）：
+    ///
+    /// | 窗 | fallbacks | encode | decode | **batchd** | 总 |
+    /// |---|---|---|---|---|---|
+    /// | 53 默认 | 2 p / **0 h** | 1738 | 278 | **15308** | 18513 |
+    /// | 53 inc=0 | — | 1729 | 275 | **26** | 2064 |
+    /// | 58 默认 | 1 p / **0 h** | 1753 | 86 | **7763** | 9879 |
+    /// | 58 inc=0 | — | 1884 | 84 | **32** | 2020 |
+    /// | 31 默认 | 1 p / **0 h** | 1826 | 63 | **5984** | 8090 |
+    /// | 31 inc=0 | — | 1754 | 64 | **26** | 1870 |
+    ///
+    /// 三窗九次解码，`h` **一次都没触发**。停顿时长跟着 `batchd` 涨落，
+    /// 与 `encode`（恒定 ~1.75 秒，是 10 秒窗过编码器的固有成本）无关。
+    /// **所以拖慢的是 logprob 闸触发的重试，不是熵闸、也不是编码。**
+    ///
+    /// 第 52 窗（链真正在烧钱的那一窗）把每档的**正文**也打出来了：
+    ///
+    /// | 档位 | 耗时 | 正文 |
+    /// |---|---|---|
+    /// | 旧版（链 6 趟） | 9.49 秒 | 這次我們年輕的年輕人是平地生活園陣的,這是我們年輕人的想法,**謝謝謝謝謝謝**。 |
+    /// | 候选 A/B（无链） | 4.90 秒 | 這次我們年輕人年輕時經歷什麼都可以就是要在那邊想一想到我**心情心情**最深刻 |
+    /// | 候选 C（链 3 趟） | 14.59 秒 | 這次我們年輕的年輕人是平地生活園陣的這次咱們也要想一起到達**新新的水平** |
+    ///
+    /// 链在这一窗上花 2–3 倍时间，换回来的是**退化的重复尾巴**，两档带链的都是。
+    /// 注意第 39/38 窗四档输出**逐字相同**——那两窗的闸根本没触发，链是惰性的，
+    /// 所以「关掉链」只在闸触发的窗上有区别。
+    ///
+    /// ## 结论：没有哪一档两头都赢，所以**没有改产品默认值**
+    ///
+    /// 同一批参数在两条录音上各跑一遍（同一判据、同一探针，
+    /// `tools/probes/p3_temperature.sh`）：
+    ///
+    /// | 录音 · 档位 | 最大单窗 | 占用 | 段数 | 字数 | 置信均 |
+    /// |---|---|---|---|---|---|
+    /// | 9/18 旧版 | **15.93 s** | **104%** | 68 | 490 | **0.763** |
+    /// | 9/18 候选B（logprob −10） | 2.61 s | 65% | **80** | 539 | **0.627** |
+    /// | 9/18 候选C（inc 0.35） | **14.45 s** | **117%** | 67 | 474 | 0.737 |
+    /// | 9/20 旧版 | 7.20 s | 78% | 21 | 359 | **0.744** |
+    /// | 9/20 候选B | 2.37 s | 59% | **29** | **304** | **0.531** |
+    /// | 9/20 候选C | 6.48 s | 97% | 22 | 340 | 0.707 |
+    ///
+    /// 三条读法，缺一条就会得出错的结论：
+    /// - **候选B 确实压住了停顿**（15.93 → 2.61 秒，占用 104% → 65%），
+    ///   这是真的、可复现的，也是这个参数唯一确定拿得到的东西；
+    /// - **但它的代价是实测的、不是理论担心**：两条录音上段数都涨（+18% / +38%）、
+    ///   置信均都掉（−0.136 / −0.213），9/20 上字数还少了 15%、可信段从 5 掉到 0，
+    ///   同一条语音被切碎（旧版一整段 → 候选B 四段，并在 00:01:41 凭空多插一句
+    ///   「谢谢大家」）。**9/20 就是那种「贪心解码解得很烂、升温度能救回来」的录音**
+    ///   ——候选B 把它救不回来的那部分丢了；
+    /// - **候选C（把链截到 3 趟而不是关掉）两头不讨好**：闸还开着，所以照样在
+    ///   第 52 窗烧到 14.59 秒（占用反而涨到 117%），文本质量却没比旧版好多少。
+    ///
+    /// 所以这一轮的结论是「**这条参数链上没有免费的午餐**」：关掉闸 → 换到速度、
+    /// 丢掉质量；截短链 → 两头都拿不到。真正该做的是**调度层面**的处置
+    /// （诊断出「这一窗的链在以 2–3 倍代价换退化重复」时跳过或延后重试），
+    /// 那是另一个改动，不在「只动参数链路」的范围内。
+    ///
+    /// ## 于是这里只留阀门，默认值仍然是 whisper 自己的
+    ///
+    /// 下面这个常量**等于 whisper 的出厂值**：默认行为与改动前逐字一致，
+    /// 这一轮不改产品默认。想把速度换质量的话，一个环境变量就能开：
+    ///
+    /// ```sh
+    /// CLASSROOM_WHISPER_LOGPROB_THOLD=-10   # 关掉那道闸，问探针要实测代价
+    /// CLASSROOM_WHISPER_TEMPERATURE_INC=0   # 更钝的一刀：整条链连同熵闸一起关
+    /// ```
+    ///
+    /// 两个阀门的实测表、正文对照、以及「什么情况下会变差」，都在
+    /// `tools/probes/p3_temperature.sh` 里可复算——**包括它判候选B 不过关那一条**。
+    static let decodeLogprobThreshold: Float = -1.0
+
+    /// 上面那个常量是「产品默认」，不是「推荐值」。这条注释存在的理由是：
+    /// 下一个人看到 `-1.0` 会以为没人查过，然后顺手改成 `-10`「优化」——
+    /// 那会在一部分录音上悄悄换掉文本质量，而且不报任何错。
+    /// 判据在探针里（④ 置信均），实测候选B 在两条录音上都栽在它上面。
+    static let logprobThresholdCaveat = true
+
+    /// 测量用的覆盖阀门，与 `CLASSROOM_WHISPER_MODEL` 同一个道理：
+    /// 让同一条录音能以不同参数各跑一遍，而**默认值不因此改变**。
+    static var resolvedLogprobThreshold: Float {
+        if let raw = ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_LOGPROB_THOLD"],
+           let value = Float(raw) {
+            return value
+        }
+        return decodeLogprobThreshold
+    }
+
+    /// `temperature_inc` **只在显式设了环境变量时才动**：不设就保持 whisper.cpp
+    /// 的默认 0.2。这样「关掉整条链」只是一个测量档位，不是产品行为
+    static var temperatureIncrementOverride: Float? {
+        ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_TEMPERATURE_INC"].flatMap(Float.init)
+    }
+
     enum WhisperError: LocalizedError {
         case modelMissing
         case initFailed
@@ -286,6 +400,15 @@ final class WhisperEngine: @unchecked Sendable {
         // 单段最长字符数：默认 0（不限），课堂长句会被切成很长的段，
         // 限制一下让输出更接近自然句
         params.max_len = 60
+        // §3：重试链的 logprob 闸。**默认就是 whisper 的出厂值 −1.0，没有压**——
+        // 压到不可达（候选B）确实能消掉 16 秒停顿，但实测同时把置信均从 0.744
+        // 打到 0.531、可信段 5 → 0，代价大于收益，所以产品默认原样保留。改动只能
+        // 走 `CLASSROOM_WHISPER_LOGPROB_THOLD` 显式开启（见 decodeLogprobThreshold）。
+        // 熵闸（管退化重复的那道）不动，它一次都没误触过
+        params.logprob_thold = Self.resolvedLogprobThreshold
+        if let increment = Self.temperatureIncrementOverride {
+            params.temperature_inc = increment
+        }
 
         // suppress_regex 的 C 字符串同样要在 whisper_full 期间存活。
         // 默认不启用：见 suppressRegexCaveat

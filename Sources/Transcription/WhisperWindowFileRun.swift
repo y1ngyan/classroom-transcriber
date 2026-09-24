@@ -385,6 +385,10 @@ enum WhisperWindowFileRun {
         let segments = round.segments
         let finalized = round.finalized
         lines.append("  段数 \(segments.count)（定稿 \(finalized)）")
+        // §3 的消融表要按「字数」比文本质量：**关掉重试链会不会把内容也关掉**，
+        // 只有这个数能回答。它数的是最终输出的字，不含窗口重叠的重复计入
+        // （那部分见下面的逐字符置信度行，那个是带重叠的）
+        lines.append("  总字数 \(segments.reduce(0) { $0 + $1.text.count })（最终输出）")
         if segments.count != finalized {
             lines.append("  ⚠️ 有 \(segments.count - finalized) 段没收尾定稿（收尾定稿应当把最后一段也带上）")
         }
@@ -401,6 +405,16 @@ enum WhisperWindowFileRun {
             }
         }
         lines.append("  质量档位: 可信 \(good) / 存疑 \(fair) / 不可信 \(poor) / 未评（nil） \(ungraded)")
+
+        // 繁体残留。**引擎出口已经过 `ChineseText.toSimplified`**（WhisperEngine :384），
+        // 所以这里非 0 只可能是 ICU 的转换表漏了字——`--whisper-selftest` 里
+        // 「原表漏字 門/請/謝」那条用例盯的就是它。§3 的消融表拿它当文本质量的一维：
+        // 第 53 窗那趟重试链吐回来的正是繁体（「謝謝大家,謝謝!」）
+        let traditional = segments.filter { ChineseText.looksTraditional($0.text) }
+        lines.append("  繁体残留: \(traditional.count) 段（引擎出口已过 toSimplified，非 0 = ICU 表漏字）")
+        for segment in traditional.prefix(3) {
+            lines.append("      「\(segment.text)」→「\(ChineseText.toSimplified(segment.text))」")
+        }
 
         // 逐字符置信度的原始分布。**含窗口重叠导致的重复计入**（10 秒窗 / 3 秒
         // 步长 → 同一句平均被转 3 次左右），所以它只是分布参考；标定阈值要看
@@ -1068,7 +1082,7 @@ enum WhisperWindowFileRun {
         var lines: [String] = ["─── 慢窗成因探针：只把 temperature fallback 关掉，其余不动 ───"]
         let defaults = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         lines.append(String(
-            format: "  引擎实际用的解码参数：temperature %.2f + inc %.2f（失败就重解）· entropy_thold %.2f · logprob_thold %.2f · no_speech_thold %.2f",
+            format: "  whisper 出厂默认：temperature %.2f + inc %.2f（失败就重解）· entropy_thold %.2f · logprob_thold %.2f · no_speech_thold %.2f",
             defaults.temperature, defaults.temperature_inc,
             defaults.entropy_thold, defaults.logprob_thold, defaults.no_speech_thold
         ))
@@ -1076,9 +1090,11 @@ enum WhisperWindowFileRun {
             format: "  no_context %@ · n_max_text_ctx %d · max_tokens %d（0 = 不限）",
             defaults.no_context ? "true" : "false", defaults.n_max_text_ctx, defaults.max_tokens
         ))
-        if defaults.temperature_inc <= 0 {
-            lines.append("  ⚠️ temperature_inc 已经是 0——重试链本来就没开，这条实验没有对照意义")
-        }
+        // 上面那行打的是 **whisper 的出厂默认**，不是下面每个档位实际用的参数——
+        // 每个档位都把值写死在自己的 `SliceVariant` 里（见下面 variants 的注释）。
+        // 这里曾经写成「引擎实际用的解码参数」，而在产品默认被改成 −10 之后，
+        // 它一边打 −1.00、一边跑 −10，三档输出完全相同却没人看得出来。
+        lines.append("  ⚠️ 每个档位的参数写死在各自的 variant 里，不要读上面那行的默认值当本档参数")
 
         ggml_backend_load_all()
         var contextParams = whisper_context_default_params()
@@ -1102,15 +1118,26 @@ enum WhisperWindowFileRun {
                                 trace.index, Double(trace.startMillis ?? 0) / 1000,
                                 Double(endSamples - startSamples) / WhisperWindowPipeline.sampleRate,
                                 trace.elapsedSeconds))
-            let variants: [(String, Float?)] = [
-                ("默认（重试链开着）", nil),
-                ("temperature_inc = 0（重试链关掉）", 0),
+            // 每个档位都把**两个参数都写死**，一律不用 nil（=「跟随产品默认」）。
+            // 这条不是洁癖：产品默认一动，传 nil 的档位就悄悄变成了别的档位。
+            // 上一版这里「旧版」传的是 nil，默认被改成 −10 之后它实际跑的是候选B
+            // ——四个档位两个两个相同，而标签还在说「logprob −1.0」。
+            // 对照实验里「跟随默认」这种写法会让历史数字无法复现，所以钉死。
+            let variants: [SliceVariant] = [
+                .init(label: "旧版（whisper 出厂：inc 0.2 / logprob −1.0，最多 6 趟）",
+                      temperatureInc: 0.2, logprobThold: -1.0),
+                .init(label: "候选 A：inc 0 / logprob −1.0（整条链关掉）",
+                      temperatureInc: 0, logprobThold: -1.0),
+                .init(label: "候选 B：inc 0.2 / logprob −10（只关误判闸，熵闸保留）",
+                      temperatureInc: 0.2, logprobThold: -10),
+                .init(label: "候选 C：inc 0.35 / logprob −1.0（闸开着，链截到 3 趟）",
+                      temperatureInc: 0.35, logprobThold: -1.0),
             ]
-            for (label, increment) in variants {
-                let result = runSlice(context: context, samples: slice, temperatureInc: increment)
+            for variant in variants {
+                let result = runSlice(context: context, samples: slice, variant: variant)
                 lines.append(String(
                     format: "    %@：耗时 %.2f 秒 · %d 段 / %d 字 · 正文 %@",
-                    label, result.seconds, result.segments, result.chars,
+                    variant.label, result.seconds, result.segments, result.chars,
                     result.text.count <= 80 ? result.text : String(result.text.prefix(80)) + "…"
                 ))
                 // whisper 自己的计时与重试计数。它打在 stderr，驱动脚本里 2>&1
@@ -1124,8 +1151,15 @@ enum WhisperWindowFileRun {
 
     /// 一小段音频的一次完整解码。参数与 `WhisperEngine.transcribe` 对齐——
     /// 对齐是**必须的**，否则对照实验比的是「参数不同」而不是「重试链开关」。
+    /// 一个解码档位。`nil` = 不覆盖，用 whisper 自己的默认值
+    struct SliceVariant {
+        let label: String
+        let temperatureInc: Float?
+        let logprobThold: Float?
+    }
+
     private static func runSlice(
-        context: OpaquePointer, samples: [Float], temperatureInc: Float?
+        context: OpaquePointer, samples: [Float], variant: SliceVariant
     ) -> (seconds: Double, text: String, chars: Int, segments: Int) {
         var params = whisper_full_default_params(WHISPER_SAMPLING_GREEDY)
         let language = strdup("zh")
@@ -1138,7 +1172,8 @@ enum WhisperWindowFileRun {
         params.print_special = false
         params.no_timestamps = false
         params.max_len = 60
-        if let temperatureInc { params.temperature_inc = temperatureInc }
+        if let temperatureInc = variant.temperatureInc { params.temperature_inc = temperatureInc }
+        if let logprobThold = variant.logprobThold { params.logprob_thold = logprobThold }
 
         var mutable = samples
         let started = ContinuousClock.now
