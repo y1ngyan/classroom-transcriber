@@ -181,6 +181,11 @@ struct RecordingDetailView: View {
     private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
+                // 课后笔记在转录**上面**（拍板 6a）：用户进这条录音，
+                // 先要的是「这堂课讲了什么」，全文往后翻才有用。
+                // 与转录之间隔着 `Theme.Spacing.xxl`（80）——分组靠留白，
+                // 不靠容器（设计规范：不要卡片/阴影/边框）
+                StudyNotesPanelView(session: session)
                 ForEach(Array(session.parts.enumerated()), id: \.element.id) { index, part in
                     partSection(index: index, part: part)
                 }

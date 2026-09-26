@@ -221,6 +221,14 @@ enum StudyNotesService {
     /// 不联网、不花钱）。默认值就是真实那条路，所以生产代码和自检走的是同一段逻辑
     typealias ModelCall = @Sendable (_ systemPrompt: String, _ userPrompt: String) async throws -> ModelTextReply
 
+    /// 每片开跑前的回调节点：`(第几片, 共几片)`，都是 1 起的。
+    ///
+    /// **只有这里知道分片结构**，所以进度从这里往外报——界面自己按时间猜
+    /// 「大约还有多久」既不准，也没法离线自检。设计成 `async` 是因为调用方
+    /// 要把它送回主 actor 才能改界面状态；进度回调晚几十毫秒无所谓，
+    /// 而让 `generate` 去感知主 actor 才是把两个不相干的层焊在一起
+    typealias ProgressHook = @Sendable (_ sliceIndex: Int, _ sliceCount: Int) async -> Void
+
     static let defaultCall: ModelCall = { system, user in
         try await ModelText.deepSeekChatWithUsage(
             systemPrompt: system, userPrompt: user, temperature: 0.3, timeout: 180
@@ -460,6 +468,7 @@ enum StudyNotesService {
         session: RecordingSession,
         glossary: [GlossaryEntry] = [],
         call: ModelCall = StudyNotesService.defaultCall,
+        onSlice: ProgressHook? = nil,
         now: Date = Date()
     ) async throws -> StudyNotesOutcome {
         let slices = sliceByWindow(parts: session.parts)
@@ -495,7 +504,11 @@ enum StudyNotesService {
         var completionTokens = 0
         var cacheHitTokens = 0
 
-        for slice in slices {
+        for (offset, slice) in slices.enumerated() {
+            // 进度**在请求之前**报：报在之后的话，用户看到的片号是「刚跑完的那片」，
+            // 一片要跑好几秒，那几秒里界面显示的是已经过期的数字
+            await onSlice?(offset + 1, slices.count)
+
             // 请求本身失败（无 key / HTTP / 超时）**直接抛**：费用已经花了一部分，
             // 而「有一片悄悄没跑」在结果里看不出来——用户会以为笔记就是这么多。
             // 设计稿 §1.4 要的是「失败不写半截结果」，抛出去调用方就不会写

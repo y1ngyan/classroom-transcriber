@@ -897,6 +897,120 @@ struct ClassroomTranscriberApp: App {
             }
         }
 
+        // 详情页那条「课后笔记」区块的显示档位自检：--study-notes-ui-selftest
+        //
+        // **离线**：不联网、不花钱、不加载模型、不碰音频、不发声。它测的是
+        // 「输入 → 该显示哪一档」的纯映射，外加渲染/导出往返——一次模型调用
+        // 都不该发生。界面本身点不了（无头进程没有窗口），所以那条路只能
+        // 靠把判断抽成纯函数来覆盖，见 `StudyNotesPanelState`
+        if CommandLine.arguments.contains("--study-notes-ui-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            // 走 `Task { @MainActor in }`：store 那组自检要真的起 Task、真的等
+            // 落盘，是 async 的；而 `@MainActor` 那部分只能在主 actor 上跑
+            Task { @MainActor in
+                var lines = ["课后笔记界面自检（离线 · 不联网、不花钱、不发音）"]
+                var passed = 0
+                var failed = 0
+
+                let panel = StudyNotesPanelState.selfTest()
+                lines += panel.lines
+                passed += panel.passed
+                failed += panel.failed
+
+                let markdown = StudyNotesMarkdown.selfTest()
+                lines += markdown.lines
+                passed += markdown.passed
+                failed += markdown.failed
+
+                let store = await StudyNotesStore.selfTest()
+                lines += store.lines
+                passed += store.passed
+                failed += store.failed
+
+                for line in lines { print(line) }
+                print(failed == 0
+                      ? "✅ 课后笔记界面自检通过（\(passed) 条）"
+                      : "❌ 课后笔记界面自检未通过（过 \(passed) / 红 \(failed)）")
+                exitReleasingGgml(failed == 0 ? 0 : 1)
+            }
+        }
+
+        // 真实端到端：--study-notes-real <会话 json> [--export <目录或 .md 路径>]
+        //
+        // 和 `--study-notes` 的区别只有一个：**它落进真实的笔记目录**
+        // （`StudyNotesStorage.defaultDirectory`），因为验收要的就是「用户点一下
+        // 生成之后，磁盘上到底有没有东西、在哪」。所以它多一条硬规则：
+        // **该会话已经有笔记文件时拒绝覆盖**，直接退出——自动重跑把用户已有的
+        // 产出盖掉是这一包最不能出的错，而这条规则让「不覆盖」这件事可复现地
+        // 验一遍（跑第二遍就会看到它拒绝）
+        //
+        // 会话文件仍然**只读**：`Data(contentsOf:)` 解一份出来，一个字不回写
+        if let idx = CommandLine.arguments.firstIndex(of: "--study-notes-real"),
+           idx + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[idx + 1]
+            var exportPath: String?
+            if let ei = CommandLine.arguments.firstIndex(of: "--export"), ei + 1 < CommandLine.arguments.count {
+                exportPath = CommandLine.arguments[ei + 1]
+            }
+            Task { @MainActor in
+                do {
+                    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                    let session = try JSONDecoder().decode(RecordingSession.self, from: data)
+                    let directory = StudyNotesStorage.defaultDirectory
+                    let target = StudyNotesStorage.fileURL(sessionID: session.id, in: directory)
+
+                    // ① 已经有笔记就不覆盖。放在生成**之前**：生成要花钱
+                    if FileManager.default.fileExists(atPath: target.path) {
+                        print("⏭ 这条会话已经有笔记，拒绝覆盖：\(target.path)")
+                        print("   （要重跑就先自己把它移走——这条入口不做删除）")
+                        exitReleasingGgml()
+                    }
+
+                    let glossary = GlossaryStore().entries
+                    print("会话 \(session.id.uuidString.prefix(8)) · \(session.segmentCount) 段"
+                        + " · \(session.durationMillis / 60_000) 分钟 · 术语表 \(glossary.count) 条")
+                    print("笔记目录：\(directory.path)")
+                    print("──────────── 生成中 ────────────")
+
+                    let outcome = try await StudyNotesService.generate(
+                        session: session, glossary: glossary
+                    )
+                    for line in outcome.report() { print(line) }
+
+                    // ② 再查一次再写：上面那次检查到现在隔着几分钟的生成时间，
+                    //    期间另一个进程完全可能写了一份进来（App 里自动跑那一次）。
+                    //    两次检查之间是真实的竞态窗口，不是防御性冗余
+                    guard !FileManager.default.fileExists(atPath: target.path) else {
+                        print("⏭ 生成期间这条会话被写入了笔记，仍然不覆盖：\(target.path)")
+                        exitReleasingGgml()
+                    }
+                    try StudyNotesStorage.save(outcome.notes, in: directory)
+
+                    let attributes = try? FileManager.default.attributesOfItem(atPath: target.path)
+                    let size = (attributes?[.size] as? Int) ?? 0
+                    print("")
+                    print("已落盘：\(target.path)")
+                    print("         \(size) 字节 · \(outcome.notes.items.count) 条要点")
+
+                    // ③ 从刚落的这份笔记导出 Markdown。走的是 **NotesExporter**
+                    //    那条路径（`--export-notes-selftest` 覆盖过的同一条），
+                    //    不是在这里另写一份写文件的代码
+                    if let exportPath {
+                        let url = try NotesExporter.resolveTarget(path: exportPath)
+                        try NotesExporter.write(StudyNotesMarkdown.render(outcome.notes), to: url)
+                        let exportAttrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+                        print("已导出 Markdown：\(url.path)")
+                        print("         \((exportAttrs?[.size] as? Int) ?? 0) 字节")
+                    }
+                    exitReleasingGgml()
+                } catch {
+                    print("❌ \(error.localizedDescription)")
+                    exitReleasingGgml(1)
+                }
+            }
+        }
+
         // 无头事实核查：--factcheck "待核查的陈述"
         if let idx = CommandLine.arguments.firstIndex(of: "--factcheck"),
            idx + 1 < CommandLine.arguments.count {

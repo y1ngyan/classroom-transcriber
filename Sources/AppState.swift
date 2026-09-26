@@ -9,6 +9,9 @@ final class AppState {
     let transcription = TranscriptionEngine()
     let factCheck = FactCheckStore()
     let notes = NotesStore()
+    /// 课后学习笔记（6a）。和 `notes` 是两回事：那个是转录页那份
+    /// 「核心知识点大纲」，活在内存里；这个是按会话落盘的课后产出
+    let studyNotes = StudyNotesStore()
     let attachments = AttachmentStore()
     let glossary = GlossaryStore()
     /// 用户自建的课程词库（联网生成后存下来的那些）。和 `glossary` 分开：
@@ -36,7 +39,20 @@ final class AppState {
         // 录音收尾完成后自动落盘。引擎用 SessionDraft 交接、拿会话 id
         // 回去——「接着录」的下一次 stop 才知道该追加到哪条会话
         transcription.onSessionComplete = { [weak self] draft in
-            self?.recordings.ingest(draft).id
+            guard let self else { return UUID() }
+            let session = self.recordings.ingest(draft)
+
+            // 录完自动跑一次课后笔记（拍板 2c）。**只在这条会话还没有笔记时**
+            // 才跑——判断在 `autoGenerateIfNeeded` 里，它同时把「已存在」
+            // 「没配密钥」「已经在跑」三种情况挡掉了。
+            //
+            // 放在收尾路径上是因为这里正好是「这堂课结束了」这个事实唯一的
+            // 落点。它内部起的是 Task，**不阻塞落盘**；失败也只记进 store，
+            // 不弹窗、不打断——用户此刻多半已经合上电脑走了
+            self.studyNotes.autoGenerateIfNeeded(
+                session: session, glossary: self.glossary.entries
+            )
+            return session.id
         }
 
         // Whisper 引擎在启动时就预热。

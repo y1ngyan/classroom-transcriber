@@ -90,9 +90,10 @@ enum NotesExporter {
     ///   · 以 `.md` 结尾 → 就当文件路径，父目录不存在就建出来
     ///   · 其他 → 当目录，建出来，用 `defaultFileName` 拼一个文件名
     ///
-    /// 空串**必须显式挡掉**：`URL(fileURLWithPath: "")` 会解析成**当前工作目录**，
-    /// 于是 `--export-notes ""` 会安安静静往 cwd 里写一个文件——核验者 2026-09-27
-    /// 就是这么在仓库目录里落下一个 stray 文件的。人不该靠运气躲开这个
+    /// 空串**必须显式挡掉**：`URL(fileURLWithPath: "")` 会解析成**当前工作目录**
+    /// （`URL(fileURLWithPath: "").path` 就是 cwd 本身，不是错误），于是
+    /// `--export-notes ""` 会安安静静往 cwd 里写一个文件。人不该靠运气躲开这个。
+    /// 这道 guard 有断言钉着，见 `selfTest` 里的「空路径：必须报错」
     static func resolveTarget(path: String, now: Date = Date()) throws -> URL {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw NotesExportError.emptyPath }
@@ -213,9 +214,10 @@ extension NotesExporter {
 
         // ④ 路径解释：给目录 → 目录 + 默认文件名；给 .md → 就当文件
         //
-        // 断言里**写字面串，不写 `defaultFileName(for:)`**：调被测代码自己用的那个
-        // 函数来断言它自己的输出是循环的——把 `dateFormat` 改成 `yyyy/MM/dd`
-        // 那种断言照样绿。核验者 2026-09-27 指出了这一点
+        // 断言里**写字面串，不写 `defaultFileName(for:)`**：拿被测代码自己调的那个
+        // 函数去断言它自己的输出是循环的——把 `dateFormat` 改成 `yyyy/MM/dd`，
+        // 断言两边一起变，照样绿。这里钉的是「2028-11-22」这个字面串，
+        // 改格式必然红
         let stamp = Date(timeIntervalSince1970: 1_858_464_000)
         let expectedName = "课堂笔记-2028-11-22.md"
         check(defaultFileName(for: stamp) == expectedName,
