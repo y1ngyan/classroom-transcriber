@@ -1,7 +1,31 @@
 import Foundation
 
+/// 一次模型调用的返回值：正文 + 用量。
+///
+/// 为什么要单独一个类型：`usage` 一直在响应里，但原来的 `deepSeekChat` 把它
+/// 丢掉了。学习笔记的验收判据里有一条「一堂课 ≤ 0.1 元」（设计稿 §5.3），
+/// 那要求 token 数可追溯——不返回它，费用就只能靠估字符数猜，而估出来的
+/// 数字没法复核。**这里只加类型、不改既有函数的行为**，见 `deepSeekChat`
+struct ModelTextReply {
+    var content: String
+    /// 有的响应没有 `usage`（上游改动、代理剥掉），所以是可选的——
+    /// 缺了只影响报告里那几行数字，不该让整次调用失败
+    var usage: ModelTextUsage?
+}
+
+/// DeepSeek 的 `usage` 字段。缓存命中单独记：DeepSeek 对命中部分按另一个
+/// 单价计费（见 `StudyNotesCost`），只记 total 会把费用算高
+struct ModelTextUsage {
+    var promptTokens: Int
+    var completionTokens: Int
+    var cacheHitTokens: Int
+}
+
 /// 各家模型服务共用的返回文本清洗。
 enum ModelText {
+
+    /// 全项目唯一的模型标识。写进笔记存档里，回答「这份是谁写的」
+    static let defaultModel = "deepseek-chat"
 
     /// 模型偶尔会把整段内容包在 ```markdown / ``` 里，去掉外层围栏。
     ///
@@ -31,6 +55,23 @@ enum ModelText {
         temperature: Double,
         timeout: TimeInterval = 120
     ) async throws -> String {
+        try await deepSeekChatWithUsage(
+            systemPrompt: systemPrompt, userPrompt: userPrompt,
+            temperature: temperature, timeout: timeout
+        ).content
+    }
+
+    /// 同 `deepSeekChat`，但把 `usage` 一起带回来。
+    ///
+    /// 拆成两个函数而不是给原来那个加一个 out 参数：既有的四个调用方
+    /// （术语校正 / 补标点 / 笔记 / 事实核查）都不关心用量，让它们全部改签名
+    /// 只为了一个用不上的字段，是把改动面积铺到没必要的地方
+    static func deepSeekChatWithUsage(
+        systemPrompt: String,
+        userPrompt: String,
+        temperature: Double,
+        timeout: TimeInterval = 120
+    ) async throws -> ModelTextReply {
         guard let key = AppConfig.deepSeekAPIKey else { throw ModelTextError.missingKey }
 
         var request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
@@ -39,7 +80,7 @@ enum ModelText {
         request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         request.timeoutInterval = timeout
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": "deepseek-chat",
+            "model": defaultModel,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": userPrompt],
@@ -65,7 +106,20 @@ enum ModelText {
             throw ModelTextError.empty
         }
 
-        return stripCodeFence(content)
+        return ModelTextReply(content: stripCodeFence(content), usage: usage(from: root))
+    }
+
+    /// 从响应根对象里取 `usage`。取不到就返回 nil——用量是报告用的，
+    /// 缺了不该让一次成功的调用变成失败（见 `ModelTextReply.usage`）
+    private static func usage(from root: [String: Any]) -> ModelTextUsage? {
+        guard let usage = root["usage"] as? [String: Any],
+              let prompt = usage["prompt_tokens"] as? Int,
+              let completion = usage["completion_tokens"] as? Int
+        else { return nil }
+        // 字段名在实测响应里是 prompt_cache_hit_tokens；老响应/别的部署没有它，
+        // 缺了就记 0（记 0 的含义是「没有缓存命中」= 全部按未命中计价，偏保守）
+        let hit = (usage["prompt_cache_hit_tokens"] as? Int) ?? 0
+        return ModelTextUsage(promptTokens: prompt, completionTokens: completion, cacheHitTokens: hit)
     }
 }
 

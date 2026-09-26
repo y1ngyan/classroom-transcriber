@@ -7,20 +7,23 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **四个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **五个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
 #   · `--speaker-mapping-selftest`：C 包的映射规则总结行——同一种情形（见那里的注释）
 #   · `--export-notes-selftest`：笔记导出总结行——同一种情形，而且那边**验过会红**
 #     （把「无内容静默返回」或「写失败被 try? 吞掉」注回去，这条自检立刻红）
+#   · `--study-notes-selftest`：学习笔记总结行——同一种情形（离线打桩，
+#     不联网、不花钱）。**数一数它报了几条**：这个入口最容易出的问题是
+#     「用例一条都没跑，进程也是 0 退出」
 #
 # 用法：
 #   ./tools/probes/exit_codes.sh            # 不碰麦克风的入口（默认）
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且四个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且五个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -96,7 +99,7 @@ run() { # run <名字> <参数…>
 # 两个断言都用 `grep -F`（固定串）而不是正则：要断言的串里有 `:` `（` 这些字符，
 # 正则下要转义，而这条脚本要在 macOS 的 bash 3.2 上跑
 #
-# 为什么只在这四处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
+# 为什么只在这五处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
 # 这几个都验过——把 fix ① 拿掉重编，prewarm 那条立刻报「计数不是 1 ⇐ 次数: 2」；
 # 把 `construct` 里的锁拿掉重编，selftest 那条立刻报 ❌。而
 # `--whisper-window-file --head 20` **验不过**：它照样打 1（那条入口把主线程堵在
@@ -151,6 +154,11 @@ run_assert "--speaker-mapping-selftest" "✅ 说话人映射自检通过" --spea
 # 导出笔记这条路径一直没有判据（面板挡住了无头入口），2026-09-24 用户报
 # 「点导出生成不了文件」时只能靠读代码猜。这条自检钉的是「写没写成、失败说没说」
 run_assert "--export-notes-selftest" "✅ 笔记导出自检通过" --export-notes-selftest
+# 学习笔记（6a-1）：离线打桩，不联网、不花钱。它内部 44 条断言全在**输出**上，
+# 退出码只反映最后那个 failed 计数——所以和上面两条同理，必须钉总结行。
+# 注：断言串里带「（44 条）」这个数字，是**故意的**——用例数掉到 0 也照样 exit=0，
+# 钉住条数才拦得住「判据一条没跑」。数字变了就要跟着改，改的时候先确认是加了用例
+run_assert "--study-notes-selftest" "✅ 学习笔记自检通过（44 条）" --study-notes-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -195,6 +203,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含四个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含五个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

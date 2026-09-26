@@ -840,6 +840,63 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 学习笔记自检：--study-notes-selftest
+        // （离线：模型调用打桩，不联网、不花钱、不加载模型、不碰音频、不发声）
+        //
+        // 退出码跟着红绿走——`--whisper-selftest` 那边踩过的坑是自检失败不改
+        // 退出码，于是只看退出码的探针分不出它是红是绿
+        //
+        // 走 `Task { @MainActor in }` 而不是信号量阻塞主线程：那是阶段 2 的坑
+        // （主线程占着不放，MainActor 的任务永远排不上）。跑完自己 exit
+        if CommandLine.arguments.contains("--study-notes-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            Task { @MainActor in
+                let result = await StudyNotesService.selfTest()
+                for line in result.lines { print(line) }
+                exitReleasingGgml(result.failed == 0 ? 0 : 1)
+            }
+        }
+
+        // 真实会话跑一遍：--study-notes <会话 json 路径>
+        //
+        // 会话文件**只读**（`Data(contentsOf:)` 解一份出来，不回写）。
+        // 产出写到临时目录而不是真实的 study-notes/：这条入口是拿来验链路的，
+        // 不该在用户的笔记目录里留下半成品。要落进真实目录走 UI（6a-2）
+        if let idx = CommandLine.arguments.firstIndex(of: "--study-notes"),
+           idx + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[idx + 1]
+            Task { @MainActor in
+                do {
+                    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                    let session = try JSONDecoder().decode(RecordingSession.self, from: data)
+                    // 术语表照生产那条路注入：不注入的话，模型写出来的英文术语
+                    // 会保持转录里那种错拼，然后被「术语原文里没有」全部拒掉——
+                    // 那是判据在罚一个我们本可以避免的问题
+                    let glossary = GlossaryStore().entries
+                    print("会话 \(session.id.uuidString.prefix(8)) · \(session.segmentCount) 段"
+                        + " · \(session.durationMillis / 60_000) 分钟 · 术语表 \(glossary.count) 条")
+                    print("──────────── 生成中 ────────────")
+
+                    let outcome = try await StudyNotesService.generate(
+                        session: session, glossary: glossary
+                    )
+                    for line in outcome.report() { print(line) }
+
+                    let directory = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("ct-study-notes-probe", isDirectory: true)
+                    try StudyNotesStorage.save(outcome.notes, in: directory)
+                    print("")
+                    print("已写入（临时目录，不碰真实笔记目录）："
+                        + StudyNotesStorage.fileURL(sessionID: session.id, in: directory).path)
+                    exitReleasingGgml()
+                } catch {
+                    print("❌ \(error.localizedDescription)")
+                    exitReleasingGgml(1)
+                }
+            }
+        }
+
         // 无头事实核查：--factcheck "待核查的陈述"
         if let idx = CommandLine.arguments.firstIndex(of: "--factcheck"),
            idx + 1 < CommandLine.arguments.count {
