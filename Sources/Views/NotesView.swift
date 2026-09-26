@@ -96,14 +96,26 @@ struct NotesView: View {
     // MARK: - 悬浮胶囊按钮
 
     private var exportButton: some View {
-        // 规格要求不使用阴影。原来靠阴影从内容上「浮」起来，现在靠
-        // 实心填充 + 下方留白拉开层次
-        PillButton(
-            title: "导出 Markdown",
-            systemImage: "square.and.arrow.up",
-            isEnabled: store.hasNotes
-        ) {
-            store.export()
+        VStack(alignment: .center, spacing: Theme.Spacing.sm) {
+            // 结果就近显示：用户点完导出，眼睛在按钮上，不在页面顶部
+            if let message = store.exportMessage {
+                StatusMark(kind: store.exportFailed ? .error : .ok, text: message)
+            }
+            // 禁用了就必须说清为什么（见 NotesStore.exportDisabledReason 的注释：
+            // 不说话的禁用态，用户读到的就是「按钮坏了」）
+            if let reason = store.exportDisabledReason {
+                StatusMark(kind: .neutral, text: reason)
+            }
+            // 规格要求不使用阴影。原来靠阴影从内容上「浮」起来，现在靠
+            // 实心填充 + 下方留白拉开层次
+            PillButton(
+                title: "导出 Markdown",
+                systemImage: "square.and.arrow.up",
+                isEnabled: store.hasNotes
+            ) {
+                store.export()
+            }
         }
+        .padding(.horizontal, Theme.pagePadding)
     }
 }

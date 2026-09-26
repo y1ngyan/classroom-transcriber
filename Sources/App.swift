@@ -801,6 +801,45 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 无头导出笔记：--export-notes <目录或文件路径>
+        // 不弹面板、不联网、不发声，就是把一段 Markdown 写出去——
+        // 用它把「导出」这条没有 GUI 面板就走得通的路径跑穿
+        if let idx = CommandLine.arguments.firstIndex(of: "--export-notes"),
+           idx + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[idx + 1]
+            do {
+                let target = try NotesExporter.resolveTarget(path: path)
+                // 固定夹具，不是模型产出：这一入口要能离线跑，就不能依赖网络。
+                // 它验的是**写文件那一段**，不是笔记质量
+                try NotesExporter.write(NotesExporter.sampleMarkdown, to: target)
+                print("✅ 已导出 \(target.path)")
+                exitReleasingGgml()
+            } catch {
+                // 不再加「导出失败：」前缀——NotesExportError 的 errorDescription
+                // 自己就带着它，加一次会打成「导出失败：导出失败：…」
+                print("❌ \(error.localizedDescription)")
+                exitReleasingGgml(1)
+            }
+        }
+
+        // 导出笔记自检：--export-notes-selftest
+        // （纯本地：临时目录里写文件，不弹面板、不联网、不加载模型、不发声）
+        //
+        // 退出码跟着红绿走——`--whisper-selftest` 那边踩过的坑是自检失败不改
+        // 退出码，于是只看退出码的探针分不出它是红是绿
+        if CommandLine.arguments.contains("--export-notes-selftest") {
+            print("笔记导出自检（纯本地 · 不弹面板、不联网、不加载模型、不发声）")
+            let result = NotesExporter.selfTest()
+            for line in result.lines { print(line) }
+            if result.failed == 0 {
+                print("✅ 笔记导出自检通过（\(result.passed) 条）")
+            } else {
+                print("❌ 笔记导出自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 无头事实核查：--factcheck "待核查的陈述"
         if let idx = CommandLine.arguments.firstIndex(of: "--factcheck"),
            idx + 1 < CommandLine.arguments.count {
