@@ -169,6 +169,79 @@ enum DiagnosticLogSelfTest {
                   "已知取舍：64 位十六进制摘要也会被安全网吃掉（别把现场建在摘要上）")
         }
 
+        // ══════════ 三之二、可用性：路径 / 文件名 / 数字要逐字符活下来 ══════════
+        //
+        // P6-3 的由来（真实日志，不是构造的）：
+        //
+        //     [INFO ] app | 启动 后端=whisper 增益=x3 日志目录="「已脱敏」 「已脱敏」"
+        //
+        // 路径里的空格（`Application Support`）把它切成两段，各自够 32 字符，
+        // 双双命中安全网。而录音落盘和脏数据告警的消息里都带文件名——
+        // 「查到日志却看不出是哪条录音」，可诊断性直接打折。
+        //
+        // **判据一律落在盘上**（和上面那组同理）：不是「内存里的串没被换」，
+        // 而是「读回来的文件里能 grep 到原文」
+
+        do {
+            let dir = freshDirectory("availability")
+            let sink = DiagnosticLogSink(directory: dir, minimumLevel: .debug, mirrorToOSLog: false)
+
+            // ① 绝对路径：真实库里的一条（含空格分隔的 `Application Support`）
+            let absolutePath = FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("ClassroomTranscriber/recordings/课堂-20260921-100923.wav").path
+            // ② 纯文件名
+            let fileName = "课堂-20260921-100923.wav"
+            // ③ 数字：字节数 / 秒 / 毫秒时间戳。**这三个本来就不够 32 字符**，
+            //    钉在这里是为了「将来有人把安全网改严」时它们会先红
+            let numbers = ["37699244", "1999.1", "1727000000000"]
+
+            sink.log(.info, .app, "日志目录=\(absolutePath)")
+            sink.log(.info, .recording, "录音落盘 文件=\(fileName) 字节=\(numbers[0])")
+            sink.log(.info, .transcription, "转录结束 用时=\(numbers[1])s 时间戳=\(numbers[2])")
+            let text = diskText(dir)
+
+            check(text.contains(absolutePath),
+                  "可用性：绝对路径**逐字符**活下来（含空格那一段没被切碎）", absolutePath)
+            check(text.contains(fileName),
+                  "可用性：纯文件名活下来", fileName)
+            check(numbers.allSatisfy { text.contains($0) },
+                  "可用性：长数字活下来（字节数 / 秒 / 毫秒时间戳）", numbers.joined(separator: " "))
+            // 这三行里**一个标记都不该出现**。只断言「路径还在」还不够：
+            // 万一有别的规则顺手抹了其中一段，只查路径会漏掉
+            check(!text.contains(DiagnosticLog.redactedMarker),
+                  "可用性：这三行里一个「已脱敏」都不该出现（不是「换了别的」）",
+                  "\(text.components(separatedBy: DiagnosticLog.redactedMarker).count - 1) 个标记")
+        }
+
+        // ── `looksLikePath` 的真值表：判据本身要能分辨，不能一律 true/false ──
+
+        let pathCases: [(String, Bool, String)] = [
+            ("/Users/you/Library/Application", true, "路径的一半（无扩展名、无数字）"),
+            ("Support/ClassroomTranscriber/recordings/", true, "路径的另一半（以 / 结尾）"),
+            ("/Users/you/Library/Application Support/ClassroomTranscriber/models/ggml-medium-q5_0", true,
+             "带数字的路径段（光靠「有没有数字」判会在这里判错）"),
+            ("Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0Lm", false, "无前缀长令牌——必须照抹"),
+            ("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/BBBBBBBBBB", false,
+             "含 / 但第一段就超过 24 字符的不透明串——必须照抹"),
+        ]
+        for (token, expected, why) in pathCases {
+            check(DiagnosticLog.looksLikePath(token) == expected,
+                  "looksLikePath：\(why)", "\(DiagnosticLog.looksLikePath(token))（期望 \(expected)）")
+        }
+
+        // ── 已知代价，明确钉住 ──
+        //
+        // 收窄之后**仍然**有一个洞：≥32 字符、含 `/`、且每段都 ≤24 的不透明令牌
+        // 会被放行。这个洞比不收窄时那个（**每一个带绝对路径的文件名都被吃掉**）
+        // 小得多，但它是真的，所以写一条判据在这里——免得将来有人以为
+        // 「含 `/` 就一定安全」，把现场建在这样的串上
+        let holeShaped = "aaaaaaaaaaaa/bbbbbbbbbbbb/cccccccccccc"
+        check(DiagnosticLog.looksLikePath(holeShaped)
+              && !DiagnosticLog.redact("值 \(holeShaped)").contains(DiagnosticLog.redactedMarker),
+              "已知代价：段短且含 / 的不透明令牌会被放行（洞比误伤小，但它是真的）",
+              holeShaped)
+
         do {
             // 用户正文：正则认不出「正文」，靠的是键名。这里把键名清单里
             // 每一个都塞一遍——只挑几个的话，将来往清单里加一个键、

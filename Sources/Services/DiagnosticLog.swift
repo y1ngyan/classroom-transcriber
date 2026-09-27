@@ -339,13 +339,15 @@ enum DiagnosticLog {
 
     // MARK: - 脱敏（纯函数）
 
-    /// 规则表。**顺序有意义**：具名前缀（`sk-`/`tvly-`/`AKID`）先吃掉整段，
-    /// 后面那条「32 字符以上的长令牌」才不至于把它切碎
+    /// 规则表（**具名的 7 条**，第 ⑤ 条安全网见 `longTokenRegex`）。
     ///
-    /// 最后那条通用的长令牌规则是**安全网**，代价是它不区分「密钥」和
-    /// 「摘要」——64 位十六进制摘要也会被一起吃掉。这个取舍是有意的：
-    /// 漏掉一个真密钥的代价远大于丢掉一个摘要，而摘要的诊断价值本来就
-    /// 只在对比，对比可以改用别的方式（比如把长度/前后各 4 字符写进去）
+    /// **顺序有意义**：具名前缀（`sk-`/`tvly-`/`AKID`）先吃掉整段，
+    /// 后面那条「32 字符以上的长令牌」才不至于把它切碎。
+    /// 所以 `redact` 里安全网排在最后跑。
+    ///
+    /// **这 7 条一条都不许放宽**（P6-3 明确要求）：它们是「密钥」的**具名形状**，
+    /// 误伤的代价再大也不能拿它们去换——可用性那一侧收窄的是**安全网**
+    /// （它本来就是「不确定，先抹了」的那一条，代价与收益要重新算）
     private static let redactionRules: [(NSRegularExpression, String)] = {
         let specs: [(String, String)] = [
             // ① 具名前缀的密钥。**分成两条不是啰嗦**：`sk-`/`tvly-` 那一族
@@ -363,27 +365,85 @@ enum DiagnosticLog {
             // ④ URL 查询串里的凭证（腾讯云预签名 URL 的 q-ak 就是 SecretId）
             (#"(?i)([?&](?:key|token|secret|signature|sig|q-ak|q-signature|q-key-time|q-sign-time|access_token|api_key)=)([^&\s"'<>]+)"#,
              "$1" + redactedMarker),
-            // ⑤ 安全网：32 字符以上的长令牌。
-            //
-            //    **要放过 UUID**：`sessionId=<uuid>` 是这份日志里最常用也
-            //    最有用的一列，36 个十六进制加连字符整好落进这一条。
-            //
-            //    只写 `(?!uuid)` 不够——那个负向断言只在匹配**起点**成立。
-            //    UUID 有 36 个字符，从第 2 个字符起再数 35 个，仍是一段
-            //    32 字符以上的合法匹配，于是「放过 UUID」会在第二个字符
-            //    位置失效、把后 35 位吃掉。所以再加一条负向后顾：
-            //    **前面一个字符是十六进制或连字符的，一律不是新令牌的起点**。
-            //    UUID 的每一个后续位置前面都是十六进制字符，整条就被挡掉了
-            //
-            //    代价：紧跟在十六进制字符后面的真令牌会漏（`abc123<32位密钥>`
-            //    这种连写）。实际写法（`token=`、空格、中文冒号之后）不受影响
-            (#"(?<![0-9a-fA-F-])(?![0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})[A-Za-z0-9+/_\-]{32,}={0,2}\b"#,
-             redactedMarker),
         ]
         return specs.compactMap { pattern, replacement in
             (try? NSRegularExpression(pattern: pattern)).map { ($0, replacement) }
         }
     }()
+
+    /// 第 ⑤ 条：32 字符以上的长令牌安全网。
+    ///
+    /// **它不跟上面那 7 条一起放进表里**，因为它是唯一一条需要**逐命中**
+    /// 判断的规则：同一个正则命中的串，有的要抹有的要留（路径要留），
+    /// 而 `stringByReplacingMatches` + 模板表达不了「这条留、那条抹」。
+    /// 放进表里就得靠一条巨型负向先行断言去表达路径形状，那种正则没人敢改
+    ///
+    /// **要放过 UUID**：`sessionId=<uuid>` 是这份日志里最常用也最有用的一列，
+    /// 36 个十六进制加连字符整好落进这一条。
+    ///
+    /// 只写 `(?!uuid)` 不够——那个负向断言只在匹配**起点**成立。
+    /// UUID 有 36 个字符，从第 2 个字符起再数 35 个，仍是一段 32 字符以上的
+    /// 合法匹配，于是「放过 UUID」会在第二个字符位置失效、把后 35 位吃掉。
+    /// 所以再加一条负向后顾：**前面一个字符是十六进制或连字符的，一律不是
+    /// 新令牌的起点**。UUID 的每一个后续位置前面都是十六进制字符，整条就被挡掉了
+    ///
+    /// 代价：紧跟在十六进制字符后面的真令牌会漏（`abc123<32位密钥>` 这种连写）。
+    /// 实际写法（`token=`、空格、中文冒号之后）不受影响
+    private static let longTokenRegex = try? NSRegularExpression(
+        pattern: #"(?<![0-9a-fA-F-])(?![0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})[A-Za-z0-9+/_\-]{32,}={0,2}\b"#
+    )
+
+    /// 路径组件长度的上限。**为什么是 24**：本 App 会写进日志的最长路径组件是
+    /// `ClassroomTranscriber`（20 字符），24 留了余量；而一个真正的不透明令牌
+    /// 即使偶然含 `/`，段也会长得多
+    static let maxPathComponent = 24
+
+    /// 「这一个长令牌是路径，不是密钥吗」。
+    ///
+    /// **判据：含 `/`，而且被 `/` 切出来的每一段都不超过 `maxPathComponent`。**
+    /// 路径的形状是「一串短组件」，密钥不是。
+    ///
+    /// 为什么必须收窄（P6-3 的由来，实测）：真实日志里这一行——
+    ///
+    ///     [INFO ] app | 启动 后端=whisper 增益=x3 日志目录="「已脱敏」 「已脱敏」"
+    ///
+    /// 路径里的空格（`Application Support`）把它切成两段，各自够 32 字符
+    /// （`/Users/you/Library/Application` 32、`Support/ClassroomTranscriber/recordings/`
+    /// 40），两段都命中了安全网。而**录音落盘和脏数据告警的消息里都带文件名**，
+    /// 那些行会一起变成「已脱敏」——「查到日志却看不出是哪条录音」，
+    /// 可诊断性直接打折，而这份日志存在的全部理由就是「出事能查」。
+    ///
+    /// **已知代价**：一个 ≥32 字符、含 `/`、且每段都 ≤24 的不透明令牌会被放行。
+    /// 这个洞比不收窄时那个（**每一个带绝对路径的文件名都被吃掉**）小得多。
+    /// 自检里用真值表把它钉住，免得将来有人以为「含 `/` 就一定安全」
+    static func looksLikePath(_ token: String) -> Bool {
+        guard token.contains("/") else { return false }
+        // 保留空段：`/Users/…` 头尾的空段长度为 0，天然 ≤ 上限
+        return token.split(separator: "/", omittingEmptySubsequences: false)
+            .allSatisfy { $0.count <= maxPathComponent }
+    }
+
+    /// 走一遍安全网：命中的长令牌**逐个**判是不是路径，不是才抹。
+    ///
+    /// 找不到任何命中时原样返回——绝大多数行都走这条路
+    private static func redactLongTokens(_ text: String) -> String {
+        guard let regex = longTokenRegex else { return text }
+        let range = NSRange(text.startIndex..., in: text)
+        let matches = regex.matches(in: text, options: [], range: range)
+        guard !matches.isEmpty else { return text }
+
+        var out = ""
+        var cursor = text.startIndex
+        for match in matches {
+            guard let r = Range(match.range, in: text) else { continue }
+            out += text[cursor..<r.lowerBound]
+            let token = String(text[r])
+            out += looksLikePath(token) ? token : redactedMarker
+            cursor = r.upperBound
+        }
+        out += text[cursor...]
+        return out
+    }
 
     /// 把够像密钥的串换掉。**纯函数**（无 IO、不看时钟），所以自检能直接喂
     /// 构造好的串。
@@ -401,16 +461,24 @@ enum DiagnosticLog {
                 in: out, options: [], range: NSRange(out.startIndex..., in: out),
                 withTemplate: replacement)
         }
-        return out
+        // 安全网**最后**跑（见 `redactionRules` 上面那段），而且逐命中判断
+        return redactLongTokens(out)
     }
 
     /// 某段文本里还残留着密钥形状吗。给自检用——**判据要能在文件上断言，
     /// 而不是在内存里**，所以自检真正说的是「读回来的文件里 grep 不到」
     static func containsSecretShape(_ text: String) -> Bool {
-        for (regex, _) in redactionRules {
-            let r = NSRange(text.startIndex..., in: text)
-            if regex.firstMatch(in: text, options: [], range: r) != nil { return true }
+        let r = NSRange(text.startIndex..., in: text)
+        for (regex, _) in redactionRules where regex.firstMatch(in: text, options: [], range: r) != nil {
+            return true
         }
-        return false
+        // 安全网必须按**和 `redact` 逐字相同的那条判据**算。不共用的话，
+        // 两边会对同一段文本各说各话：「自检说这里还有密钥」而「redact 放行了它」
+        // ——判据与实现漂开正是这个项目最怕的那种失败
+        guard let regex = longTokenRegex else { return false }
+        return regex.matches(in: text, options: [], range: r).contains { match in
+            guard let range = Range(match.range, in: text) else { return false }
+            return !looksLikePath(String(text[range]))
+        }
     }
 }
