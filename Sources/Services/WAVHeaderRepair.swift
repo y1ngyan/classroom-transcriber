@@ -41,15 +41,51 @@ enum WAVHeaderRepair {
     enum Defect: Equatable {
         /// 头合法，但长度字段比真实文件短。`declared` 是**原值**
         case staleSizes(declaredDataBytes: Int, actualDataBytes: Int)
-        /// 前 44 字节全零（旧版零占位）
+        /// 前 44 字节全零（旧版零占位），**而且后面真的有 PCM**
         case zeroHeader(actualDataBytes: Int)
+        /// 前 44 字节全零，**而且一个字节的 PCM 都没有**（文件总共 44 字节）。
+        ///
+        /// 单独一档的理由：给它补一个合法的 0 秒头**不是恢复任何东西**——
+        /// 它本来就没有内容可恢复。混在 `.zeroHeader` 里会让「可修 N 个」
+        /// 这个数字对用户**过度承诺**；反过来把它藏掉也不行，用户有权看见
+        /// 「这里有一条空录音」再自己决定删不删。所以：**可见，但不算可修**
+        case emptyRecording(actualDataBytes: Int)
         /// 拒绝修复
         case foreign(reason: String)
 
+        /// **三个生产调用点决定「给不给用户修」用的就是这一个属性**
+        /// （`RecordingsStore.recover` 的两处 guard、`--wav-repair` 的
+        /// 「可修 N 个」、`RecoveryScan` 的恢复前提示），所以它自己必须
+        /// 有判据钉死，不能只靠 `apply` 里那道会抛错的闸兜底——
+        /// 那道闸抛的错在调用点会被 `try?` 吞掉，计数照样对（P9-1b 的由来）
         var isRepairable: Bool {
             switch self {
             case .staleSizes, .zeroHeader: true
-            case .foreign: false
+            case .emptyRecording, .foreign: false
+            }
+        }
+
+        /// 给人看的一行。**放在 `Defect` 上而不是各调用点各写一份**：
+        /// 三处（列表、修复报告、恢复前提示）说的必须是同一件事
+        var userNote: String {
+            switch self {
+            case .staleSizes:
+                "恢复时会一并修复音频头（崩溃留下的，长度字段比真实文件短）"
+            case .zeroHeader:
+                "恢复时会一并修复音频头（旧版零占位遗留，采样率按本 App 唯一的录音格式补）"
+            case .emptyRecording:
+                "空录音：没有音频内容，修不了、也不需要修"
+            case .foreign:
+                "音频头坏了，而且这一类**修不了**（这个文件不是音频）"
+            }
+        }
+
+        /// 修复报告里「不动的那几个」按什么名目列出来
+        var refusedLabel: String {
+            switch self {
+            case .staleSizes, .zeroHeader: "（会被修）"
+            case .emptyRecording: "空录音（没有音频内容，不需要修）"
+            case .foreign(let reason): "非音频（拒绝修复：\(reason)）"
             }
         }
     }
@@ -72,6 +108,9 @@ enum WAVHeaderRepair {
             case let .zeroHeader(actual):
                 return "头全零（旧版零占位遗留）：\(fileBytes) 字节里前 44 字节是零，"
                     + "其后 \(actual) 字节是 PCM"
+            case .emptyRecording(let actual):
+                return "空录音（旧版零占位遗留）：\(fileBytes) 字节里前 44 字节是零，"
+                    + "其后 \(actual) 字节是 PCM —— **没有可恢复的内容**"
             case let .foreign(reason):
                 return "拒绝修复：\(reason)"
             }
@@ -117,7 +156,11 @@ enum WAVHeaderRepair {
         // 指纹，可复现、可解释。别的（文本、随便什么二进制）一律拒绝：
         // 判据越窄，误伤越少
         if head.allSatisfy({ $0 == 0 }) {
-            return Inspection(url: url, fileBytes: total, defect: .zeroHeader(actualDataBytes: actual))
+            // 零 PCM = 空录音。「修」它是给它编一个 0 秒的头，那不是恢复内容，
+            // 却会让「可修 N 个」对用户过度承诺，所以单独一档（见 `Defect`）
+            return Inspection(url: url, fileBytes: total, defect: actual == 0
+                ? .emptyRecording(actualDataBytes: actual)
+                : .zeroHeader(actualDataBytes: actual))
         }
         return Inspection(url: url, fileBytes: total,
                           defect: .foreign(reason: "开头既不是 RIFF 也不是全零（前 4 字节 \(head.prefix(4).map { String(format: "%02x", $0) }.joined(separator: " "))）"))
@@ -165,6 +208,9 @@ enum WAVHeaderRepair {
         switch inspection.defect {
         case let .foreign(reason):
             throw RepairError.notRepairable(reason)
+
+        case .emptyRecording:
+            throw RepairError.notRepairable("空录音：一个字节的 PCM 都没有，没有东西可以恢复")
 
         case let .staleSizes(declared, actual):
             let handle = try FileHandle(forWritingTo: url)

@@ -7,7 +7,7 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **十二个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **十三个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -24,15 +24,18 @@
 #     所以「用例一条都没跑」在这里的表现同样是「进程 0 退出、什么都没测」
 #   · `--diarize-ui-selftest`：说话人识别的界面档位 + store 三条闸（C-3-2）。
 #     同一种情形，同一个理由
-#   · `--recovery-selftest`：崩溃恢复三件事（P9-1）。里面有几条**否定式**判据
-#     （正常 wav 不许被报、干净库零误报、扫描只读），不测就等于没有；条数同理
+#   · `--recovery-selftest`：崩溃恢复（P9-1 / P9-1b）。里面有几条**否定式**判据
+#     （正常 wav 不许被报、空录音不算可修、干净库零误报、扫描只读、探针目录闸门），
+#     不测就等于没有；条数同理。**分类层那两条是 P9-1b 补的**：`isRepairable` 是
+#     三个生产调用点决定「给不给用户修」的属性，只钉执行层钉不住它——把
+#     `.foreign` 也改成 true，之前那条自检照样全绿（apply 抛的错被 `try?` 吞了）
 #
 # 用法：
 #   ./tools/probes/exit_codes.sh            # 不碰麦克风的入口（默认）
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且十二个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且十三个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -108,7 +111,7 @@ run() { # run <名字> <参数…>
 # 两个断言都用 `grep -F`（固定串）而不是正则：要断言的串里有 `:` `（` 这些字符，
 # 正则下要转义，而这条脚本要在 macOS 的 bash 3.2 上跑
 #
-# 为什么只在这十二处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
+# 为什么只在这十三处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
 # 这几个都验过——把 fix ① 拿掉重编，prewarm 那条立刻报「计数不是 1 ⇐ 次数: 2」；
 # 把 `construct` 里的锁拿掉重编，selftest 那条立刻报 ❌。而
 # `--whisper-window-file --head 20` **验不过**：它照样打 1（那条入口把主线程堵在
@@ -219,7 +222,7 @@ run_assert "--integrity-selftest" "✅ 脏数据自检通过（26 条）" --inte
 #   · 恢复扫描只读（扫前扫后逐文件 sha256 一致）
 # 「恢复顺带修过期头」那句断言是**验过会红**的：把 `RecordingsStore.recover` 里
 # 那次 `WAVHeaderRepair.apply` 拿掉，时长断言立刻从 2.300 掉回 2.000（见 P9-1 验收记录）
-run_assert "--recovery-selftest" "✅ 崩溃恢复自检通过（37 条）" --recovery-selftest
+run_assert "--recovery-selftest" "✅ 崩溃恢复自检通过（55 条）" --recovery-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -264,6 +267,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十二个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十三个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

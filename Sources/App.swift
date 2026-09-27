@@ -808,7 +808,11 @@ struct ClassroomTranscriberApp: App {
                 print("✅ 所有 wav 的头都是对的")
             } else {
                 let repairable = defects.filter { $0.defect.isRepairable }
-                print("共 \(defects.count) 个有问题的 wav（可修 \(repairable.count) 个）：")
+                // 「可修」这个数**不含空录音**：给它补一个 0 秒的头不是恢复内容。
+                // 计数单独说出来，免得那句「可修 N 个」对用户过度承诺
+                let refusedList = defects.filter { !$0.defect.isRepairable }
+                print("共 \(defects.count) 个有问题的 wav"
+                      + "（可修 \(repairable.count) 个，另外 \(refusedList.count) 个不会被动）：")
                 for defect in defects { print("  \(defect.fileName) · \(defect.summary)") }
 
                 if apply {
@@ -825,11 +829,16 @@ struct ClassroomTranscriberApp: App {
                     print("")
                     // 这句话在「没有需要拒绝的文件」时也要读得通：
                     // 「剩下 0 个一个字节都没动」会被读成「0 个文件没被动过」，
-                    // 而事实恰好相反——正常的 wav 本来就不进这份报告
-                    let refused = defects.count - repairable.count
-                    print(refused == 0
-                          ? "没有需要拒绝的文件；报告之外的 wav 本来就没进这份名单，也一个字节都没动"
-                          : "剩下 \(refused) 个**一个字节都没动**（非音频，拒绝修复）")
+                    // 而事实恰好相反——正常的 wav 本来就不进这份报告。
+                    // 而且不能一律说「非音频」：空录音也不是非音频
+                    if refusedList.isEmpty {
+                        print("没有需要拒绝的文件；报告之外的 wav 本来就没进这份名单，也一个字节都没动")
+                    } else {
+                        print("剩下 \(refusedList.count) 个**一个字节都没动**：")
+                        for refused in refusedList {
+                            print("  \(refused.fileName) · \(refused.defect.refusedLabel)")
+                        }
+                    }
                 } else {
                     print("")
                     print("（要真的修，加 `--apply`。改之前请确认这些文件已经不需要保留原样了）")
@@ -948,6 +957,14 @@ struct ClassroomTranscriberApp: App {
                     .appendingPathComponent("ct-recovery-crash-probe", isDirectory: true)
             let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
             let recordingsDir = root.appendingPathComponent("recordings", isDirectory: true)
+
+            // **硬闸，必须排在所有删除/写入之前**：这个入口会删掉 `--dir` 下的
+            // `sessions/` 和 `recordings/`。规则与理由见
+            // `RecordingStorage.probeDirectoryRejection`
+            if let rejection = RecordingStorage.probeDirectoryRejection(root) {
+                print("❌ \(rejection)")
+                exitReleasingGgml(2)
+            }
 
             if args.contains("--recover") {
                 // ── 第二个进程：重启之后走恢复 ──

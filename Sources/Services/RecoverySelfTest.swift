@@ -49,6 +49,10 @@ enum RecoverySelfTest {
         checkNoFalsePositives(root: root, check: check)
 
         lines.append("")
+        lines.append("─── D. 探针目录闸门 ───")
+        checkProbeDirectoryGate(root: root, check: check)
+
+        lines.append("")
         lines.append("总结：\(failed == 0 ? "✅ 全部通过" : "❌ 有失败")（\(passed) 过 / \(failed) 败）")
         return SelfTestResult(lines: lines, passed: passed, failed: failed)
     }
@@ -75,6 +79,11 @@ enum RecoverySelfTest {
         let text = dir.appendingPathComponent("text.wav")
         try? Data("(词条名:梯度下降)\n(词条制作:Claude)\n".utf8).write(to: text)
 
+        // ⑤ 空录音：44 字节全零，**一个字节的 PCM 都没有**（实测库里真有一个）。
+        // 和 ③ 的区别只在后半段有没有 PCM——所以要单独摆一个文件把它钉住
+        let empty = dir.appendingPathComponent("empty.wav")
+        try? Data(repeating: 0, count: WAVHeaderRepair.headerSize).write(to: empty)
+
         let scans = WAVHeaderRepair.scan(directory: dir)
         let byName = Dictionary(uniqueKeysWithValues: scans.map { ($0.fileName, $0) })
 
@@ -100,6 +109,46 @@ enum RecoverySelfTest {
         } else {
             check(false, "文本文件：应当拒绝", "\(String(describing: byName["text.wav"]?.defect))")
         }
+        if case .emptyRecording? = byName["empty.wav"]?.defect {
+            check(true, "空录音：**单独一档**（不混进零头里）", "判成 emptyRecording")
+        } else {
+            check(false, "空录音：应当判成 emptyRecording",
+                  "\(String(describing: byName["empty.wav"]?.defect))")
+        }
+        check(byName["empty.wav"] != nil,
+              "空录音**仍然出现在报告里**（可见——用户有权看见，然后自己决定删不删）",
+              "在 \(scans.count) 条报告里")
+        check(byName["zero.wav"]?.defect.isRepairable == true,
+              "有 PCM 的零头**不受影响**，照旧可修（不能一刀切）",
+              "zero.wav 可修")
+
+        // ── 分类层：`isRepairable` 自己必须被钉死 ──
+        //
+        // 三个生产调用点决定「给不给用户修」靠的就是这个属性
+        // （`RecordingsStore.recover` 的两处 guard、`--wav-repair` 的可修计数、
+        // `RecoveryScan` 的恢复前提示）。**只钉执行层是不够的**：P9-1b 之前，
+        // 把 `.foreign` 也改成返回 true，自检照样全绿——因为下面那个
+        // `where isRepairable` 会因为 apply 抛错（被 `try?` 吞掉）而计数不变。
+        // 所以这里直接对着属性本身断言，任一档被翻转都必须变红
+        let flags = [
+            WAVHeaderRepair.Defect.staleSizes(declaredDataBytes: 1, actualDataBytes: 2).isRepairable,
+            WAVHeaderRepair.Defect.zeroHeader(actualDataBytes: 96_000).isRepairable,
+            WAVHeaderRepair.Defect.emptyRecording(actualDataBytes: 0).isRepairable,
+            WAVHeaderRepair.Defect.foreign(reason: "x").isRepairable,
+        ]
+        check(flags == [true, true, false, false],
+              "分类层：四档的 `isRepairable` 逐个钉死（任一档翻转都得变红）",
+              "过期=\(flags[0]) 零头=\(flags[1]) 空录音=\(flags[2]) 非音频=\(flags[3])")
+
+        // 而且要**能分辨**：四档的说法互不相同，改一档不会被另一档的文案盖住
+        let notes = [
+            WAVHeaderRepair.Defect.staleSizes(declaredDataBytes: 1, actualDataBytes: 2).userNote,
+            WAVHeaderRepair.Defect.zeroHeader(actualDataBytes: 96_000).userNote,
+            WAVHeaderRepair.Defect.emptyRecording(actualDataBytes: 0).userNote,
+            WAVHeaderRepair.Defect.foreign(reason: "x").userNote,
+        ]
+        check(Set(notes).count == 4, "分类层：四档给用户看的说法互不相同",
+              "\(Set(notes).count) 种")
 
         // ── 判据的牙齿：修之前读出来是错的，修之后是对的 ──
         let staleBefore = durationSeconds(stale)
@@ -139,13 +188,19 @@ enum RecoverySelfTest {
               "修过的两条：**第 44 字节之后的 PCM 逐字节未变**",
               "只重写了头")
 
-        // ── 拒绝的那条必须**真的没被动过** ──
+        // ── 拒绝的那两条必须**真的没被动过** ──
         let textBefore = digest(text)
+        let emptyBefore = digest(empty)
         if let inspection = scans.first(where: { $0.fileName == "text.wav" }) {
             let threw = (try? WAVHeaderRepair.apply(inspection)) == nil
             check(threw, "对不可修的调用 apply **抛错**而不是照修", "拒绝")
         }
+        if let inspection = scans.first(where: { $0.fileName == "empty.wav" }) {
+            let threw = (try? WAVHeaderRepair.apply(inspection)) == nil
+            check(threw, "对空录音 apply **抛错**（不是给它编一个 0 秒的头）", "拒绝")
+        }
         check(digest(text) == textBefore, "被拒绝的文件一个字节没动", "逐字节未变")
+        check(digest(empty) == emptyBefore, "空录音一个字节没动（可见 ≠ 可以动它）", "逐字节未变")
     }
 
     // MARK: - B. 草稿 → 强杀 → 恢复
@@ -288,6 +343,59 @@ enum RecoverySelfTest {
               "\(before.count) 个文件")
         check(!store.recoveryItems.isEmpty, "扫描确实动了（不是空转）",
               "\(store.recoveryItems.count) 条")
+    }
+
+    // MARK: - D. 探针目录闸门
+
+    /// `--recovery-crash-probe` 会**删掉** `--dir` 下的 `sessions/` 和
+    /// `recordings/` 再往里写合成内容，所以它必须有闸。这条自检直接钉那个
+    /// 纯函数——**闸门自己要是没人验过，那它就不算闸门**。
+    ///
+    /// 全程只做路径运算，**一个文件都不碰**（尤其不碰真实库）。
+    private static func checkProbeDirectoryGate(root: URL, check: (Bool, String, String) -> Void) {
+        let library = RecordingStorage.libraryRoot
+
+        func rejects(_ url: URL, _ name: String) {
+            let reason = RecordingStorage.probeDirectoryRejection(url)
+            check(reason != nil, name, reason.map { "拒绝：\($0.prefix(40))…" } ?? "❌ 放行了")
+        }
+        func allows(_ url: URL, _ name: String) {
+            let reason = RecordingStorage.probeDirectoryRejection(url)
+            check(reason == nil, name, reason ?? "放行")
+        }
+
+        rejects(library, "真实库根被拒（探针会删掉它下面的 sessions/ 和 recordings/）")
+        rejects(library.appendingPathComponent("recordings"), "真实库的 recordings/ 被拒")
+        rejects(library.appendingPathComponent("sessions/drafts"), "真实库的深层子目录也被拒")
+        // 带 `..` 的写法绕不过去：先标准化再比，不是字符串前缀匹配
+        rejects(library.appendingPathComponent("../ClassroomTranscriber/recordings"),
+                "带 `..` 的路径绕不过去")
+
+        // **符号链接别名绕不过去**：这条才是真正钉住「先解析再比」的那条判据
+        // ——上面那条 `..` 在两种实现下都会通过，钉不住任何东西。
+        // 造一个指向真实库的软链（在自检自己的临时目录里，跑完随目录一起没），
+        // 从别名调进去必须照样被拒；不解析符号链接的实现会在这里放行
+        let alias = root.appendingPathComponent("d-alias", isDirectory: true)
+        try? FileManager.default.removeItem(at: alias)
+        try? FileManager.default.createSymbolicLink(at: alias, withDestinationURL: library)
+        if (try? alias.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+            rejects(alias, "指向真实库的符号链接别名被拒（闸门先解析再比，不是字符串前缀）")
+            rejects(alias.appendingPathComponent("recordings"), "别名 + 子目录同样被拒")
+        } else {
+            check(false, "建不出符号链接别名，这条判据没跑成", "createSymbolicLink 失败")
+        }
+        // 反向包含：把真实库包在里面的祖先目录，同样拒绝
+        rejects(FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0],
+                "把真实库包在里面的祖先目录也被拒")
+
+        let scratch = root.appendingPathComponent("d-gate", isDirectory: true)
+        allows(scratch, "临时目录放行")
+        allows(scratch.appendingPathComponent("deep/deeper"), "临时目录的深层也放行")
+        // 临时目录真实路径在 `/private/var/...` 下。不解析符号链接的话，
+        // `/var/...` 和 `/private/var/...` 会被当成两个地方——这里两种写法都要放行
+        allows(URL(fileURLWithPath: "/private" + scratch.path), "符号链接的另一种写法同样放行")
+        // 不该顺手把无辜的路也拒了：闸门只认「和真实库有包含关系」这一条
+        allows(URL(fileURLWithPath: "/tmp"), "/tmp 放行（闸门不是「除白名单外全拒」）")
     }
 
     // MARK: - 夹具

@@ -442,11 +442,49 @@ extension WAVRecorder {
 /// 录音存档目录：`~/Library/Application Support/ClassroomTranscriber/recordings/`
 enum RecordingStorage {
 
-    static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base
+    /// 整个库的根：`~/Library/Application Support/ClassroomTranscriber/`。
+    /// `recordings/` 和 `sessions/` 都在它下面。
+    ///
+    /// 单独提出来是因为它现在是一个**边界**：崩溃恢复探针的目录闸门
+    /// （`probeDirectoryRejection`）拿它比大小。边界只许有一处写法——
+    /// 在别处再拼一遍同样的路径，两处早晚会不一致
+    static var libraryRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ClassroomTranscriber", isDirectory: true)
-            .appendingPathComponent("recordings", isDirectory: true)
+    }
+
+    static var directory: URL {
+        libraryRoot.appendingPathComponent("recordings", isDirectory: true)
+    }
+
+    /// 崩溃恢复探针（`--recovery-crash-probe`）的目录闸门。
+    ///
+    /// **它必须存在**：那个入口会**删掉** `--dir` 底下的 `sessions/` 和
+    /// `recordings/`，再往里写草稿和合成的 wav。这种入口不该只靠调用者自觉——
+    /// 一个手滑的 `--dir` 就是把真实录音和转录删掉，而且删了不可恢复。
+    ///
+    /// 规则写死成一条：**探针目录不许和真实库有任何包含关系**（不许在库里，
+    /// 也不许把库包在里面）。判据是纯函数、不碰文件系统，所以自检能直接钉它
+    /// ——不然这条闸自己就成了没人验过的守卫。
+    ///
+    /// 返回 nil = 放行；返回字符串 = 拒绝的理由（调用方打印它以非 0 退出）
+    static func probeDirectoryRejection(_ requested: URL) -> String? {
+        // 解析符号链接再比：`/var` 是 `/private/var` 的符号链接，
+        // 不解析的话前缀比较会把两条其实是同一个地方的路当成没关系
+        let root = requested.standardizedFileURL.resolvingSymlinksInPath()
+        let library = libraryRoot.standardizedFileURL.resolvingSymlinksInPath()
+        func contains(_ parent: String, _ child: String) -> Bool {
+            child == parent || child.hasPrefix(parent.hasSuffix("/") ? parent : parent + "/")
+        }
+        if contains(library.path, root.path) {
+            return "--dir 落在真实库里（\(root.path)）。这个入口会删掉该目录下的 "
+                + "sessions/ 和 recordings/ 并写入合成内容，不许指向真实库：\(library.path)"
+        }
+        if contains(root.path, library.path) {
+            return "--dir（\(root.path)）把真实库（\(library.path)）包在里面。"
+                + "同上，请换一个和真实库没有包含关系的目录"
+        }
+        return nil
     }
 
     static func makeURL(at date: Date = Date()) -> URL {

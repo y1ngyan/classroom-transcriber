@@ -43,13 +43,12 @@ enum RecoveryScan {
 
         var isRecoverable: Bool { kind == .recoverableDraft }
 
-        /// 恢复这个动作会顺带做的第二件事。nil = 音频头是好的、不用提
-        var headerRepairNote: String? {
-            guard let headerDefect else { return nil }
-            return headerDefect.isRepairable
-                ? "恢复时会一并修复音频头（崩溃留下的，长度字段比真实文件短）"
-                : "音频头坏了，而且这一类**修不了**（这个文件不是音频）"
-        }
+        /// 恢复这个动作会顺带做的第二件事。nil = 音频头是好的、不用提。
+        ///
+        /// 文案从 `WAVHeaderRepair.Defect.userNote` 取，**不在这里另写一份**：
+        /// 「给不给用户修」的判据同样在那个属性上（`isRepairable`），
+        /// 两处各写一份的话，改了分类而没改提示，界面就会说反话
+        var headerRepairNote: String? { headerDefect?.userNote }
 
         /// 给人看的一行。**时长与段数都写出来**——用户判断「这段值不值得恢复」
         /// 靠的就是「多久、讲了多少」
