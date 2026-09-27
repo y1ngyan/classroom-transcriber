@@ -527,10 +527,14 @@ final class WhisperEngine: @unchecked Sendable {
     ///   - suppressRegex: 交给 whisper 的 `suppress_regex`。**默认 nil（不启用）**——
     ///     实测语义和代价都不如预期，见 `Self.suppressRegexCaveat`
     /// - Returns: 转出来的段（含时间范围和逐字符置信度），文本已经是简体
+    ///   - audio: 「哪条音频」的标签，**只用于诊断日志**（时间戳非法时那条）。
+    ///     实时链路传窗口起点、文件链路传文件名。不参与任何计算，
+    ///     默认空串——探针和自检不关心它
     func transcribe(
         _ samples: [Float],
         language: String = "zh",
-        suppressRegex: String? = nil
+        suppressRegex: String? = nil,
+        audio: String = ""
     ) throws -> [WhisperSegment] {
         lock.lock()
         defer { lock.unlock() }
@@ -583,13 +587,19 @@ final class WhisperEngine: @unchecked Sendable {
             let text = ChineseText.toSimplified(String(cString: raw))
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
 
-            // t0/t1 的单位是 10ms（whisper.cpp 的约定）
+            // t0/t1 的单位是 10ms（whisper.cpp 的约定）。
+            // **不能原样乘 10 落字段**：C-4 查明这是全项目唯一会造出反向段
+            // 的入口，而反向段一路喂下去只会静默变成「不标注」。
+            // 判定与诊断都在 `WhisperSegmentTiming.apply` 里，脏的落成零长
             let t0 = whisper_full_get_segment_t0(context, i)
             let t1 = whisper_full_get_segment_t1(context, i)
+            let timing = WhisperSegmentTiming.apply(
+                t0: t0, t1: t1, segment: i, audio: audio, textLength: text.count
+            )
             result.append(WhisperSegment(
                 text: text,
-                startMillis: Int(t0) * 10,
-                endMillis: Int(t1) * 10,
+                startMillis: timing.startMillis,
+                endMillis: timing.endMillis,
                 confidences: Self.spreadTokenProbabilities(
                     Self.tokenProbabilities(context: context, segment: i)
                 ),

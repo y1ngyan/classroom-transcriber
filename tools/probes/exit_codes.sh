@@ -7,7 +7,7 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **十个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **十一个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -30,7 +30,7 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且十个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且十一个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -199,6 +199,13 @@ run_assert "--diarize-ui-selftest" "全部通过 ✅ 65 条" --diarize-ui-selfte
 # 另：「强杀恢复」那条判据要真打死一个进程（`kill -9`），不适合放进这个
 # 一次跑完的扫描里——它单独在 `tools/probes/log_crash.sh`，退出码同样即成败
 run_assert "--log-selftest" "✅ 日志自检通过（48 条）" --log-selftest
+#
+# P6-2：whisper 段落时间戳守卫 + 全库脏数据体检。同样离线、零花费。
+# 条数钉住，「反向段」那几条**验过会红**：把 `WhisperSegmentTiming.resolve`
+# 里 `raw1 < raw0` 那一支删掉（＝不做反向判定），对应判据立刻红。
+# 体检那边「只读」是一条机器判据（扫描前后每个文件 sha256 逐个一致），
+# 不是靠人记得别写
+run_assert "--integrity-selftest" "✅ 脏数据自检通过（26 条）" --integrity-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -243,6 +250,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十一个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

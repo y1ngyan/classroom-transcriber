@@ -175,7 +175,9 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         engine: WhisperEngine
     ) throws -> Update {
         let started = ContinuousClock.now
-        let raw = try engine.transcribe(windowSamples)
+        // `audio` 只喂诊断日志：时间戳一旦非法，光说「有个段坏了」没用，
+        // 得能翻回是这次录音的哪一窗
+        let raw = try engine.transcribe(windowSamples, audio: "实时 · 窗口@\(windowStartMillis)ms")
         // 幻觉过滤放在**合并之前**：合并器会把「同一句的多次识别」揉成一个段，
         // 幻觉一旦进了合并器就可能和真话粘在一起，那时再按段判就判不干净了。
         let recognized = filterHallucinations(raw, windowSamples: windowSamples)

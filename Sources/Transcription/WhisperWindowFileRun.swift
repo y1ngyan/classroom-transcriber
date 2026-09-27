@@ -312,7 +312,8 @@ enum WhisperWindowFileRun {
             // 里只 await 不 catch），探针失败要走「打印一行 ❌」而不是上抛
             do {
                 lines.append(contentsOf: try confidenceProbe(
-                    samples: samples, engine: engine, options: options
+                    samples: samples, engine: engine, options: options,
+                    label: url.lastPathComponent
                 ))
             } catch {
                 lines.append("❌ 置信度探针失败: \(error.localizedDescription)")
@@ -484,7 +485,8 @@ enum WhisperWindowFileRun {
             lines.append("")
             do {
                 lines.append(contentsOf: try confidenceProbe(
-                    samples: samples, engine: engine, options: options
+                    samples: samples, engine: engine, options: options,
+                    label: url.lastPathComponent
                 ))
             } catch {
                 lines.append("❌ 置信度探针失败: \(error.localizedDescription)")
@@ -672,7 +674,8 @@ enum WhisperWindowFileRun {
     private static func confidenceProbe(
         samples: [Float],
         engine: WhisperEngine,
-        options: Options
+        options: Options,
+        label: String
     ) throws -> [String] {
         var lines: [String] = []
         lines.append(String(
@@ -717,7 +720,11 @@ enum WhisperWindowFileRun {
             // 单独计时：`suppress_regex` 的代价必须能和「不开」直接比，
             // 混进整趟耗时里就分不出来了
             let windowStarted = ContinuousClock.now
-            let recognized = try engine.transcribe(window.samples, suppressRegex: options.suppressRegex)
+            let recognized = try engine.transcribe(
+                window.samples,
+                suppressRegex: options.suppressRegex,
+                audio: "\(label) · 窗口@\(window.startMillis)ms"
+            )
             let windowElapsed = ContinuousClock.now - windowStarted
             probeWindowSeconds.append(Double(windowElapsed.components.seconds)
                 + Double(windowElapsed.components.attoseconds) / 1e18)

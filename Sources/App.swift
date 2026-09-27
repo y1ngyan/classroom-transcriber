@@ -655,6 +655,73 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 脏数据自检：--integrity-selftest（P6-2）
+        //
+        // **离线**：不联网、不加载模型、不碰麦克风、不发声；读写全在自己造的
+        // 临时目录里。验两件事：whisper 段落时间戳守卫（`t1 < t0` 不落成反向段、
+        // 有诊断、正常片段逐字节不受影响）与全库脏数据体检（七类各自点名、
+        // 干净会话零误报、扫描前后每个文件 sha256 不变＝只读）
+        if CommandLine.arguments.contains("--integrity-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = IntegrityScanSelfTest.run()
+            for line in result.lines { print(line) }
+            print(result.failed == 0
+                  ? "✅ 脏数据自检通过（\(result.passed) 条）"
+                  : "❌ 脏数据自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 全库脏数据体检：--integrity-scan [--sessions <目录>] [--recordings <目录>]
+        //
+        // **只读**：这个入口不删、不改、不修任何东西（自检里有一条判据把
+        // 「扫描前后每个文件 sha256 一致」钉住）。它也不提供自动修复——
+        // 「扫出什么」和「该拿它怎么办」是两个决定，后者要人看着具体那几条定。
+        //
+        // **退出码恒 0**（除非扫不动）：这是一份报告，不是一道闸。「库里有脏数据」
+        // 是它的输出，不是它失败。要拿它当闸的调用方去读那几行 `⚠️`
+        if CommandLine.arguments.contains("--integrity-scan") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            func directory(_ flag: String, _ fallback: URL) -> URL {
+                guard let raw = value(flag) else { return fallback }
+                return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+            }
+            let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                in: .userDomainMask)[0]
+                .appendingPathComponent("ClassroomTranscriber", isDirectory: true)
+            let sessionsDir = directory("--sessions", base.appendingPathComponent("sessions", isDirectory: true))
+            let recordingsDir = directory("--recordings", base.appendingPathComponent("recordings", isDirectory: true))
+
+            print("全库脏数据体检（只读 · 不删不改 · 不播放音频）")
+            print("  会话目录：\(sessionsDir.path)")
+            print("  录音目录：\(recordingsDir.path)")
+            print("")
+            let report = IntegrityScan.scan(sessionsDirectory: sessionsDir,
+                                            recordingsDirectory: recordingsDir)
+            print("扫了 \(report.sessionCount) 条会话 · \(report.audioFileCount) 个 wav 文件")
+            print("")
+            for line in report.summaryLines { print(line) }
+            print("")
+            if report.isClean {
+                print("✅ 没有发现脏数据")
+            } else {
+                for kind in IntegrityScan.Kind.allCases {
+                    let hits = report.findings(of: kind)
+                    guard !hits.isEmpty else { continue }
+                    print("── \(kind.label)（\(hits.count)）──")
+                    for hit in hits {
+                        let who = hit.sessionID.map { String($0.uuidString.prefix(8)) } ?? "（无会话）"
+                        print("  [\(who)] \(hit.detail)")
+                    }
+                }
+            }
+            exitReleasingGgml(0)
+        }
+
         // 诊断日志导出：--log-export [--tail N] [--out <文件>] [--dir <目录>]
         //
         // 给用户/接手者取现场用。不给 `--out` 就打到 stdout（默认最后 200 条）；
