@@ -242,6 +242,50 @@ func exitReleasingGgml(_ code: Int32 = 0) -> Never {
     exit(code)
 }
 
+/// 「还在算的时候被迫退出」的唯一出口：**不释放 ggml，直接 `_exit`**。
+///
+/// 存在的理由是一条实测出来的崩溃（P9-2，2026-09-28）：
+/// `--whisper-window-file` 的等结果超时分支，原本照着上面那条规矩走
+/// `exitReleasingGgml()`，而那一刻 **`Task.detached` 里的 `whisper_full` 还在跑**。
+/// `releaseAll()` 把 context 和后端从正在计算的图底下抽走，C 层当场断言失败：
+///
+/// ```
+/// src/ggml-backend.cpp:426: GGML_ASSERT(backend) failed
+/// 2  ggml_backend_tensor_set
+/// 3  ggml_backend_sched_synchronize
+/// 4  ggml_backend_sched_graph_compute
+/// 6  whisper_encode_internal
+/// 8  whisper_full
+/// 9  WhisperEngine.transcribe
+/// ```
+///
+/// 复现（90 秒上限，故意让它超时）：
+/// ```
+/// build/...ClassroomTranscriber --whisper-window-file <122.7 分钟的 wav> \
+///     --window-timeout 90        # 旧写法 exit=134，栈如上
+/// exit=124                        # 改后：干净退出，打印「❌ 离线跑超时」
+/// ```
+///
+/// **它落地的信号不止 134**：决定「抽后端」和「用后端」哪个先发生的是一场竞态，
+/// 拿 3 秒样本连超时三次实测到 **134 / 139 / 139**——`139 = 128+11`（SIGSEGV），
+/// 那是后端起指针在断言之前就被解了，连上面那句断言都没来得及打。**所以判据是
+/// 「不是 124 就算红」，不是「等于 134 才算红」**，见 `tools/probes/exit_codes.sh`
+/// 第 14 条断言。
+///
+/// **为什么这里不能走 `releaseAll()`**：那把锁保护的是「构造 vs 销毁」，
+/// 管不住「销毁 vs 正在使用」——`whisper_full` 不等这把锁，它也不该等
+/// （等它等于把超时变成「无限等」，那就没有超时了）。既然那一刻**没有**
+/// 安全的释放时机，就干脆不释放：`_exit` 跳过 C 运行时退出流程和
+/// ggml 的静态析构，连带跳过 `__cxa_finalize_ranges` → `ggml_metal_device_free`
+/// 那一串（上面那条注释说的 exit=134 就是它），由内核回收地址空间。
+///
+/// **它只配给「我知道现在还有人在算」的出口用**，正常收尾一律走
+/// `exitReleasingGgml`——那条路上的清理是有意义的（Metal residency set
+/// 空得下来，静态析构就不会 abort）。`124` 取 `timeout(1)` 的约定返回值。
+func exitWithoutReleasingGgml(_ code: Int32) -> Never {
+    _exit(code)
+}
+
 /// 本地 Whisper 转录引擎（whisper.cpp 的 Swift 封装）。
 ///
 /// 存在的理由：Apple 的 SpeechTranscriber 在低质量音频上表现明显更差——

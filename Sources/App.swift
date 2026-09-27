@@ -202,9 +202,48 @@ struct ClassroomTranscriberApp: App {
                 }
                 semaphore.signal()
             }
-            // 长录音按 4.5 倍速算余量：2000 秒的录音约 450 秒
-            if semaphore.wait(timeout: .now() + 1800) == .timedOut {
-                print("❌ 离线跑超时")
+            // 等结果的上限。默认 1800 秒，**默认值一个字节没动**（既有入口的
+            // 行为不变）；`--window-timeout <秒>` 可以显式抬高，给课堂量级的
+            // 输入用。
+            //
+            // 为什么需要这个覆盖（P9-2 实测，不是推测）：这条入口把结果
+            // **攒到最后一次性交出来**（`run()` 返回 `[String]`），所以超时被
+            // 掐掉时一个字都还没落地——一整跑全废，而一整跑是小时级的。
+            //
+            // 这台机器（Apple A18 Pro · 6 核 · 8 GB）上的两次实测：
+            //   · 短录音 368.2 秒 → 427.5 秒墙钟（0.86 倍实时）。这一跑被
+            //     ~37 秒的固定开销（读文件 + 构造引擎）压得很重，**别拿它
+            //     外推**——我第一版就是这么算的，把 122.7 分钟估成了 2.4 小时；
+            //   · 课堂量级 122.7 分钟（拼接输入）→ **7210.2 秒墙钟 = 1.02 倍
+            //     实时**，窗循环本身 7173.3 秒。固定开销摊薄之后就这个数。
+            //     `tools/probes/longrun_rss.sh --out /tmp/p9-2/longrun \
+            //          --wav <122.7 分钟的 wav> --timing --window-timeout 24000`
+            //
+            // **长的那次远超 1800 秒**（7210.2 > 1800），所以课堂量级的输入
+            // 必须能抬上限；短的那次 427.5 秒其实没超，别拿它当论据（核验者
+            // 2026-09-28 指出这句原来写的是「两种长度都远超」，是假的）。
+            // 慢到这个地步的原因：3 秒步长 / 10 秒窗 = 每秒音频被转 3.3 次，
+            // 2452 个窗 × 10 秒 = 6.8 小时窗内音频压进 2 小时 = 窗内音频
+            // 3.4 倍实时。原注释假设的「4.5 倍速算余量」在这台机器上不成立。
+            let timeoutSeconds: Double = {
+                guard let j = CommandLine.arguments.firstIndex(of: "--window-timeout"),
+                      j + 1 < CommandLine.arguments.count,
+                      let parsed = Double(CommandLine.arguments[j + 1]), parsed > 0
+                else { return 1800 }
+                return parsed
+            }()
+            if semaphore.wait(timeout: .now() + timeoutSeconds) == .timedOut {
+                // 超时意味着 `whisper_full` **还在跑**。这时候绝不能往下走到
+                // `exitReleasingGgml()`——它会从正在计算的图底下把后端抽走，
+                // 实测当场 `GGML_ASSERT(backend) failed` + exit=134（栈见
+                // `exitWithoutReleasingGgml`；同一竞态也会以 139 落地）。所以这
+                // 一支就地退出，不释放。
+                //
+                // 也不「等它算完再释放」：那就等于没有超时。
+                let stats = GgmlTeardown.constructionStats
+                print("❌ 离线跑超时（上限 \(Int(timeoutSeconds)) 秒）——`run()` 攒到最后一次性交出来，所以这一跑一个字都没落地")
+                print("🔎 构造 ggml context 次数: \(stats.constructed)")
+                exitWithoutReleasingGgml(124)
             }
             // 同 `--whisper-prewarm` 报同一个计数（那是 133 的正面判据，见那边的
             // 注释）。**但这一条 `exit_codes.sh` 不断言它**，只打出来给人看：

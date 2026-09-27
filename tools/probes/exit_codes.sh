@@ -7,7 +7,13 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **十四个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **十三个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）。
+#
+# ⚠️ 计数说明（P9-2 逐条数过）：这段原先写「十四个入口」，而文件里实际只有 **13**
+# 条 `run_assert` 调用——`grep -c run_assert` 得到的 14 把上面那行函数定义
+# `run_assert() {` 也数进去了。本包补上第 14 条断言，但**它不是 `run_assert` 的
+# 形状**（期望的退出码是 124 而不是 0，见 `--whisper-window-file 超时不 abort`），
+# 所以现在是 **13 条 `run_assert` + 1 条退出码断言 = 14 条**。
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -35,7 +41,8 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且十四个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且十四条断言都命中（13 条 `run_assert` +
+# 1 条「超时的退出码必须是 124」——后者期望的本来就不是 0）。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -111,7 +118,7 @@ run() { # run <名字> <参数…>
 # 两个断言都用 `grep -F`（固定串）而不是正则：要断言的串里有 `:` `（` 这些字符，
 # 正则下要转义，而这条脚本要在 macOS 的 bash 3.2 上跑
 #
-# 为什么只在这十四处断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
+# 为什么只在**验过会红**的地方断言（别处仍是普通 `run`）：**没验过会红的守卫不配当守卫**。
 # 这几个都验过——把 fix ① 拿掉重编，prewarm 那条立刻报「计数不是 1 ⇐ 次数: 2」；
 # 把 `construct` 里的锁拿掉重编，selftest 那条立刻报 ❌。而
 # `--whisper-window-file --head 20` **验不过**：它照样打 1（那条入口把主线程堵在
@@ -252,6 +259,40 @@ echo "════ 要真模型的入口（会加载 539MB 模型）════
 run_assert "--whisper-prewarm" "构造 ggml context 次数: 1（" --whisper-prewarm
 if [ -n "$SAMPLE" ]; then
   run "--whisper-window-file --head 20" --whisper-window-file "$SAMPLE" --head 20
+
+  # ── 第 14 条断言（P9-2）：超时的那一刻**不许 abort** ──
+  #
+  # 这条入口的超时分支原先无条件走 `exitReleasingGgml()`，而那一刻
+  # `Task.detached` 里的 `whisper_full` **还在算**——释放把 ggml 后端从正在计算的
+  # 图底下抽走，C 层当场 `src/ggml-backend.cpp:426: GGML_ASSERT(backend) failed`，
+  # 进程 **exit=134**。它和本文件开头讲的是同一类缺陷：**输出看着对、进程 abort**，
+  # 所以判据也只能是退出码本身（栈与复现见 `exitWithoutReleasingGgml` 的注释）。
+  #
+  # 期望的退出码是 **124**（`timeout(1)` 的约定值），所以它没法用 `run_assert`
+  # ——那个函数要求 exit=0。
+  #
+  # **怎么保证超时落在「正在转写」而不是「引擎还在构造」**：引擎构造期释放是安全的
+  # （构造与销毁有同一把锁），那一刻不会红，判据就变成了空转。样本本身只有 3 秒，
+  # 单趟转写也就三四秒，所以用 `--repeat 20` 把同一段音频连转 20 遍（约 70 秒），
+  # 15 秒的上限必然落在 `whisper_full` 里面（实测：那 16 秒里引擎已经构造完，
+  # `whisper_init_state` 四行都打出来了，超时落在转写中）。
+  #
+  # **注入验过（3/3 全红）**：把这一支改回 `exitReleasingGgml()` 重编，三次
+  # 分别是 **134 / 139 / 139**。竞态决定「抽后端」和「用后端」谁先发生，所以
+  # 落地信号不止 134——139 是 SIGSEGV，后端起指针在断言之前就被解了。判据因此
+  # 写成「退出码必须**等于 124**」（不是「不等于 0」）：既挡住 134，也挡住 139，
+  # 还挡住将来某种「0 但没跑到」的假绿。
+  local_out="$("$BIN" --whisper-window-file "$SAMPLE" --repeat 20 --window-timeout 15 2>&1)"
+  local_code=$?
+  if [ "$local_code" = "124" ] && printf '%s' "$local_out" | grep -qF "离线跑超时"; then
+    printf '  ✅ %-34s exit=124 · 断言命中\n' "--whisper-window-file 超时不 abort"
+    PASS=$((PASS + 1))
+  else
+    printf '  ❌ %-34s exit=%s（期望 124；134/139 = 释放撞上正在算的图）\n' \
+      "--whisper-window-file 超时不 abort" "$local_code"
+    printf '       %s\n' "$(printf '%s' "$local_out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
 else
   echo "  ⏭  --whisper-window-file：recordings/ 里没有 wav，跳过"
 fi
@@ -276,6 +317,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十四个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十四条断言：13 条 run_assert + 超时退出码 124）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"
