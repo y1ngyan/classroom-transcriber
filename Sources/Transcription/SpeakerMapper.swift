@@ -81,12 +81,21 @@ enum SpeakerMapper {
             let segmentStart = range.lowerBound
             let segmentEnd = range.upperBound
 
-            // 零长/反向的转录段直接不标。下面算 ratio 要除以 (b−a)，这里不拦住就是除零。
+            // 反向/零长的转录段直接不标。
             //
             // **这个 guard 曾经是死代码**：反向段在上一行的 `absoluteRange` 里就被
             // `..<` 的运行时检查 SIGTRAP 掉了（exit 133），根本走不到这里。
-            // C-4 修好 `absoluteRange`（反向返回空区间）之后它才真的可达——
-            // 也就是说这条「不标」的规则现在由它独自承担，别再让它变成装饰
+            // C-4 修好 `absoluteRange`（反向返回空区间）之后它才真的可达。
+            //
+            // **可达 ≠ 有作用。拿掉它，所有输出一个字节都不变**（C-4 核验时实测）。
+            // 空区间的 `segmentEnd == segmentStart`，下面每个 span 的重叠
+            // `min(e,spanEnd) − max(s,spanStart)` 恒为 0、被 `guard overlap > 0` 全跳过，
+            // 于是 `totalOverlap` 恒 0，先被 `totalOverlap >= minOverlapMillis` 那道闸
+            // 判成不标——**底下那个除以 `(b−a)` 根本到不了，它连除零都防不着**。
+            //
+            // 原来这里写的是「不拦住就是除零」，那句是错的（过期注释，C-4 核验时才发现）。
+            // 留着它的理由是**把语义写在循环最前面**（这一段在时间轴上没有长度 ⇒ 不标），
+            // 不是因为它拦得住什么。别再改措辞去声称它防了什么
             guard segmentEnd > segmentStart else {
                 output[segment.id] = .unlabeled
                 continue
