@@ -15,6 +15,8 @@ struct RecordingsView: View {
     @State private var openSessionID: UUID?
     /// 删除确认。非 nil 时弹确认框
     @State private var pendingDelete: SessionSummary?
+    /// 丢弃未完成录音的确认。**删文件一律显式**——非 nil 时弹确认框
+    @State private var pendingDiscard: RecoveryScan.Item?
 
     private var store: RecordingsStore { appState.recordings }
 
@@ -53,6 +55,26 @@ struct RecordingsView: View {
         } message: { summary in
             Text("\(summary.formattedDate) · \(summary.segmentCount) 段转录")
         }
+        // 丢弃未完成的录音。**只删那一份草稿，绝不碰音频**——
+        // 音频是不可恢复的原始素材，要删它得另走「删除录音」那条路，
+        // 那条路上的确认文案写明了「音频不可恢复」
+        .confirmationDialog(
+            "丢弃这份未完成的转录？",
+            isPresented: Binding(
+                get: { pendingDiscard != nil },
+                set: { if !$0 { pendingDiscard = nil } }
+            ),
+            presenting: pendingDiscard
+        ) { item in
+            Button("丢弃转录（保留音频文件）", role: .destructive) {
+                store.discard(item)
+                pendingDiscard = nil
+            }
+            Button("取消", role: .cancel) { pendingDiscard = nil }
+        } message: { item in
+            Text("只会删掉这份没写完的转录。音频 \(item.fileName ?? "") 留在原处，"
+                 + "之后会显示成「无会话的录音」。")
+        }
     }
 
     // MARK: - 列表
@@ -61,11 +83,16 @@ struct RecordingsView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if store.summaries.isEmpty {
+            if store.summaries.isEmpty && store.recoveryItems.isEmpty {
                 emptyState
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
+                        // 「未完成」排在最前：它是**要用户做决定**的一组，
+                        // 压在一屏历史录音底下等于没提。做完决定这一组就消失
+                        if !store.recoveryItems.isEmpty {
+                            recoverySection
+                        }
                         ForEach(courseGroups, id: \.0) { group in
                             courseGroup(name: group.0, sessions: group.1)
                         }
@@ -127,6 +154,57 @@ struct RecordingsView: View {
                 let r = rhs.sessions.first?.startedAt ?? .distantPast
                 return l > r
             }
+    }
+
+    /// 「未完成」那一组（P9-1）。
+    ///
+    /// 存在的理由：崩溃/强杀/断电之后，音频还在盘上（`WAVRecorder` 流式落盘），
+    /// 但会话从来没被写下来过——**列表的数据源是 sessions/index.json，
+    /// 所以那些录音原本一条都不会出现**，用户看不到、也找不回来。
+    /// 这一组就是那个「看得见」的入口
+    private var recoverySection: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            HStack(spacing: Theme.Spacing.sm) {
+                StatusMark(kind: .warning, text: "未完成")
+                Text("\(store.recoveryItems.count)")
+                    .textStyle(Theme.Text.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
+            Text("这些录音没有正常结束（崩溃、被强杀或断电），转录只写到一半。"
+                 + "恢复会把它们变成正式录音；丢弃只删这份没写完的转录，音频留着。")
+                .textStyle(Theme.Text.caption)
+                .foregroundStyle(Theme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+                ForEach(store.recoveryItems) { item in
+                    RecoveryRow(
+                        item: item,
+                        onRecover: { store.recover(item) },
+                        onDiscard: { pendingDiscard = item }
+                    )
+                }
+            }
+            // 和课程组同一个缩进档：这一组也是「标题 + 条目」的两级结构
+            .padding(.leading, Theme.Spacing.md)
+
+            // 恢复是唯一一处会改用户音频的动作，改了什么要看得见。
+            // 空的时候不占位——一句话都没有才是常态
+            if !store.recoveryNotes.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                    Text("上次恢复改动了音频头：")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                    ForEach(store.recoveryNotes, id: \.self) { line in
+                        Text(line)
+                            .textStyle(Theme.Text.mono)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+            }
+        }
     }
 
     /// 课程内按天分组
@@ -276,6 +354,91 @@ private struct RecordingRow: View {
             withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
         }
     }
+}
+
+/// 一条「未完成」的录音（P9-1）。和 `RecordingRow` 的差别是**它要用户做决定**：
+/// 所以右侧那个位置留给唯一的主动作（`PillButton`「恢复」），
+/// 次要动作（丢弃）退化成文字链接——一行只放一个按钮是设计规范。
+private struct RecoveryRow: View {
+    let item: RecoveryScan.Item
+    let onRecover: () -> Void
+    let onDiscard: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                Text(item.kindLabel)
+                    .textStyle(Theme.Text.body)
+                    .foregroundStyle(Theme.textPrimary)
+
+                if let startedAt = item.startedAt {
+                    Text(Self.time.string(from: startedAt))
+                        .textStyle(Theme.Text.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                }
+
+                Spacer()
+
+                // 只有「有草稿可扶正」的那一类才给恢复。孤儿音频没有草稿，
+                // 按了也无事可做——给一个按下去没反应的按钮比不给更糟
+                if item.isRecoverable {
+                    PillButton(title: "恢复", action: onRecover)
+                }
+            }
+
+            if !item.summary.isEmpty {
+                Text(item.summary)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+            }
+
+            // 「恢复会顺手修音频头」这件事在**点之前**就说。放在最下面一行
+            // 是因为它只在部分条目上出现，摆中间会把其他行的对齐撑乱
+            if let note = item.headerRepairNote {
+                HStack(spacing: Theme.Spacing.xs) {
+                    StatusMark(kind: .warning, text: "音频头")
+                    Text(note)
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            // 丢弃只在悬停时浮出，理由同 `RecordingRow` 的删除入口：
+            // 常驻会把「未完成」这一组变成一屏控件。丢弃**永不自动发生**，
+            // 一律走确认框（见 `pendingDiscard`）
+            if isHovering {
+                Button(action: onDiscard) {
+                    Text("丢弃这份转录")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.error)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .transition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
+                .frame(width: 2)
+                .offset(x: -Theme.Spacing.md)
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+        }
+    }
+
+    private static let time: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M月d日 HH:mm"
+        return formatter
+    }()
 }
 
 // MARK: - 摘要的显示格式

@@ -44,6 +44,7 @@ final class RecordingsStore {
         self.directory = directory ?? Self.defaultDirectory
         self.recordingsDirectory = recordingsDirectory
         loadIndex()
+        refreshRecovery()
     }
 
     // MARK: - 读取
@@ -94,13 +95,22 @@ final class RecordingsStore {
         return session
     }
 
+    /// 编码 + 原子落盘的**唯一一处**实现。会话正文和录制草稿都走它——
+    /// 第二份「写临时文件再 rename」的实现迟早会和这一份漂移，
+    /// 而漂移的那天表现为「草稿能写但会话写不进去」这种只在崩溃时才见到的差别
+    private func atomicWrite(_ value: some Encodable, to url: URL) throws {
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(value).write(to: url, options: .atomic)
+    }
+
     /// 保存/更新一条会话：写正文文件 + 同步 index 里的摘要
     func save(_ session: RecordingSession) {
         do {
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(session).write(to: fileURL(for: session.id), options: .atomic)
+            try atomicWrite(session, to: fileURL(for: session.id))
         } catch {
             statusMessage = "❌ 会话保存失败: \(error.localizedDescription)"
             // 这条失败原本只变成界面上一句 statusMessage，用户划过去就没了。
@@ -136,6 +146,150 @@ final class RecordingsStore {
                 .init("总段数", session.segmentCount),
             ])
         }
+    }
+
+    // MARK: - 录制草稿（P9-1）
+
+    /// 草稿目录。**放在 `sessions/` 下但自成一个子目录**：
+    /// `sessions/` 的语义是「完整的会话」，列表（`index.json`）、体检
+    /// （`IntegrityScan` 七类判据）都按这个语义写的。半成品混进去，
+    /// 每个读那个目录的地方都得多判一次「这条算不算数」——那种判断迟早
+    /// 会在某一条路径上漏掉，表现就是列表里冒出一条永远打不开的录音
+    var draftsDirectory: URL { directory.appendingPathComponent("drafts", isDirectory: true) }
+
+    private func draftURL(for id: UUID) -> URL {
+        draftsDirectory.appendingPathComponent("\(id.uuidString).json")
+    }
+
+    /// 周期性落一份录制草稿。**复用 `save` 的那一次原子写**（`atomicWrite`）
+    ///
+    /// 失败**只记日志、不改 `statusMessage`**：草稿是保险，不是主路径。
+    /// 每 30 秒往界面上顶一句报错，用户会以为录音坏了——而录音好好的，
+    /// 真正该报的那个错（会话没落盘）在 `save` 里
+    func saveDraft(_ draft: RecordingDraft) {
+        do {
+            try atomicWrite(draft, to: draftURL(for: draft.id))
+        } catch {
+            DiagnosticLog.error(.storage, "录制草稿保存失败", fields: [
+                .init("草稿", draft.id),
+                .init("原因", error.localizedDescription),
+            ])
+        }
+    }
+
+    /// 读草稿目录。**解不出来的草稿照样返回一个占位**，不静默丢掉：
+    /// 崩溃现场只出现一次，「这里本来有个草稿但读不出来」本身就是要让
+    /// 用户看见的信息（他才知道那段录音为什么恢复不了）
+    func loadDrafts() -> [RecordingDraft] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: draftsDirectory, includingPropertiesForKeys: nil
+        )) ?? []
+        let decoder = JSONDecoder()
+        return files
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .compactMap { url in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? decoder.decode(RecordingDraft.self, from: data)
+            }
+    }
+
+    /// 草稿扶正：**走和正常停止完全相同的落盘路径**（`ingest`），
+    /// 然后把草稿文件删掉。
+    ///
+    /// 为什么删草稿要放在 `ingest` 之后：反过来的话，`ingest` 抛错/被杀
+    /// 就变成「草稿没了、会话也没写成」——一次崩溃把保险也一起烧了
+    @discardableResult
+    func promoteDraft(_ draft: RecordingDraft) -> RecordingSession {
+        let session = ingest(draft.asSessionDraft)
+        removeDraftFile(draft.id, reason: "已扶正成会话 \(session.id)")
+        return session
+    }
+
+    /// 「有音频但没有完整会话」的录音（P9-1）。**启动时扫一次**，
+    /// 之后每次恢复/丢弃再刷新。
+    ///
+    /// 启动时扫而不是每次进列表页现扫：这个扫描要读 `recordings/` 里每个
+    /// wav 的文件头拿时长，几十条录音就是几十次 open。挂在启动上，
+    /// 代价落在用户还在看启动画面的时候
+    private(set) var recoveryItems: [RecoveryScan.Item] = []
+
+    /// 上一次恢复时改了什么（逐行，含原值）。**恢复是唯一一处会改用户音频
+    /// 的动作**，所以它必须留下可读的账——用户点完「恢复」得能看见
+    /// 「长度字段 192000 → 220800」这一行，而不是只有一句「已完成」
+    private(set) var recoveryNotes: [String] = []
+
+    func refreshRecovery() {
+        recoveryItems = RecoveryScan.scan(
+            sessionsDirectory: directory,
+            recordingsDirectory: recordingsDirectory,
+            draftsDirectory: draftsDirectory
+        )
+    }
+
+    /// 用户点了「恢复」：草稿扶正成正式会话。
+    ///
+    /// **顺手修音频头。** 崩溃是留下过期头的那个原因（`WAVRecorder` 每秒
+    /// 回填一次），而恢复正是用户明确说「把这段录音要回来」的那一刻；
+    /// 不修的话，救回来的录音尾部最多 1 秒对任何读者都不存在——
+    /// 用户拿到的是一条「静悄悄短了一截」的录音。
+    ///
+    /// 这一步**不是偷偷做的**：界面上那一行的按钮文案和说明会写明
+    /// 「恢复时会一并修复音频头」（`Item.headerRepairNote`），用户在点之前
+    /// 就看到了。修不成（那个文件根本不是音频）也照常恢复，只是记一条日志
+    ///
+    /// 失败**不做任何破坏性兜底**——草稿原地不动，下次启动还能再试一次
+    func recover(_ item: RecoveryScan.Item) {
+        guard let draft = item.draft else { return }
+        if let defect = item.headerDefect, defect.isRepairable, let name = item.fileName {
+            let url = recordingsDirectory.appendingPathComponent(name)
+            if let inspection = WAVHeaderRepair.inspect(url), inspection.defect.isRepairable {
+                do {
+                    let outcome = try WAVHeaderRepair.apply(inspection)
+                    recoveryNotes.append(contentsOf: outcome.lines)
+                    DiagnosticLog.info(.storage, "恢复时修复了音频头", fields: [
+                        .init("文件", name), .init("草稿", draft.id),
+                    ])
+                } catch {
+                    DiagnosticLog.error(.storage, "恢复时修复音频头失败", fields: [
+                        .init("文件", name), .init("原因", error.localizedDescription),
+                    ])
+                }
+            }
+        }
+        promoteDraft(draft)
+        refreshRecovery()
+    }
+
+    /// 用户点了「丢弃」。**调用方必须先拿到显式确认**——这个函数本身不弹框，
+    /// 它也没法知道调用它的那一刻用户看没看见
+    func discard(_ item: RecoveryScan.Item) {
+        guard let draft = item.draft else { return }
+        discardDraft(draft)
+        refreshRecovery()
+    }
+
+    /// 丢弃草稿。**只有用户显式确认之后才调得到这里**——
+    /// 这个类型里没有第二处 `removeItem` 作用于草稿目录
+    func discardDraft(_ draft: RecordingDraft) {
+        removeDraft(id: draft.id, reason: "用户显式丢弃")
+    }
+
+    /// 按 id 移除草稿文件。两个调用方：用户显式丢弃，以及**录制正常收尾
+    /// 之后**（那一刻草稿已经被正式会话取代了）
+    func removeDraft(id: UUID, reason: String) {
+        removeDraftFile(id, reason: reason)
+    }
+
+    private func removeDraftFile(_ id: UUID, reason: String) {
+        // 只删草稿自己这个 json。**绝不碰 recordings/ 下的音频**——
+        // 丢弃的是「这份转录」，不是那段录音；音频删不删是另一件事、
+        // 另一个确认框（见 `deleteWithAudio`）
+        try? FileManager.default.removeItem(at: draftURL(for: id))
+        DiagnosticLog.info(.storage, "移除录制草稿", fields: [
+            .init("草稿", id),
+            .init("原因", reason),
+        ])
     }
 
     // MARK: - 改名 / 课程

@@ -82,6 +82,18 @@ final class AppState {
             return session.id
         }
 
+        // 录制途中的周期性草稿（P9-1）。引擎每 30 秒推一份，
+        // 崩溃后它是唯一还记得「这堂课讲了什么」的东西
+        transcription.onSessionDraft = { [weak self] draft in
+            self?.recordings.saveDraft(draft)
+        }
+
+        // 收尾落盘成功 → 草稿多余了。**这一步不能省**：留着的话重启后
+        // 列表里会冒出一条「未完成」，用户点恢复就得到重复的一份会话
+        transcription.onDraftObsolete = { [weak self] id in
+            self?.recordings.removeDraft(id: id, reason: "录制正常收尾，已落盘")
+        }
+
         // Whisper 引擎在启动时就预热。
         //
         // 为什么在这里：引擎构造冷启动实测 17.03 秒（Metal kernel 编译），

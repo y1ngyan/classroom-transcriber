@@ -94,6 +94,35 @@ final class TranscriptionEngine {
     /// 本次开录的墙上时间（片段的 startedAt）
     private var partStartedAt: Date?
 
+    // MARK: - 录制草稿（P9-1）
+
+    /// 录制**途中**周期性交出快照，由 AppState 接到 `RecordingsStore.saveDraft`。
+    ///
+    /// 为什么由引擎推、而不是 Store 自己定时读：引擎才是 segments 和存档文件名
+    /// 的持有者，Store 手上没有「本次录制从哪一段开始」这个边界
+    /// （`sessionSegmentBase`），自己算就会把上一次录的内容重复写进草稿
+    var onSessionDraft: (@MainActor (RecordingDraft) -> Void)?
+
+    /// 收尾落盘成功后回调一次，通知「这份草稿已经多余了」。
+    ///
+    /// 和 `onSessionDraft` 分开而不是合成一个带 flag 的回调：这两件事的
+    /// **失败后果不同**——草稿写失败只是少了一份保险，而草稿没删掉会让
+    /// 重启后列表里冒出一条「未完成」，用户点恢复就得到重复的一份
+    var onDraftObsolete: (@MainActor (UUID) -> Void)?
+
+    /// 本次录制的草稿键。start() 时生成，stop() 用完即弃
+    private var draftID: UUID?
+    private var draftTask: Task<Void, Never>?
+
+    /// 草稿落盘间隔。
+    ///
+    /// 30 秒是**对着代价定的**，不是拍的：一份两小时课的草稿大约几百段、
+    /// 几十 KB，每 30 秒重写一次 = 一场课写下不到 10 MB，对 SSD 可以忽略；
+    /// 而崩溃最多丢 30 秒的转录文本。**音频不受这个间隔影响**——它已经
+    /// 流式落盘、崩溃时最多丢 1 秒（见 `WAVRecorder.headerRefreshBytes`）。
+    /// 更密只是多花 I/O 换一点文本，更疏则开始丢得让用户心疼
+    private static let draftInterval = Duration.seconds(30)
+
     /// 课堂提问检测灵敏度。只在段落**定稿**的那一刻跑一次——
     /// 未定稿的文本还会被反复改写，对半成品跑规则只会得到一会有一会没的假信号。
     var questionSensitivity: QuestionSensitivity = .normal
@@ -204,6 +233,7 @@ final class TranscriptionEngine {
         sessionSegmentBase = segments.count
         partStartedAt = Date()
         activeBackend = backend
+        startDraftLoop()
 
         // 后端二选一。Whisper 那条路**不走**下面这一整套：它不需要 locale、
         // 不需要装系统语言模型、也没有 SpeechAnalyzer 可建（模型是它自己的
@@ -1475,6 +1505,9 @@ final class TranscriptionEngine {
     // MARK: - 停止
 
     func stop() {
+        // 先停草稿循环再卸 tap：反过来的话，一条已经排队的草稿推送可能在
+        // 收尾落盘**之后**才落地，把一份过期的转录覆盖回去
+        stopDraftLoop()
         audioEngine?.inputNode.removeTap(onBus: 0)
         micTap = nil
         // 关闭语音处理，把音频设备还给系统
@@ -1585,12 +1618,69 @@ final class TranscriptionEngine {
             }
         }
 
+        // 落盘走完了，这次录制的草稿就没有意义了。**放在落盘之后**：
+        // 万一 `ingest` 抛错/进程恰好在这一刻被杀，「草稿被删了、会话也没写成」
+        // 是最坏的一种结局——保险要在主路径确认成功之后才烧掉
+        if let draftID {
+            onDraftObsolete?(draftID)
+            self.draftID = nil
+        }
+
         guard !statusMessage.hasPrefix("❌") else { return }
         var message = "已停止 · 共 \(segments.count) 段"
         if let url = recordingURL {
             message += " · 已存档 \(url.lastPathComponent)"
         }
         statusMessage = message
+    }
+
+    // MARK: - 录制草稿
+
+    /// 起一条定时任务，定期把「这次录制到此为止」交出去落成草稿。
+    ///
+    /// **第一次推在 30 秒之后，不是立刻**：此刻 `recordingURL` 还没建出来
+    /// （要等 `startMicrophone` 里 `makeRecorder`），立刻推的那一份会声称
+    /// 「本次没有音频文件」——崩溃后用户就会看到一条「未完成（无音频）」
+    /// **外加**一条「无会话的录音」，同一段录音被拆成两条报出来。
+    /// 前 30 秒空窗里崩溃的话，音频由「无会话的录音」那条路兜住，不会漏
+    private func startDraftLoop() {
+        draftTask?.cancel()
+        draftID = UUID()
+        draftTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: Self.draftInterval)
+                guard !Task.isCancelled, let self, self.isRunning else { return }
+                guard let snapshot = self.currentDraft() else { continue }
+                self.onSessionDraft?(snapshot)
+            }
+        }
+    }
+
+    private func stopDraftLoop() {
+        draftTask?.cancel()
+        draftTask = nil
+    }
+
+    /// 把「本次录制到此为止」打成一份草稿。
+    ///
+    /// **段落的取法与 `completeSession` 逐字相同**（`segments[sessionSegmentBase...]`、
+    /// 时长取「存档秒数 与 最后一段结束时间」的较大者）——不这么写，
+    /// 恢复出来的会话会和正常录完的会话在边界上差一段：要么把上一次录的
+    /// 内容重复算进来，要么把最后几秒丢掉
+    private func currentDraft() -> RecordingDraft? {
+        guard let draftID, let startedAt = partStartedAt else { return nil }
+        let base = min(sessionSegmentBase, segments.count)
+        let newSegments = Array(segments[base...])
+        let recordedSeconds = Int(recorder?.durationSeconds ?? 0)
+        return RecordingDraft(
+            id: draftID,
+            targetSessionID: sessionID,
+            recordingFileName: recordingURL?.lastPathComponent,
+            startedAt: startedAt,
+            durationMillis: max(recordedSeconds * 1000, newSegments.map(\.endTimeMillis).max() ?? 0),
+            segments: newSegments,
+            savedAt: Date()
+        )
     }
 
     /// 等待 stop() 的收尾流程跑完（自检用；UI 不需要，状态自己会刷新）
@@ -1613,6 +1703,10 @@ final class TranscriptionEngine {
         sessionID = nil
         sessionSegmentBase = 0
         partStartedAt = nil
+        // 草稿一起断掉：`clear()` 的语义是「这一课翻篇了」，
+        // 留着一个指向上一次的草稿键，下一次录制会把它当成自己的草稿覆盖掉
+        stopDraftLoop()
+        draftID = nil
         statusMessage = "就绪"
     }
 

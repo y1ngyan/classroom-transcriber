@@ -722,6 +722,122 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(0)
         }
 
+        // 崩溃恢复自检：--recovery-selftest（P9-1）
+        //
+        // **离线**：不联网、不加载模型、**不录音、不发声**；音频全是往临时目录里
+        // 写的静音缓冲，读写不碰用户真实的 sessions/ 与 recordings/。验三件事：
+        // WAV 头修复（正常的不动、过期的修对、非音频拒绝）· 草稿写入 → 模拟强杀
+        // → 恢复（逐字段相等）· 误报为零
+        if CommandLine.arguments.contains("--recovery-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = RecoverySelfTest.run()
+            for line in result.lines { print(line) }
+            print(result.failed == 0
+                  ? "✅ 崩溃恢复自检通过（\(result.passed) 条）"
+                  : "❌ 崩溃恢复自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 恢复扫描：--recovery-scan [--sessions <目录>] [--recordings <目录>] [--drafts <目录>]
+        //
+        // **只读、只报**：列出「有音频但没有完整会话」的录音，分类成
+        // 「未完成（有草稿可恢复）」「无会话的录音」「转录在、音频不在」。
+        // 它**不恢复也不删**——那是用户在录音列表里点了确认之后的事。
+        // 退出码恒 0：这是一份报告，不是一道闸
+        if CommandLine.arguments.contains("--recovery-scan") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            func directory(_ flag: String, _ fallback: URL) -> URL {
+                guard let raw = value(flag) else { return fallback }
+                return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
+            }
+            let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                in: .userDomainMask)[0]
+                .appendingPathComponent("ClassroomTranscriber", isDirectory: true)
+            let sessionsDir = directory("--sessions", base.appendingPathComponent("sessions", isDirectory: true))
+            let recordingsDir = directory("--recordings", base.appendingPathComponent("recordings", isDirectory: true))
+            let draftsDir = directory("--drafts", sessionsDir.appendingPathComponent("drafts", isDirectory: true))
+
+            print("崩溃恢复扫描（只读 · 不恢复、不删除 · 不播放音频）")
+            print("  会话目录：\(sessionsDir.path)")
+            print("  录音目录：\(recordingsDir.path)")
+            print("  草稿目录：\(draftsDir.path)")
+            print("")
+            let items = RecoveryScan.scan(sessionsDirectory: sessionsDir,
+                                          recordingsDirectory: recordingsDir,
+                                          draftsDirectory: draftsDir)
+            if items.isEmpty {
+                print("✅ 没有「未完成」的录音")
+            } else {
+                print("共 \(items.count) 条待处置：")
+                for item in items {
+                    print("  [\(item.kindLabel)] \(item.summary)")
+                }
+                print("")
+                print("（这里只列出来。恢复或丢弃要在 App 的录音列表里逐条确认）")
+            }
+            exitReleasingGgml(0)
+        }
+
+        // WAV 头修复：--wav-repair [--dir <目录>] [--apply]
+        //
+        // **默认只报不改**。要改必须显式加 `--apply`，而且每一处都会打印
+        // 「改了什么、原值是什么」、改完立刻用系统读取器验一遍。正常 wav
+        // 不在报告里、也一个字节不会被碰；非音频（文本存成 .wav 那种）拒绝修复
+        if CommandLine.arguments.contains("--wav-repair") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            let target = value("--dir")
+                .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+                ?? RecordingStorage.directory
+            let apply = args.contains("--apply")
+
+            print("WAV 头体检\(apply ? "（**已加 --apply：会真的改文件**）" : "（只报不改）")")
+            print("  目录：\(target.path)")
+            print("")
+            let defects = WAVHeaderRepair.scan(directory: target)
+            if defects.isEmpty {
+                print("✅ 所有 wav 的头都是对的")
+            } else {
+                let repairable = defects.filter { $0.defect.isRepairable }
+                print("共 \(defects.count) 个有问题的 wav（可修 \(repairable.count) 个）：")
+                for defect in defects { print("  \(defect.fileName) · \(defect.summary)") }
+
+                if apply {
+                    print("")
+                    print("── 开始修复 ──")
+                    for inspection in repairable {
+                        do {
+                            let outcome = try WAVHeaderRepair.apply(inspection)
+                            for line in outcome.lines { print(line) }
+                        } catch {
+                            print("  ❌ \(inspection.fileName)：\(error)")
+                        }
+                    }
+                    print("")
+                    // 这句话在「没有需要拒绝的文件」时也要读得通：
+                    // 「剩下 0 个一个字节都没动」会被读成「0 个文件没被动过」，
+                    // 而事实恰好相反——正常的 wav 本来就不进这份报告
+                    let refused = defects.count - repairable.count
+                    print(refused == 0
+                          ? "没有需要拒绝的文件；报告之外的 wav 本来就没进这份名单，也一个字节都没动"
+                          : "剩下 \(refused) 个**一个字节都没动**（非音频，拒绝修复）")
+                } else {
+                    print("")
+                    print("（要真的修，加 `--apply`。改之前请确认这些文件已经不需要保留原样了）")
+                }
+            }
+            exitReleasingGgml(0)
+        }
+
         // 诊断日志导出：--log-export [--tail N] [--out <文件>] [--dir <目录>]
         //
         // 给用户/接手者取现场用。不给 `--out` 就打到 stdout（默认最后 200 条）；
@@ -795,6 +911,126 @@ struct ClassroomTranscriberApp: App {
                 sink.log(.info, .app, "\(message)第 \(i) 条", fields: [.init("序号", i)])
             }
             print("已写入 \(count) 条到 \(directory.path)（消息前缀：\(message)）")
+            print("PID=\(getpid())")
+            print("现在等我被打死（kill -9）…")
+
+            // 死循环而不是 `exit()`：退出是「正常结束」，盘上有东西是理所当然的。
+            // 这条探针要证的是**进程被打死**之后盘上还有东西，两者不是一回事
+            while true { sleep(3600) }
+        }
+
+        // 崩溃恢复探针：--recovery-crash-probe [--dir <目录>] [--recover]
+        //
+        // **它活着的唯一目的是被 `kill -9`**，理由和上面那条日志探针逐字相同：
+        // 在同一个进程里「写完草稿再恢复」证明不了任何事——那时进程还活着，
+        // 录制循环也还活着，落盘路径根本没被中断过。只有真被打死（收不到任何
+        // 信号回调、没有 `atexit`、没有 `deinit`）之后，下一个进程还能从盘上
+        // 把草稿和音频捡回来，才说明 **P9-1 那条恢复路径是真的**。
+        //
+        // 不带 `--recover`：造出「用户音频已流式落盘、进程在头回填之前被杀」
+        // 那个现场（`WAVRecorder.drainForTesting()` 正是这个语义），打一个
+        // 死循环等死。带 `--recover`：打开同一个目录，走**和界面上点「恢复」
+        // 完全相同的那条路**（`RecordingsStore.recover`），把结果打出来。
+        //
+        // 配套脚本 `tools/probes/recovery_crash.sh`，一条命令跑完全部。
+        // **不录音、不发声、不联网、不加载模型**：音频是 `WAVRecorder` 写进
+        // 临时目录的静音缓冲，喇叭一动不动
+        if CommandLine.arguments.contains("--recovery-crash-probe") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            let root = value("--dir")
+                .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+                ?? FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ct-recovery-crash-probe", isDirectory: true)
+            let sessionsDir = root.appendingPathComponent("sessions", isDirectory: true)
+            let recordingsDir = root.appendingPathComponent("recordings", isDirectory: true)
+
+            if args.contains("--recover") {
+                // ── 第二个进程：重启之后走恢复 ──
+                print("崩溃恢复（第二个进程 · 走界面上那条 `RecordingsStore.recover`）")
+                let store = RecordingsStore(directory: sessionsDir, recordingsDirectory: recordingsDir)
+                let items = store.recoveryItems
+                print("  重启后扫出 \(items.count) 条待处置")
+                for item in items {
+                    print("    · \(item.kindLabel) · \(item.summary)")
+                    if let note = item.headerRepairNote { print("      音频头：\(note)") }
+                }
+                for item in items where item.isRecoverable { store.recover(item) }
+                if !store.recoveryNotes.isEmpty {
+                    print("  恢复时对音频头做的改动（原值 → 新值）：")
+                    for line in store.recoveryNotes { print(line) }
+                }
+                print("  恢复之后：\(store.summaries.count) 条正式会话 · 还剩 \(store.recoveryItems.count) 条待处置")
+                for summary in store.summaries {
+                    guard let session = store.session(id: summary.id) else { continue }
+                    for part in session.parts {
+                        print("    会话 \(session.id.uuidString) · 音频 \(part.fileName ?? "nil")"
+                              + " · \(part.segments.count) 段 · \(part.durationMillis)ms")
+                        for segment in part.segments {
+                            print("      [\(segment.startTimeMillis)–\(segment.endTimeMillis)] \(segment.text)")
+                        }
+                    }
+                }
+                exitReleasingGgml(0)
+            }
+
+            // ── 第一个进程：造出崩溃现场，然后等死 ──
+            // 每次从干净状态开始：上一轮的残留混进来，读回的现场就不是这一次的了。
+            // **只清自己那两个子目录，不动 `root` 本身**——调用方（探针脚本）会把
+            // stdout 重定向到 `root` 底下的文件里，把整个 root 删掉等于把那个 fd
+            // 指向的 inode 摘了：进程还在写，文件却从目录里消失（踩过）
+            for dir in [sessionsDir, recordingsDir] {
+                try? FileManager.default.removeItem(at: dir)
+            }
+            try? FileManager.default.createDirectory(at: recordingsDir, withIntermediateDirectories: true)
+
+            let fileName = "课堂-20260928-090000.wav"
+            let wav = recordingsDir.appendingPathComponent(fileName)
+            // 写到 2.3 秒**不 finish**：头停在 2.0 秒那一档
+            // （`headerRefreshBytes` = 96000 = 1 秒），正是被杀那一刻盘上的样子
+            guard let recorder = WAVRecorder(url: wav, sampleRate: 48_000, channels: 1) else {
+                print("❌ 建不出录音器"); exitReleasingGgml(1)
+            }
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                       channels: 1, interleaved: false)!
+            let frames = AVAudioFrameCount(48_000 / 10)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else {
+                print("❌ 建不出缓冲"); exitReleasingGgml(1)
+            }
+            buffer.frameLength = frames
+            for _ in 0..<23 { recorder.append(buffer) }
+            recorder.drainForTesting()
+
+            let startedAt = Date()
+            let segments = [
+                TranscriptSegment(text: "今天讲梯度下降。", isFinal: true,
+                                  startTimeMillis: 0, endTimeMillis: 1_200,
+                                  timestamp: startedAt, languages: ["zh-CN"]),
+                TranscriptSegment(text: "学习率太大会震荡。", isFinal: true,
+                                  startTimeMillis: 1_200, endTimeMillis: 2_000,
+                                  timestamp: startedAt, languages: ["zh-CN"]),
+                TranscriptSegment(text: "谁来回答一下？", isFinal: true,
+                                  startTimeMillis: 2_000, endTimeMillis: 2_300,
+                                  timestamp: startedAt, languages: ["zh-CN"]),
+            ]
+            let draft = RecordingDraft(
+                id: UUID(), targetSessionID: nil, recordingFileName: fileName,
+                startedAt: startedAt, durationMillis: 2_300, segments: segments, savedAt: startedAt
+            )
+            let store = RecordingsStore(directory: sessionsDir, recordingsDirectory: recordingsDir)
+            store.saveDraft(draft)
+
+            let draftURL = store.draftsDirectory.appendingPathComponent("\(draft.id.uuidString).json")
+            print("崩溃现场已就位（全部在临时目录，用户真实的库一个字节都没碰）")
+            print("  目录        \(root.path)")
+            print("  音频        \(wav.path)")
+            print("  音频字节    \((try? FileManager.default.attributesOfItem(atPath: wav.path))?[.size] as? Int ?? 0)")
+            print("  草稿        \(draftURL.path)")
+            print("  草稿段数    \(segments.count)")
             print("PID=\(getpid())")
             print("现在等我被打死（kill -9）…")
 
