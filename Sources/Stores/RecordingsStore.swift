@@ -427,6 +427,22 @@ final class RecordingsStore {
         }
         report(updated.segmentCount == 4, "两段的 segments 都在", "共 4 段")
 
+        // ── 2b. 反向段（end < start）：底层不许 trap，也不许把起点悄悄改掉 ──
+        //
+        // 触发条件与现场见 `RecordingSession.absoluteRange` 的注释：修之前这一段
+        // 会在 `..<` 上 SIGTRAP（exit 133，release 下一个字都不打印）。用户撞得到
+        // 它的入口是「生成课后笔记」，而那条要联网、要 key，进不了这条自检——
+        // 所以在这里钉住
+        var reversedSession = updated
+        reversedSession.parts[1].segments[0].startTimeMillis = 5_000
+        reversedSession.parts[1].segments[0].endTimeMillis = 3_000
+        let reversedRange = RecordingSession.absoluteRange(
+            of: reversedSession.parts[1].segments[0], in: reversedSession.parts[1])
+        report(reversedRange.isEmpty && reversedRange.lowerBound == 8_100 + 5_000,
+               "反向段：不 trap，是空区间且起点为声明的那个",
+               "绝对 \(reversedRange.lowerBound)–\(reversedRange.upperBound)"
+                + "（片段 2 偏移 8100 + start 5000）")
+
         // 追加后再换实例读回，确认落盘的不只是内存态
         let reread2 = RecordingsStore(directory: sessionsDir, recordingsDirectory: recordingsDir)
         report(reread2.session(id: session.id)?.parts.count == 2, "追加结果已落盘")

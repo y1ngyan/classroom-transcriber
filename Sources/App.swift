@@ -593,6 +593,19 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 反向转录段自检：--reverse-selftest
+        // （离线：内存夹具 + 只读扫真实会话报数；不联网、不加载模型、不碰音频、不发声）
+        //
+        // 修的是 `RecordingSession.absoluteRange` 对反向段（end < start）的
+        // `..<` trap：那条路径原来能让 `--study-notes <会话 json>` 直接 exit 133
+        // 且一个字都不打印。退出码跟着红绿走，理由同上面那条
+        if CommandLine.arguments.contains("--reverse-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = ReverseSegmentSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 真实录音回归重复段去重：--dedup-file <wav>
         // 走引擎的 upsert（实时同款 progressive 预设），同时用旧逻辑离线重放
         // 作对照——--transcribe-file 只打印定稿结果，复现不了重复段
@@ -879,6 +892,19 @@ struct ClassroomTranscriberApp: App {
                     let glossary = GlossaryStore().entries
                     print("会话 \(session.id.uuidString.prefix(8)) · \(session.segmentCount) 段"
                         + " · \(session.durationMillis / 60_000) 分钟 · 术语表 \(glossary.count) 条")
+                    // 反向段**要看得见**。C-4 给了它们定义好的行为（当零长处理，
+                    // 不再 SIGTRAP），但那等于「不崩也不喊」——这条入口是最容易
+                    // 撞上它的地方（锚点索引要遍历每一段的起点），所以在这里报一句。
+                    // 修之前这条路径在这行之后直接 exit 133，一个字的告警都没有
+                    let reversedSegments = RecordingSession.reversedSegments(in: session)
+                    if !reversedSegments.isEmpty {
+                        print("⚠️ 这条会话有 \(reversedSegments.count) 段时间反向（end < start）："
+                            + "按零长处理，不参与锚点与说话人判定")
+                        for segment in reversedSegments.prefix(5) {
+                            print("   \(segment.startTimeMillis) → \(segment.endTimeMillis)"
+                                + " · \(segment.text.prefix(20))")
+                        }
+                    }
                     print("──────────── 生成中 ────────────")
 
                     let outcome = try await StudyNotesService.generate(

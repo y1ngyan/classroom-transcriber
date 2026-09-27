@@ -81,7 +81,12 @@ enum SpeakerMapper {
             let segmentStart = range.lowerBound
             let segmentEnd = range.upperBound
 
-            // 零长/反向的转录段直接不标。下面算 ratio 要除以 (b−a)，这里不拦住就是除零
+            // 零长/反向的转录段直接不标。下面算 ratio 要除以 (b−a)，这里不拦住就是除零。
+            //
+            // **这个 guard 曾经是死代码**：反向段在上一行的 `absoluteRange` 里就被
+            // `..<` 的运行时检查 SIGTRAP 掉了（exit 133），根本走不到这里。
+            // C-4 修好 `absoluteRange`（反向返回空区间）之后它才真的可达——
+            // 也就是说这条「不标」的规则现在由它独自承担，别再让它变成装饰
             guard segmentEnd > segmentStart else {
                 output[segment.id] = .unlabeled
                 continue

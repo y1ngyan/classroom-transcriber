@@ -137,6 +137,14 @@ struct DiarizationStats: Equatable {
     var unlabeledNoMajority = 0
     var mixed = 0
     var speakerCount = 0
+    /// 转录里**时间反向**的段数（`end < start`）。正常恒为 0。
+    ///
+    /// 单独计数而不是让它混进 `unlabeledNoOverlap`：那一桶的含义是「这里没人
+    /// 说话」（一段正常的判读），反向段的含义是「这条数据本身坏了」——两件事
+    /// 合成一个数字，就再也分不出「这节课安静」和「这条会话是坏的」。
+    /// 底层（`RecordingSession.absoluteRange`）对反向段的行为是「当零长处理」，
+    /// 所以它**不会崩**，但也**不会自己喊**——喊的工作在这一格
+    var reversedTranscriptSegments = 0
     var spanCount = 0
     var audioSeconds: Double = 0
     var helperWallSeconds: Double = 0
@@ -179,7 +187,12 @@ struct DiarizationEvaluation {
             + "（\(String(format: "%.1f", stats.annotationRate * 100))%）"
             + " · 含多人 \(stats.mixed)"
             + " · 未标注·无有效重叠 \(stats.unlabeledNoOverlap)"
-            + " · 未标注·无多数派 \(stats.unlabeledNoMajority)")
+            + " · 未标注·无多数派 \(stats.unlabeledNoMajority)"
+            // 只在**真的出现**时才多打这一格：正常会话（反向段 0 条）的报告行
+            // 一个字节都不变，C-3-1 已核验的那三行格式不受影响
+            + (stats.reversedTranscriptSegments == 0
+                ? ""
+                : " · ⚠️ 反向转录段 \(stats.reversedTranscriptSegments)（数据异常，按零长处理）"))
         return lines
     }
 }
@@ -477,21 +490,17 @@ enum SpeakerDiarizationService {
 
         for partIndex in updated.parts.indices {
             let part = updated.parts[partIndex]
-            // 反向的转录段（start > end）**不能交给 `assign`**。它在里面会先被
-            // `RecordingSession.absoluteRange` 拿 `..<` 拼成 `9000..<1000`，
-            // 而 Swift 6 的 `Range` 那个运算符是**带检查**的：实测直接 SIGTRAP，
-            // 退出码 133 且 release 下不打印任何东西（`swiftc -O -swift-version 6`
-            // 编 `let r = a..<b`，a=9000/b=1000 → 133；换成
-            // `Range(uncheckedBounds:)` 同一个进程正常退出）。
-            // 也就是说 `assign` 里那句「反向/零长不标」的 guard 对它永远到不了——
-            // 判断必须在构造 Range 之前做。
+            // 反向段**照原样交给 `assign`**，这里不再预先滤掉。
             //
-            // 这里比的是**片段内相对时间**，不是另起一套「片段轴 → 会话轴」换算：
-            // 两边加的是同一个 `offsetMillis`，比大小与在会话轴上等价。
-            // 零长（start == end）能安全构造出空区间，照常交给 `assign`（它另有 guard）
-            let mappable = part.segments.filter { $0.endTimeMillis >= $0.startTimeMillis }
+            // C-3-1 曾在这里滤一道（`filter { end >= start }`），因为那时底层
+            // `RecordingSession.absoluteRange` 拿 `..<` 拼 `9000..<1000` 会
+            // SIGTRAP（exit 133，release 下不打印任何东西），而 `assign` 里那句
+            // 「反向/零长不标」的 guard 因此**永远到不了**。C-4 把底层改成了
+            // 反向返回空区间，guard 就此可达，滤这一道反而把它重新盖回死代码——
+            // 留着就是「看着有防御、其实没人走」的那种骗人的代码
+            stats.reversedTranscriptSegments += part.segments.filter(RecordingSession.isReversed).count
             let assignments = SpeakerMapper.assign(
-                transcript: mappable,
+                transcript: part.segments,
                 part: part,
                 diarization: diarization,
                 // **会话**音频总长（不是本片段的）：C-1 裁决 2 点名的坑，

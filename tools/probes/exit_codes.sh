@@ -7,7 +7,7 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **七个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **八个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -175,6 +175,11 @@ run_assert "--study-notes-ui-selftest" "✅ 课后笔记界面自检通过（53 
 # 对照（另外还有对照信封与不变量扫描），所以这里最容易出的问题同样是
 # 「一条用例都没跑、进程照样 0 退出」——条数必须钉住
 run_assert "--diarize-selftest" "✅ 说话人识别自检通过（82 条）" --diarize-selftest
+# 反向转录段（C-4）。离线：内存夹具 + 只读扫真实会话报数。这条修的是
+# `absoluteRange` 对 `end < start` 的 `..<` trap——那个 trap 的表现是
+# **进程直接 SIGTRAP（133）且一个字都不打印**，所以「看输出都对」在这里
+# 完全失效，退出码本身才是判据。条数照样钉住，理由同上
+run_assert "--reverse-selftest" "✅ 反向段自检通过（19 条）" --reverse-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -219,6 +224,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含七个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含八个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

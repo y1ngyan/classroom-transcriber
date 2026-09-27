@@ -85,8 +85,44 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     /// segments 存的是相对各自片段 0 点的时间（引擎吐出来的原样），
     /// 展示层要绝对时间就加片段的 offset——这是「接着录」两段录音
     /// 时间轴拼起来的唯一换算，全在这一处
+    ///
+    /// **反向段（`end < start`）返回空区间，绝不交给 `..<`。** Swift 6 的
+    /// `Range` 那个运算符是**带检查**的，`lower > upper` 直接 SIGTRAP——实测
+    /// 退出码 133，且 release 下**一个字都不打印**（`swiftc -O -swift-version 6`
+    /// 编 `let a = 9000, b = 1000; let r = a..<b` → 133；同一个进程换成
+    /// `Range(uncheckedBounds:)` 正常退出；`9000..<9000` 也正常，`isEmpty` 为真）。
+    /// 这个 trap 让「查一条会话的笔记」这种只读操作能整段崩掉，见 `isReversed`。
+    ///
+    /// **为什么是空区间，不是归一化成 `min..<max`**：归一化要**悄悄改掉起点**，
+    /// 而反向段的两个端点里没有一个能声称是「它开始说话的时刻」——取谁都是编。
+    /// 空区间说的是实话（「这一段在时间轴上没有长度」），同时把 `start` 原样
+    /// 留在 `lowerBound` 上：`StudyNotesService` 的两处锚点要的正是这个起点，
+    /// 它们的行为在修前修后完全一致。长度相关的下游行为由各自的调用方定——
+    /// `SpeakerMapper` 见到零长区间判「不标」（见那里的 guard）
     static func absoluteRange(of segment: TranscriptSegment, in part: RecordingPart) -> Range<Int> {
-        (part.offsetMillis + segment.startTimeMillis)..<(part.offsetMillis + segment.endTimeMillis)
+        let start = part.offsetMillis + segment.startTimeMillis
+        let end = part.offsetMillis + segment.endTimeMillis
+        guard end > start else { return start..<start }
+        return start..<end
+    }
+
+    /// 这一段的时间是不是反的（`end < start`）。**纯判定，不改数据、不打印**。
+    ///
+    /// 为什么不把它塞进 `absoluteRange` 里记账：那个函数是纯函数（无 IO、
+    /// 无全局状态、同输入同输出），自检靠这一点断言。可见性交给调用方按需取——
+    /// 见 `reversedSegments(in:)`、`--study-notes` 的告警行，以及
+    /// `DiarizationStats.reversedTranscriptSegments`。
+    ///
+    /// 只看 segment 自己的两个值，不关片段 offset 的事：offset 对两边加的是
+    /// 同一个数，反不反向与它无关
+    static func isReversed(_ segment: TranscriptSegment) -> Bool {
+        segment.endTimeMillis < segment.startTimeMillis
+    }
+
+    /// 整条会话里时间反向的段（按片段顺序）。**诊断用**：让「这里有反向段」
+    /// 看得见，而不是等某个调用点行为诡异了再回头猜
+    static func reversedSegments(in session: RecordingSession) -> [TranscriptSegment] {
+        session.parts.flatMap(\.segments).filter(isReversed)
     }
 }
 
