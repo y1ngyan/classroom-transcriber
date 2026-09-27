@@ -1,0 +1,3 @@
+[submodule "Vendor/FluidAudio"]
+	path = Vendor/FluidAudio
+	url = https://github.com/FluidInference/FluidAudio

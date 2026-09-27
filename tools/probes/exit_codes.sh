@@ -7,7 +7,7 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **六个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
+# **七个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）：
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -19,13 +19,16 @@
 #     「用例一条都没跑，进程也是 0 退出」
 #   · `--study-notes-ui-selftest`：课后笔记界面档位总结行——同上。这一条覆盖的
 #     是**界面判断**，那条路没有窗口可点，只能靠纯函数 + 这条断言
+#   · `--diarize-selftest`：说话人识别总结行——同上。这一条**离线**（helper 是
+#     临时目录里的桩脚本）。它里面有五组「注入一个缺陷 → 判据必须变红」的对照，
+#     所以「用例一条都没跑」在这里的表现同样是「进程 0 退出、什么都没测」
 #
 # 用法：
 #   ./tools/probes/exit_codes.sh            # 不碰麦克风的入口（默认）
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且六个断言都命中。
+# 退出码 0 = 跑到的入口全部 exit=0、且七个断言都命中。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -167,6 +170,11 @@ run_assert "--study-notes-selftest" "✅ 学习笔记自检通过（44 条）" -
 # 「16 种输入组合里没有一种禁用了却不说为什么」+ 自动跑那三条闸（不覆盖、
 # 不并发、没 key 不跑）。条数照样要钉，理由同上
 run_assert "--study-notes-ui-selftest" "✅ 课后笔记界面自检通过（53 条）" --study-notes-ui-selftest
+# 说话人识别（C-3-1）。**离线**：helper 是临时目录里的桩脚本，不加载模型、
+# 不联网、不碰麦克风。五条校验各有一组「注入一个缺陷 → 对应判据必须变红」的
+# 对照（另外还有对照信封与不变量扫描），所以这里最容易出的问题同样是
+# 「一条用例都没跑、进程照样 0 退出」——条数必须钉住
+run_assert "--diarize-selftest" "✅ 说话人识别自检通过（82 条）" --diarize-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -211,6 +219,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含六个断言）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含七个断言）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

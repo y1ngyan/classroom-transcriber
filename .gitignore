@@ -1,4 +1,8 @@
 # 构建产物。build.sh 每次都先 rm -rf 再重建，里面全是生成物
 build/
 
+# SwiftPM 的构建目录（Vendor/DiarizeHelper/.build/）。二进制不进仓库——
+# 进 bundle 的那一份是 build.sh 从这里拷过去的
+.build/
+
 .DS_Store

@@ -1,6 +1,9 @@
 import SwiftUI
 import Speech
 import AVFoundation
+// 只给 `--diarize-real` 用：证明它没动用户那条会话文件（前/后 sha256 一致）。
+// App 别处不引它——`SpeakerDiarizationService` 的段指纹刻意不用哈希
+import CryptoKit
 
 // `HeadlessEntry` 在 Sources/HeadlessEntry.swift——**故意不在这个文件里**，
 // 因为 `AppState.swift` 要引用它，而三个探针脚本组源码表时排除本文件（见那里的注释）
@@ -932,6 +935,125 @@ struct ClassroomTranscriberApp: App {
                       ? "✅ 课后笔记界面自检通过（\(passed) 条）"
                       : "❌ 课后笔记界面自检未通过（过 \(passed) / 红 \(failed)）")
                 exitReleasingGgml(failed == 0 ? 0 : 1)
+            }
+        }
+
+        // 说话人识别自检：--diarize-selftest
+        //
+        // **离线**：不联网、不加载模型、不碰麦克风、不发声。helper 是临时目录里的
+        // 桩脚本，读写全在临时目录。它验的是「5 条校验各自会不会红」「失败会不会
+        // 被伪装成全员 S1」「低置信会不会硬标」「编号是不是从 S1 起」
+        //
+        // 退出码跟着红绿走——不看退出码的话，探针分不出它是红是绿
+        if CommandLine.arguments.contains("--diarize-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            // 起真进程（桩）+ 真等子进程退出，是 async 的，只能在主 actor 上收尾
+            Task { @MainActor in
+                let result = await SpeakerDiarizationService.selfTest()
+                for line in result.lines { print(line) }
+                print(result.failed == 0
+                      ? "✅ 说话人识别自检通过（\(result.passed) 条）"
+                      : "❌ 说话人识别自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+                exitReleasingGgml(result.failed == 0 ? 0 : 1)
+            }
+        }
+
+        // 真实端到端：--diarize-real <会话 json>
+        //
+        // **只读**用户的会话文件与录音。派单第 5 条要的就是「拿一条真会话跑真模型」，
+        // 所以这条入口：① 把会话 json 复制到临时目录再跑（原文件一个字节都不碰）；
+        // ② 前后各算一次原文件 sha256 并对比，把「没动用户数据」变成**入口自己
+        // 打出来的判据**，而不是靠人另外跑一次 shasum；③ 零 API 花费（纯本地模型）
+        //
+        // 结果**不落盘**：写真实会话由用户在详情页点击触发，那是 C-3-2
+        if let idx = CommandLine.arguments.firstIndex(of: "--diarize-real"),
+           idx + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[idx + 1]
+            Task { @MainActor in
+                func sha256(of url: URL) -> String {
+                    guard let data = try? Data(contentsOf: url) else { return "读不到" }
+                    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                }
+                let original = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                let digestBefore = sha256(of: original)
+                var failures = 0
+                defer { exitReleasingGgml(failures == 0 ? 0 : 1) }
+
+                print("说话人识别 · 真实端到端（只读原会话 · 本地模型 · 零 API 花费）")
+                print("原会话：\(original.path)")
+                print("原文件 sha256（跑之前）：\(digestBefore)")
+
+                guard let source = try? Data(contentsOf: original),
+                      let session = try? JSONDecoder().decode(RecordingSession.self, from: source)
+                else {
+                    print("❌ 会话文件读不出来或解不开")
+                    failures += 1
+                    return
+                }
+
+                // 复制到临时目录再跑。原文件本来就是只读打开的，这一步是**多一层保险**：
+                // 把「跑的时候到底对着哪份文件」也变成可打印的事实
+                let sandbox = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("diarize-real-\(session.id.uuidString)")
+                let copy = sandbox.appendingPathComponent("session.json")
+                try? FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+                try? source.write(to: copy)
+
+                print("会话 \(session.id.uuidString.prefix(8)) · \(session.segmentCount) 段"
+                    + " · \(session.durationMillis / 60_000) 分钟 · \(session.parts.count) 个片段")
+                print("临时副本：\(copy.path)")
+
+                guard let helper = DiarizeHelperLocator.locate() else {
+                    print("❌ app bundle 里找不到 diarize-helper")
+                    failures += 1
+                    return
+                }
+                print("helper：\(helper.path)")
+
+                // 首跑就位。**只在这里做**——每跑一次都去碰用户的模型目录，
+                // 而那个动作（搬移）是有破坏性的
+                let provision = SpeakerModelStore.provision()
+                let modelsDirectory = SpeakerModelStore.modelsDirectory
+                print("模型目录：\(modelsDirectory.path)")
+                switch provision {
+                case .inPlace:
+                    print("模型就位：已在位（什么都不动）")
+                case .moved(let bytes, let seconds):
+                    print(String(format: "模型就位：首跑搬移 · %.2f MB · 耗时 %.3f 秒",
+                                 Double(bytes) / 1_048_576, seconds))
+                case .unavailable(let reason):
+                    print("❌ 模型没就位：\(reason)")
+                    failures += 1
+                    return
+                }
+
+                print("──────────── 推理中 ────────────")
+                let startedAt = Date()
+                let report = await SpeakerDiarizationService.diarize(
+                    session: session, helper: helper, modelsDirectory: modelsDirectory)
+                for line in report.evaluation.report() { print(line) }
+                print(String(format: "   本次墙钟（含起进程）：%.2f 秒 · 超时上限 %.0f 秒",
+                             Date().timeIntervalSince(startedAt), report.timeoutSeconds))
+
+                if !report.evaluation.isOK, !report.run.stderrTail.isEmpty {
+                    print("   helper stderr 尾巴：")
+                    for line in report.run.stderrTail.split(separator: "\n").suffix(8) {
+                        print("     \(line)")
+                    }
+                }
+
+                // 原文件没被动过——这条判据**会红**：哪个环节回写了会话文件，
+                // 前后 sha 就不一样
+                let digestAfter = sha256(of: original)
+                print("原文件 sha256（跑完）：\(digestAfter)")
+                if digestAfter == digestBefore {
+                    print("✅ 原会话文件前后一致（sha256 未变，只读）")
+                } else {
+                    print("❌ 原会话文件被改动了！")
+                    failures += 1
+                }
+                if !report.evaluation.isOK { failures += 1 }
             }
         }
 
