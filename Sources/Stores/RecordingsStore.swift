@@ -103,6 +103,12 @@ final class RecordingsStore {
             try encoder.encode(session).write(to: fileURL(for: session.id), options: .atomic)
         } catch {
             statusMessage = "❌ 会话保存失败: \(error.localizedDescription)"
+            // 这条失败原本只变成界面上一句 statusMessage，用户划过去就没了。
+            // 而它意味着**这节课的转录没落盘**——最该留下现场的一类失败
+            DiagnosticLog.error(.storage, "会话保存失败", fields: [
+                .init("sessionId", session.id),
+                .init("原因", error.localizedDescription),
+            ])
             return
         }
 
@@ -115,6 +121,21 @@ final class RecordingsStore {
         }
         summaries.sort { $0.startedAt > $1.startedAt }
         persistIndex()
+
+        // 脏数据告警（派单书点名的那类）。**只在不为零时记**：正常会话每存
+        // 一次都写一条「0 段反向」，环形那 1 MB 会被这种噪声占满，
+        // 真要查的时候现场已经滚掉了。
+        //
+        // 判据借 C-4 那个纯函数，不在这里另写一遍——两处判定迟早会漂移，
+        // 而漂移的那天没人会发现（两边各自都"看着对"）
+        let reversed = RecordingSession.reversedSegments(in: session).count
+        if reversed > 0 {
+            DiagnosticLog.warn(.data, "会话里含反向转录段", fields: [
+                .init("sessionId", session.id),
+                .init("反向段", reversed),
+                .init("总段数", session.segmentCount),
+            ])
+        }
     }
 
     // MARK: - 改名 / 课程
@@ -297,6 +318,12 @@ final class RecordingsStore {
             try encoder.encode(summaries).write(to: indexURL, options: .atomic)
         } catch {
             statusMessage = "❌ 会话索引保存失败: \(error.localizedDescription)"
+            // 索引是派生数据（下次启动会重建），比正文丢失轻，但它坏掉时
+            // 用户看到的是「列表页少了几条」——那种现象最容易被归咎于
+            // 「App 把我的录音弄丢了」，所以这里要留下「是索引，不是正文」
+            DiagnosticLog.error(.storage, "会话索引保存失败", fields: [
+                .init("原因", error.localizedDescription),
+            ])
         }
     }
 

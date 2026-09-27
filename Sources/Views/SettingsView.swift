@@ -16,6 +16,7 @@ struct SettingsView: View {
                 deepSeekSection()
                 searchSection()
                 cosSection()
+                diagnosticsSection()
                 fileFooter
             }
             .padding(.horizontal, Theme.pagePadding)
@@ -306,6 +307,44 @@ struct SettingsView: View {
                     result: store.cosTestResult,
                     action: { Task { await store.testCOS() } }
                 )
+            }
+        }
+    }
+
+    // MARK: - 诊断日志（P6-1）
+
+    /// 这一节不配置任何东西，只提供「把现场取出来」这一个动作。
+    ///
+    /// 规格上它是 `SettingsSection` 的另一种用法——没有步骤、只有一个按钮
+    /// 和一条说明，和「录音与识别」那一节同一种做法。分组靠留白和发丝线，
+    /// 没有框也不该有
+    private func diagnosticsSection() -> some View {
+        SettingsSection(
+            title: "诊断日志",
+            subtitle: "出问题时留下的现场。日志只记「发生了什么」——级别、类别、时长、"
+                + "退出码、段数；密钥和你的转录正文都不会写进去。"
+        ) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                HStack(spacing: Theme.Spacing.lg) {
+                    PillButton(
+                        title: "导出诊断日志",
+                        systemImage: "square.and.arrow.up",
+                        style: .quiet
+                    ) {
+                        store.exportDiagnostics()
+                    }
+                    Spacer()
+                }
+
+                if let result = store.diagnosticsExport {
+                    StatusMark(kind: result.ok ? .ok : .error, text: result.detail)
+                }
+
+                // 说清它会自己封顶——不然「日志」两个字让人担心它哪天把盘写满
+                // 不写 `**强调**`：这里的文案是以 `String` 变量喂进 `Text` 的，
+                // 不走 markdown 解析，星号会原样显示出来（C-3-2 踩过）
+                note("日志目录：\(DiagnosticLog.directoryPath)。最多 4 个文件、约 1 MB，"
+                     + "写满之后自动丢掉最老的，不会一直长大。")
             }
         }
     }

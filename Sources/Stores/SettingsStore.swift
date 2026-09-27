@@ -46,6 +46,9 @@ final class SettingsStore {
     private(set) var isTestingSearch = false
     private(set) var cosTestResult: TestResult?
     private(set) var searchTestResult: TestResult?
+    /// 「导出诊断日志」的结果。和另外两个分开：那个导出不是一次「测试」，
+    /// 而是把文件写到桌面上——写没写成、写到哪儿，都得说得出来
+    private(set) var diagnosticsExport: TestResult?
 
     /// 有过一次「看起来在跑、其实没生效」之后，测试结果就带上了颜色和图标
     struct TestResult {
@@ -57,6 +60,35 @@ final class SettingsStore {
 
     /// 从磁盘读回表单。每次进设置页都重来一遍：这一页显示的就该是
     /// 文件里真实的值，而不是上次编辑残留的草稿。
+    /// 把诊断日志导出成一个文件。
+    ///
+    /// **落在桌面上**，不是落在 `logs/` 旁边：导出这件事的意义就是把它交给
+    /// 别人（或换个时间自己看），而 Application Support 那个路径从 Finder
+    /// 要走「前往文件夹」才够得着。路径原样显示在结果里，用户不用猜
+    ///
+    /// 条数给 5000：默认上限 1 MB、每条约 120 字节，那是**全部**的量级，
+    /// 所以「导出」导出的是整份现场，不是最近一小段
+    func exportDiagnostics() {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let name = "课堂转录-诊断日志-\(formatter.string(from: Date())).txt"
+        let url = FileManager.default
+            .urls(for: .desktopDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(name)
+
+        let exported = DiagnosticLog.exportText(directory: DiagnosticLog.defaultDirectory, limit: 5000)
+        do {
+            try exported.text.write(to: url, atomically: true, encoding: .utf8)
+            diagnosticsExport = TestResult(
+                ok: true,
+                detail: "已导出 \(exported.count) 条（\(exported.fileCount) 个文件）到 \(url.path)")
+        } catch {
+            diagnosticsExport = TestResult(
+                ok: false, detail: "导出失败：\(error.localizedDescription)")
+        }
+    }
+
     func reload() {
         // 先让 AppConfig 自己重读一遍文件。少了这一步，这里读到的是
         // 进程启动时那份内存副本——文件被外部改过（用户拿编辑器改、

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -54,6 +55,20 @@ final class AppState {
             guard let self else { return UUID() }
             let session = self.recordings.ingest(draft)
 
+            // 转录结束与录音落盘分开记：它们是两件事（一份音频可以转录失败
+            // 但仍然存档，反过来也一样），判据要能分开数
+            DiagnosticLog.info(.transcription, "转录结束", fields: [
+                .init("sessionId", session.id),
+                .init("本次段数", draft.segments.count),
+                .init("累计段数", session.segmentCount),
+                .init(seconds: "本次时长", Double(draft.durationMillis) / 1000),
+            ])
+            DiagnosticLog.info(.recording, "录音落盘", fields: [
+                .init("sessionId", session.id),
+                .init("片段", session.parts.count),
+                .init(seconds: "累计时长", Double(session.durationMillis) / 1000),
+            ])
+
             // 录完自动跑一次课后笔记（拍板 2c）。**只在这条会话还没有笔记时**
             // 才跑——判断在 `autoGenerateIfNeeded` 里，它同时把「已存在」
             // 「没配密钥」「已经在跑」三种情况挡掉了。
@@ -83,6 +98,30 @@ final class AppState {
         if AppConfig.transcriptionBackend == .whisper, !HeadlessEntry.isActive {
             transcription.whisper.warmUp()
         }
+
+        // 诊断日志（P6-1）：进程的开头和结尾各记一条。
+        //
+        // **无头入口不记**：那些入口是这个仓库一天跑几十次的东西，
+        // 每次都往用户真实的 `logs/` 里塞一条「启动」，环形那 1 MB
+        // 会被自检挤掉——真正要留的现场（昨晚那节课的失败）反而没了。
+        // 判据和预热那边共用一条 `HeadlessEntry.isActive`，一处就够
+        if !HeadlessEntry.isActive {
+            DiagnosticLog.info(.app, "启动", fields: [
+                .init("后端", AppConfig.transcriptionBackend.rawValue),
+                .init("增益", AppConfig.micGain.rawValue),
+                .init("日志目录", DiagnosticLog.directoryPath),
+            ])
+
+            // 退出的写法是通知，不是 `deinit`：`AppState` 是 `App` 的
+            // `@State` 属性，进程结束时**不保证被释放**——`deinit` 里写的
+            // 日志多半根本不会执行，而那种失败是静默的（少一条日志，
+            // 谁也不看得出来）。`willTerminateNotification` 是确定会到的
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+            ) { _ in
+                DiagnosticLog.info(.app, "退出")
+            }
+        }
     }
 
     /// 开始转录。术语表在这里灌给识别器。
@@ -101,6 +140,14 @@ final class AppState {
         // 整条采集链路（analyzer 或滑窗），两边的段语义也不同，中途换会让
         // 同一份转录里混着两条链路的输出。要换后端就停下再开始
         transcription.backend = settings.backend
+        // 「起录那一刻定下来的那几个档」正是这个函数上面刚写的几行，
+        // 所以它们就是这条日志该记的内容——出事之后要回答的是
+        // 「当时用的是哪个后端、哪个增益档」，而不是「现在的设置页填的是什么」
+        DiagnosticLog.info(.transcription, "转录开始", fields: [
+            .init("后端", settings.backend.rawValue),
+            .init("增益", settings.micGain.rawValue),
+            .init("术语", glossary.contextualTerms.count),
+        ])
         await transcription.requestPermissions()
         await transcription.start()
     }

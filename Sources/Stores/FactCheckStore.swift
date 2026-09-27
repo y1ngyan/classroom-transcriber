@@ -152,6 +152,13 @@ final class FactCheckStore {
                     claim: claim,
                     phase: .failed(error.localizedDescription)
                 )
+                // API 调用失败。**只记错误本身，不记请求体**——上面那句
+                // `claim` 是这一段的待核查主张，属于用户正文，不进日志。
+                // 要定位是哪一段，`segmentId` 够用了
+                DiagnosticLog.error(.network, "联网核查失败", fields: [
+                    .init("segmentId", segmentID),
+                    .init("原因", error.localizedDescription),
+                ])
             }
             inFlight.remove(key)
         }

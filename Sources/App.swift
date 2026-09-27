@@ -637,6 +637,105 @@ struct ClassroomTranscriberApp: App {
             }
         }
 
+        // 诊断日志自检：--log-selftest（P6-1）
+        //
+        // **离线**：不联网、不加载模型、不碰音频、不发声；所有写入都落在自己造的
+        // 临时目录里，**用户真实的 `logs/` 一个字都不碰**（同 `--study-notes-ui-selftest`
+        // 立的那条规矩）。它验的是：级别过滤 · 环形轮转（最老的被丢、最新的在）·
+        // 上限不增长 · 脱敏（假密钥形状的串不出现在文件里）· 崩溃前最后 N 条可读。
+        //
+        // 退出码跟着红绿走——不看退出码的探针分不出它是红是绿
+        if CommandLine.arguments.contains("--log-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = DiagnosticLogSelfTest.run()
+            for line in result.lines { print(line) }
+            print(result.failed == 0
+                  ? "✅ 日志自检通过（\(result.passed) 条）"
+                  : "❌ 日志自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 诊断日志导出：--log-export [--tail N] [--out <文件>] [--dir <目录>]
+        //
+        // 给用户/接手者取现场用。不给 `--out` 就打到 stdout（默认最后 200 条）；
+        // 给了就写成一个文件并打印路径。`--dir` 只有探针用得上——默认读的就是
+        // App 真实那份日志
+        if CommandLine.arguments.contains("--log-export") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            let limit = value("--tail").flatMap(Int.init) ?? 200
+            let directory = value("--dir")
+                .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+                ?? DiagnosticLog.defaultDirectory
+
+            // 正文由 `DiagnosticLog.exportText` 出——和设置页那个按钮同一份，
+            // 免得两处的头各写各的、哪天对不上
+            let exported = DiagnosticLog.exportText(directory: directory, limit: limit)
+
+            if let out = value("--out") {
+                let url = URL(fileURLWithPath: (out as NSString).expandingTildeInPath)
+                do {
+                    // `.atomic`：导出的这份是要发给别人看的东西，
+                    // 写一半被打断留下半个文件比没有更糟
+                    try exported.text.write(to: url, atomically: true, encoding: .utf8)
+                    print("✅ 已导出 \(exported.count) 条到 \(url.path)")
+                } catch {
+                    print("❌ 导出失败：\(error.localizedDescription)")
+                    exitReleasingGgml(1)
+                }
+            } else {
+                print(exported.text, terminator: "")
+            }
+            exitReleasingGgml(0)
+        }
+
+        // 崩溃恢复探针：--log-crash-probe [--dir <目录>] [--lines N] [--message <串>]
+        //
+        // `--message` 是给「脱敏实测」用的：把一条假密钥塞进消息里，走**真实的
+        // 那个 sink**（脱敏 → 写盘），再从盘上 grep 它——在内存里断言
+        // 「我脱敏对了」证明不了落盘的那一串是干净的
+        //
+        // **它活着的唯一目的是被 `kill -9`**。写 N 条日志之后打一个死循环，
+        // 等外面把它打死，再由 `--log-export` 读回来——那是「崩溃后仍能读到
+        // 崩溃前最后 N 条」这句要求的**唯一**验证方式：在同一个进程里
+        // 「写完再读」证明不了任何事，那时进程还活着、缓冲（如果有的话）
+        // 还在内存里。配套脚本见 `tools/probes/log_crash.sh`
+        if CommandLine.arguments.contains("--log-crash-probe") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+                return args[i + 1]
+            }
+            let count = value("--lines").flatMap(Int.init) ?? 50
+            let directory = value("--dir")
+                .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+                ?? FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ct-log-crash-probe", isDirectory: true)
+
+            // 每次从干净状态开始：上一轮的残留混进来，读回的「最后 N 条」
+            // 就分不清是哪一次的现场了
+            let writer = LogRingWriter(directory: directory)
+            writer.removeAllFiles()
+
+            let message = value("--message") ?? "崩溃探针"
+            let sink = DiagnosticLogSink(directory: directory, minimumLevel: .debug, mirrorToOSLog: false)
+            for i in 1...max(1, count) {
+                sink.log(.info, .app, "\(message)第 \(i) 条", fields: [.init("序号", i)])
+            }
+            print("已写入 \(count) 条到 \(directory.path)（消息前缀：\(message)）")
+            print("PID=\(getpid())")
+            print("现在等我被打死（kill -9）…")
+
+            // 死循环而不是 `exit()`：退出是「正常结束」，盘上有东西是理所当然的。
+            // 这条探针要证的是**进程被打死**之后盘上还有东西，两者不是一回事
+            while true { sleep(3600) }
+        }
+
         // 真实端到端，**走用户点按钮那条完整的落盘路径**：--diarize-ui-real <会话 json>
         //
         // 与 `--diarize-real` 的区别只有一处，但正是 C-3-2 要验的那一处：

@@ -125,6 +125,14 @@ final class UploadStore {
                 // 密钥可能已过期，丢掉缓存让下次重签
                 self.cachedCredentials = nil
                 self.fail(id: id, message: error.localizedDescription)
+                // COS 上传失败。**不记签名 URL、不记密钥**——那些都在
+                // `error` 的描述里可能出现（服务端会把它回显出来），
+                // 而 `DiagnosticLog.redact` 会在写盘前把密钥形状的东西换掉。
+                // 这里只加一个「是哪条上传」的锚点
+                DiagnosticLog.error(.network, "COS 上传失败", fields: [
+                    .init("uploadId", id),
+                    .init("原因", error.localizedDescription),
+                ])
             }
 
             if self.isCurrent(id, gen) { self.tasks[id] = nil }

@@ -122,6 +122,13 @@ final class StudyNotesStore {
             try StudyNotesStorage.save(outcome.notes, in: directory)
         } catch {
             errors[id] = error.localizedDescription
+            // 课后笔记失败原本只落在 `errors[id]` 里。它花钱、要联网、
+            // 而且是**录完自动跑**的（用户此刻多半已经合上电脑走了）——
+            // 第二天看到「没有笔记」时，除了这条日志没有任何线索
+            DiagnosticLog.error(.notes, "课后笔记生成失败", fields: [
+                .init("sessionId", id),
+                .init("原因", error.localizedDescription),
+            ])
         }
         return true
     }

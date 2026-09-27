@@ -150,12 +150,30 @@ final class DiarizationStore {
             saveHook(evaluation.session)
             lastSaved[id] = evaluation.session
             lastStats[id] = evaluation.stats
+            DiagnosticLog.info(.diarization, "说话人识别完成", fields: [
+                .init("sessionId", id),
+                .init("helper 耗时", String(format: "%.1fs", evaluation.stats.helperWallSeconds)),
+                .init("说话人", evaluation.stats.speakerCount),
+                .init("标注段", evaluation.stats.labeled),
+            ])
             return true
         }
 
         // 界面只给 `userMessage` 那一句（说清下一步）；`detail` 是给日志和
         // 验收报告用的，不往界面上放
         errors[id] = failure.reason.userMessage
+
+        // 记在这里而不是 `SpeakerDiarizationService.evaluate` 里：那个函数
+        // 立过「无 IO」的规矩（自检直接喂构造好的 `DiarizeHelperRun`），
+        // 在里面写日志等于把它变成有副作用的函数。这里是**同一份失败第一次
+        // 离开内存的地方**，而且 `reason` 正是 `helperExitCode` 映射出来的
+        // 那一档——退出码丢了，但「映射到了哪一档」才是要查的东西
+        // （退出码本身在 `detail` 里，它由服务层拼进去）
+        DiagnosticLog.error(.diarization, "说话人识别失败", fields: [
+            .init("sessionId", id),
+            .init("原因", failure.reason.label),
+            .init("详情", failure.detail),
+        ])
         return true
     }
 }
