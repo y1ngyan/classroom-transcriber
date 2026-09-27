@@ -606,6 +606,195 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 说话人识别的界面自检：--diarize-ui-selftest
+        // （离线：helper 打桩、不写盘、不联网、不加载模型、不碰音频、不发声）
+        //
+        // 两组：`DiarizationPanelState` 那组是「输入 → 该显示哪一档」的纯函数；
+        // `DiarizationStore` 那组是三条闸（手动触发 / 不并发 / 失败不落盘）。
+        // 后者要 `await`，所以这条入口走 Task + MainActor——**不能在主线程上
+        // 用信号量等**（等的那件事正要回主 actor，直接死锁，阶段 2 踩过）
+        //
+        // 退出码跟着红绿走，理由同下面几条：只看退出码的探针要能分出红绿
+        if CommandLine.arguments.contains("--diarize-ui-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            Task { @MainActor in
+                print("说话人识别 · 界面自检（离线 · 零花费 · 不写盘）")
+                print("")
+                print("【一】面板档位（纯函数）")
+                let panel = DiarizationPanelState.selfTest()
+                for line in panel.lines { print(line) }
+                print("")
+                print("【二】store 的三条闸")
+                let store = await DiarizationStore.selfTest()
+                for line in store.lines { print(line) }
+                print("")
+                let passed = panel.passed + store.passed
+                let failed = panel.failed + store.failed
+                print(failed == 0
+                    ? "全部通过 ✅ \(passed) 条"
+                    : "存在失败用例 ❌ \(failed) 条（通过 \(passed)）")
+                exitReleasingGgml(failed == 0 ? 0 : 1)
+            }
+        }
+
+        // 真实端到端，**走用户点按钮那条完整的落盘路径**：--diarize-ui-real <会话 json>
+        //
+        // 与 `--diarize-real` 的区别只有一处，但正是 C-3-2 要验的那一处：
+        // 那个入口跑完**不落盘**（它验的是服务层），这个入口把结果**真的写下来**，
+        // 而且写的是 `RecordingsStore.save`（App 里那条 `.atomic` 的路）。
+        //
+        // 三条「没动用户数据」的判据由入口自己打出来，不靠人另跑一次命令：
+        //   ① 原会话文件前后 sha256 一致；
+        //   ② 写下去的会话与原来的**除说话人 3 个字段外逐字段相等**
+        //      （覆盖文本、时间、质量分档——「绝不回写文本/时间」的实测）；
+        //   ③ 落盘只发生在临时目录里
+        if let idx = CommandLine.arguments.firstIndex(of: "--diarize-ui-real"),
+           idx + 1 < CommandLine.arguments.count {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let path = CommandLine.arguments[idx + 1]
+            Task { @MainActor in
+                func sha256(of url: URL) -> String {
+                    guard let data = try? Data(contentsOf: url) else { return "读不到" }
+                    return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                }
+                func strippingSpeakerFields(_ s: RecordingSession) -> RecordingSession {
+                    var copy = s
+                    for p in copy.parts.indices {
+                        for i in copy.parts[p].segments.indices {
+                            copy.parts[p].segments[i].speakerId = nil
+                            copy.parts[p].segments[i].speakerOverlapRatio = nil
+                            copy.parts[p].segments[i].speakerMixed = false
+                        }
+                    }
+                    return copy
+                }
+
+                let original = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                let digestBefore = sha256(of: original)
+                var failures = 0
+                defer { exitReleasingGgml(failures == 0 ? 0 : 1) }
+
+                print("说话人识别 · 界面链路端到端（只读原会话 · 本地模型 · 零 API 花费）")
+                print("原会话：\(original.path)")
+                print("原文件 sha256（跑之前）：\(digestBefore)")
+
+                guard let source = try? Data(contentsOf: original),
+                      let session = try? JSONDecoder().decode(RecordingSession.self, from: source)
+                else {
+                    print("❌ 会话文件读不出来或解不开")
+                    failures += 1
+                    return
+                }
+                print("会话 \(session.id.uuidString.prefix(8)) · \(session.segmentCount) 段"
+                    + " · \(session.durationMillis / 60_000) 分钟 · \(session.parts.count) 个片段")
+
+                // 临时目录当 sessions/。**这是这条入口唯一的写点**——
+                // 真实目录一个字节都不会被碰
+                let sandbox = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("diarize-ui-real-\(session.id.uuidString)")
+                let sessions = sandbox.appendingPathComponent("sessions", isDirectory: true)
+                try? FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+                let store = RecordingsStore(directory: sessions)
+
+                // **和 AppState 里一模一样的接线**：save 走 RecordingsStore.save，
+                // run 用默认那条生产路径（含模型首跑就位 + 找 helper）
+                let ui = DiarizationStore(save: { store.save($0) })
+
+                let before = ui.state(session: session)
+                print("跑之前那一档：\(before.phase)"
+                    + " · 按钮\(before.canRun ? "可点" : "点不动：\(before.runDisabledReason ?? "（没说原因！）")")")
+                if !before.canRun { failures += 1 }
+
+                print("──────────── 推理中 ────────────")
+                let startedAt = Date()
+                let ran = await ui.run(session: session)
+                let elapsed = Date().timeIntervalSince(startedAt)
+                print(String(format: "本次耗时（含起进程/首跑就位）：%.2f 秒", elapsed))
+                guard ran else {
+                    print("❌ 这一次没跑（当成了重复触发）")
+                    failures += 1
+                    return
+                }
+
+                let after = ui.state(session: session)
+                print("跑之后那一档：\(after.phase)")
+                if let error = ui.errors[session.id] {
+                    print("失败原因（用户看到的就是这一句）：\(error)")
+                }
+                if let stats = ui.lastStats[session.id] {
+                    print("   音频 \(String(format: "%.1f", stats.audioSeconds)) 秒"
+                        + " · 说话人 \(stats.speakerCount) 人 · diar 段 \(stats.spanCount) 个"
+                        + " · helper 墙钟 \(String(format: "%.2f", stats.helperWallSeconds)) 秒")
+                    print("   转录段 \(stats.transcriptSegments) 个：已标注 \(stats.labeled)"
+                        + "（\(String(format: "%.1f", stats.annotationRate * 100))%）"
+                        + " · 含多人 \(stats.mixed)"
+                        + " · 未标注·无有效重叠 \(stats.unlabeledNoOverlap)"
+                        + " · 未标注·无多数派 \(stats.unlabeledNoMajority)")
+                }
+
+                // 落盘文件：路径 + sha256 + 字节数
+                let written = sessions.appendingPathComponent("\(session.id.uuidString).json")
+                guard let writtenData = try? Data(contentsOf: written) else {
+                    print("❌ 期望的落盘文件不在：\(written.path)")
+                    failures += 1
+                    return
+                }
+                print("落盘文件：\(written.path)")
+                print("   sha256 \(sha256(of: written))")
+                print("   \(writtenData.count) 字节")
+
+                guard let saved = try? JSONDecoder().decode(RecordingSession.self, from: writtenData) else {
+                    print("❌ 落盘文件解不回来")
+                    failures += 1
+                    return
+                }
+
+                // ② 只有说话人那 3 个字段变了
+                if strippingSpeakerFields(saved) == strippingSpeakerFields(session) {
+                    print("✅ 落盘的会话与原来**除说话人字段外逐字段相等**"
+                        + "（转录文字、时间、质量分档、提问标记全没动）")
+                } else {
+                    print("❌ 落盘改动了说话人之外的字段！")
+                    failures += 1
+                }
+
+                // 从**落盘文件**上数（不是从内存里的对象数）：这才是用户明天打开看到的东西
+                var total = 0
+                var labeled = 0
+                var hidden = 0
+                var speakers = Set<String>()
+                for part in saved.parts {
+                    for segment in part.segments {
+                        total += 1
+                        if let id = segment.speakerId, !id.isEmpty {
+                            labeled += 1
+                            speakers.insert(id)
+                        } else {
+                            hidden += 1
+                        }
+                    }
+                }
+                let rate = total == 0 ? 0 : Double(labeled) / Double(total) * 100
+                print("从落盘文件数：说话人 \(speakers.count) 人（\(speakers.sorted().joined(separator: "/"))）"
+                    + " · 标注 \(labeled)/\(total)（\(String(format: "%.1f", rate))%）"
+                    + " · 低置信不显示 \(hidden) 段")
+                if labeled == 0 {
+                    print("❌ 一段都没标上——这条端到端没验到东西")
+                    failures += 1
+                }
+
+                let digestAfter = sha256(of: original)
+                print("原文件 sha256（跑完）：\(digestAfter)")
+                if digestAfter == digestBefore {
+                    print("✅ 原会话文件前后一致（sha256 未变，只读）")
+                } else {
+                    print("❌ 原会话文件被改动了！")
+                    failures += 1
+                }
+                try? FileManager.default.removeItem(at: sandbox)
+            }
+        }
+
         // 真实录音回归重复段去重：--dedup-file <wav>
         // 走引擎的 upsert（实时同款 progressive 预设），同时用旧逻辑离线重放
         // 作对照——--transcribe-file 只打印定稿结果，复现不了重复段

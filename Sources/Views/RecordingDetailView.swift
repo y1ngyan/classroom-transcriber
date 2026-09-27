@@ -186,6 +186,12 @@ struct RecordingDetailView: View {
                 // 与转录之间隔着 `Theme.Spacing.xxl`（80）——分组靠留白，
                 // 不靠容器（设计规范：不要卡片/阴影/边框）
                 StudyNotesPanelView(session: session)
+                // 说话人识别面板紧跟着课后笔记。两个面板各是一个区块：
+                // 各自的标题 + 一行动作，靠 `xxl` 留白和发丝线分组——
+                // **不是把两个按钮并排塞进同一行**（派单书：「别叠成一堆」）。
+                // 顺序是「先读产出、再做加工」：笔记是录完自动就有的，
+                // 说话人标签要用户点了才有，所以它在下
+                DiarizationPanelView(session: session)
                 ForEach(Array(session.parts.enumerated()), id: \.element.id) { index, part in
                     partSection(index: index, part: part)
                 }
@@ -224,7 +230,10 @@ struct RecordingDetailView: View {
                         // 多片段拼接时不能显示片段内的相对时间
                         TranscriptLine(
                             segment: segment.absoluteCopy(in: part),
-                            attachments: []
+                            attachments: [],
+                            // 说话人字段在 `absoluteCopy` 里原样带过来
+                            // （它是 `var copy = self`），所以这里直接用原段取
+                            speakerLabel: SpeakerLabel.text(for: segment)
                         )
                     }
                 }

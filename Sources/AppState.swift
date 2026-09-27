@@ -19,12 +19,24 @@ final class AppState {
     let presets = CoursePresetStore()
     let punctuation = PunctuationStore()
     let upload = UploadStore()
-    let recordings = RecordingsStore()
+    let recordings: RecordingsStore
+    /// 说话人识别（C-3-2）。首跑就位、找 helper、落盘都在它里面；
+    /// **它不自己写文件**，落盘走 `recordings.save`（`.atomic`，见那边的注释）
+    let diarization: DiarizationStore
     /// 放在这里而不是设置页的 `@State` 里：切走标签页再回来，视图会被
     /// 重建，`@State` 跟着归零——用户填了一半的密钥就没了
     let settings = SettingsStore()
 
     init() {
+        // `recordings` 从「带默认值的存储属性」改成在 init 里建：说话人识别的
+        // 落盘要用**这一个** store 实例（它带内存缓存和 index 同步），
+        // 而默认值表达式里引用不到 `self`。两个 store 必须是指向同一份
+        // sessions/ 的同一个对象——各自建一个的话，识别写完盘列表页也不刷新，
+        // 而且两次 `loadIndex` 会互相覆盖
+        let recordings = RecordingsStore()
+        self.recordings = recordings
+        self.diarization = DiarizationStore(save: { recordings.save($0) })
+
         AppConfig.writeTemplateIfMissing()
 
         transcription.onFinalSegment = { [weak self] segment in

@@ -181,6 +181,12 @@ struct TranscriptLine: View {
     var checkState: SegmentCheckState = .none
     /// 点「核查」时回调。为 nil 表示调用方不支持手动核查（比如文件转录预览）
     var onCheck: (() -> Void)?
+    /// 这一段的说话人课内编号（`S1`/`S2`…）。为 nil = **这一行不显示说话人**。
+    ///
+    /// 判据**不在这里**，由调用方从 `SpeakerLabel.text(for:)` 取了传进来：
+    /// 组件是纯展示的（同 `checkState` 那一条），而且「什么样的段不显示」
+    /// 是要能离线自检的规则，散进 View 就测不到了
+    var speakerLabel: String?
 
     @State private var isHovering = false
 
@@ -280,6 +286,19 @@ struct TranscriptLine: View {
                     } else {
                         Thumbnail(attachment: attachment) {}
                     }
+                }
+
+                // 说话人编号。**放在时间戳左边**，不另起一行：另起一行会让
+                // 每一段都多出一行（一屏几十段），而它和核查按钮、时间戳
+                // 一样都是这行的元数据。
+                //
+                // 颜色比时间戳深一档：说话人是内容（用户要知道谁说的），
+                // 时间戳是定位用的刻度
+                if let speakerLabel {
+                    Text(speakerLabel)
+                        .textStyle(Theme.Text.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
                 }
 
                 Text(segment.formattedTimestamp)
