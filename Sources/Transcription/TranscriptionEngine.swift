@@ -190,7 +190,17 @@ final class TranscriptionEngine {
     /// 这一段录音实际用的后端。`backend` 是「设置」，这个是「这次真的走了哪条」
     /// ——stop() 要按它决定怎么收尾，而用户在录音中途改设置不该改变已经开始的
     /// 这一段怎么收尾
-    private var activeBackend: TranscriptionBackend?
+    /// 界面要读它——「本次录制走的是哪条链路」这句话只有这里答得出来。
+    /// 读的是**这次真的走了哪条**，不是设置里的那一个：录音中途改设置时
+    /// 两者会不一样，而已经开始的这一段按前者收尾
+    private(set) var activeBackend: TranscriptionBackend?
+
+    /// 起录被拦住时的**完整**文案（多行：模型路径 / 期望大小 / 下载入口）。
+    ///
+    /// 为什么不让界面直接读 `statusMessage`：那一行是单行状态条，塞不下三件事，
+    /// 而这三件事恰恰是用户照着就能自己解决的全部信息。所以状态条只放第一行
+    /// 摘要，全文放这里。
+    private(set) var blockedDetail: String?
     private var whisperPipeline: WhisperWindowPipeline?
     private var whisperLoopTask: Task<Void, Never>?
     /// 因为上一轮超步长而跳过的轮数。不丢音频（下一窗整段覆盖），但界面上
@@ -236,13 +246,32 @@ final class TranscriptionEngine {
         // 落盘用的会话边界:从这一刻起新进的段才算「本次录制」的
         sessionSegmentBase = segments.count
         partStartedAt = Date()
-        activeBackend = backend
-        startDraftLoop()
-
         // 后端二选一。Whisper 那条路**不走**下面这一整套：它不需要 locale、
         // 不需要装系统语言模型、也没有 SpeechAnalyzer 可建（模型是它自己的
         // 文件）。两条路共用的只有最底下的采集段（音频引擎、tap、存档、增益）
-        if backend == .whisper {
+        //
+        // 裁决在起采集**之前**做，而且只做一次（`decide` 是纯函数，不在这里
+        // 再探一次磁盘——探测和裁决分家的话，两处会各自漂移）
+        let decision = TranscriptionBackend.decide(backend: backend)
+
+        switch decision {
+        case .blocked(let reason):
+            // **绝不静默退回 Apple**：用户把后端设成 Whisper 就是在等 Whisper
+            // 的结果，悄悄换回系统识别会让「今天怎么突然不准了」变成一个查不
+            // 出来的谜。宁可这里停下、把原因和下载入口一起摆在界面上
+            statusMessage = decision.summary ?? "❌ Whisper 不可用"
+            blockedDetail = reason
+            activeBackend = nil
+            return
+        case .apple, .whisper:
+            break
+        }
+
+        activeBackend = backend
+        blockedDetail = nil
+        startDraftLoop()
+
+        if case .whisper = decision {
             await startWhisper()
             return
         }
@@ -397,7 +426,15 @@ final class TranscriptionEngine {
             // **绝不静默退回 Apple**：用户把后端设成 Whisper 就是在等 Whisper
             // 的结果，悄悄换回系统识别会让「今天怎么突然不准了」变成一个查不
             // 出来的谜。宁可这里停下、把原因摆在界面上
+            //
+            // 这是**第二道网**：`start()` 已经在起采集前用 `decide` 拦过一次
+            // （模型不在位）。能走到这里说明文件在、但 `whisper_init` 仍然失败
+            // ——损坏的文件、架构不对的库、内存不够都归这一档。同样是拦住，
+            // 同样不换后端。
             statusMessage = "❌ \(whisper.statusLine ?? "Whisper 引擎不可用")"
+            blockedDetail = "❌ Whisper 引擎起不来：\(whisper.statusLine ?? "未知原因")\n"
+                + "   模型位置：\(WhisperEngine.resolvedModelURL.path)\n"
+                + "   去下载：\(ModelRequirement.downloadEntryDescription)"
             activeBackend = nil
             return
         }

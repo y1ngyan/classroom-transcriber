@@ -34,9 +34,14 @@ struct TranscriptionView: View {
                 transcript
             }
 
-            // 底部悬浮胶囊按钮
-            recordButton
-                .padding(.bottom, Theme.Spacing.xl)
+            // 底部悬浮胶囊按钮。**后端提示紧贴在它上面**——「这次会用
+            // 哪个后端、为什么」这个问题是在按下按钮的那一刻问的，
+            // 放到别处（比如设置页）等于让人先切走再回来
+            VStack(spacing: Theme.Spacing.sm) {
+                backendIndicator
+                recordButton
+            }
+            .padding(.bottom, Theme.Spacing.xl)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -242,6 +247,35 @@ struct TranscriptionView: View {
             }
         }
         .animation(.easeInOut(duration: 0.18), value: engine.isRunning)
+    }
+
+    /// 「这一条录音走的是哪条链路」。
+    ///
+    /// 为什么要常驻一句话：两条链路的产出**在屏幕上长得一模一样**——都是
+    /// 一段段文字。用户唯一能分辨它们的地方就是这个标签。没有它，一次
+    /// 静默的后端切换（哪怕只是设想）会表现成「今天怎么突然不准了」，
+    /// 而那是个查不出来的谜。
+    ///
+    /// 录音中读 `activeBackend`（这次真的走了哪条），不在录音中读设置
+    /// （下次会走哪条）——这两件事在录音中途改设置时**会不一样**，
+    /// 混成一个的话标签就在撒谎。
+    @ViewBuilder
+    private var backendIndicator: some View {
+        if engine.isRunning, let active = engine.activeBackend {
+            StatusMark(kind: .live, text: "本次录制：\(active.label)")
+        } else {
+            switch TranscriptionBackend.decide(backend: appState.settings.backend) {
+            case .apple:
+                StatusMark(kind: .neutral, text: "下次录制：\(TranscriptionBackend.apple.label)")
+            case .whisper:
+                StatusMark(kind: .neutral,
+                           text: "下次录制：\(TranscriptionBackend.whisper.label) · 模型已就位")
+            case .blocked(let reason):
+                // 缺模型时**提前**把话说清楚：按下去才发现录不了，
+                // 损失的是一整节课的信任
+                StatusMark(kind: .error, text: reason)
+            }
+        }
     }
 }
 

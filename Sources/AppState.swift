@@ -28,6 +28,11 @@ final class AppState {
     /// 重建，`@State` 跟着归零——用户填了一半的密钥就没了
     let settings = SettingsStore()
 
+    /// 模型下载（P7-1）。和 `settings` 同样的理由放在这里：514MB 下到一半
+    /// 切走设置页再回来，进度不该归零——那不只是显示问题，`@State` 一归零
+    /// 那个 `Task` 就没人持有了，用户以为还在下，其实已经断了
+    let modelDownload = ModelDownloadCenter()
+
     init() {
         // `recordings` 从「带默认值的存储属性」改成在 init 里建：说话人识别的
         // 落盘要用**这一个** store 实例（它带内存缓存和 index 同步），

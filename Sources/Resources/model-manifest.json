@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "source": "https://hf-mirror.com",
+  "note": "模型清单。revision 是上游 commit，size/sha256 是【那个 commit 下】的真值——下载、续传、校验全以这里为准，不认 resolve/main 这个移动目标。要改这个文件，先自己按 note 里的命令去上游核一遍数字，别凭印象填。",
+  "models": [
+    {
+      "file": "ggml-medium-q5_0.bin",
+      "repo": "ggerganov/whisper.cpp",
+      "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "size": 539212467,
+      "sha256": "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
+      "isDefault": true
+    },
+    {
+      "file": "ggml-large-v3-q5_0.bin",
+      "repo": "ggerganov/whisper.cpp",
+      "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+      "size": 1081140203,
+      "sha256": "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
+      "isDefault": false
+    }
+  ]
+}

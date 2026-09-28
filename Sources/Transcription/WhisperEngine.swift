@@ -320,7 +320,22 @@ final class WhisperEngine: @unchecked Sendable {
 
     /// 模型放哪。用 Application Support 而不是 App 包里——
     /// 514MB 打进 bundle 会让 App 大一倍，而且升级 App 就白下一遍
+    ///
+    /// 可以用 `CLASSROOM_MODELS_DIR` 把整个目录**重定向**到别处。它和
+    /// `CLASSROOM_WHISPER_MODEL` 是两件事，别混：
+    ///   · `CLASSROOM_WHISPER_MODEL` —— 直接指定**某一个文件**（「我已经有
+    ///     一份了，就用它」）；
+    ///   · `CLASSROOM_MODELS_DIR`   —— 指定**目录**，下载、残缺的 `.part`、
+    ///     校验全都落在这里（「别碰我的真模型库」）。
+    ///
+    /// 为什么这个开关是硬要求：目录里那 1.5GB 是用户自己的东西，而无头自检
+    /// 和核验要反复演练「下载 / 续传 / 校验失败 / 取消」——每一条都会写盘。
+    /// 没有重定向，这些测试就是在拿用户的真库当草稿纸。
     static var modelDirectory: URL {
+        if let raw = ProcessInfo.processInfo.environment["CLASSROOM_MODELS_DIR"],
+           !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+            return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath, isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base
             .appendingPathComponent("ClassroomTranscriber", isDirectory: true)

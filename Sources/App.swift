@@ -764,6 +764,183 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(0)
         }
 
+        // 模型下载自检：--model-download-selftest（P7-1）
+        //
+        // **离线、零花费、不发声、不起 GUI**，而且**绝不去 hf-mirror 下那 539MB**：
+        // 所有下载都打给本机回环上现起的一个夹具服务器（`LocalHTTPServer`），
+        // body 是几百 KB 的假模型。要验的是传输层行为——Range 被接受/被忽略、
+        // 半路断线、取消、重试上限——这些用真模型验只会更慢更不可复现。
+        //
+        // **硬闸**：进程必须带 `CLASSROOM_MODELS_DIR`。没有它，这个自检写的
+        // 就是用户真实的 `models/`（约 1.5GB）。见 `ModelDownloadSelfTest` 里
+        // 那段拒绝运行的说明。
+        //
+        // 退出码跟着红绿走
+        if CommandLine.arguments.contains("--model-download-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            // 必须用 detached + 信号量：`App.init` 是 `@MainActor` 隔离的，
+            // 普通 Task 会继承主 actor，而主线程正阻塞在下面的 wait 上 → 死锁
+            // （同 `--transcribe-file` 那条；本项目在别处踩过这个死锁）
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                let result = await ModelDownloadSelfTest.run()
+                for line in result.lines { print(line) }
+                print("")
+                print(result.failed == 0
+                      ? "✅ 模型下载自检通过（\(result.passed) 条）"
+                      : "❌ 模型下载自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+                exitReleasingGgml(result.failed == 0 ? 0 : 1)
+            }
+            if semaphore.wait(timeout: .now() + 600) == .timedOut {
+                print("❌ 模型下载自检超时（600 秒）")
+                exitReleasingGgml(1)
+            }
+            // 走到这里说明 detached 任务异常退出了而没有 exit —— 不进 GUI
+            exitReleasingGgml(1)
+        }
+
+        // 模型路径速查：--model-paths
+        //
+        // 只打印这几个值然后退出。存在的理由：`CLASSROOM_MODELS_DIR` 这条
+        // 重定向**必须能被从进程外面验证**——「自检说它认这个变量」是自证，
+        // 而「换个目录起一次，它真的指过去了」才是外部证据
+        if CommandLine.arguments.contains("--model-paths") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            print("modelDirectory   \(WhisperEngine.modelDirectory.path)")
+            print("modelPath        \(WhisperEngine.modelPath.path)")
+            print("resolvedModelURL \(WhisperEngine.resolvedModelURL.path)")
+            print("isModelReady     \(WhisperEngine.isModelReady)")
+            exitReleasingGgml(0)
+        }
+
+        // 模型目录占用：--model-cache（只看）/ --model-cache-clean（真删）
+        //
+        // 对应「占用可见可清理」。**默认只看不动**——只有显式多打一个
+        // `-clean` 才真的删。界面上那一步是一个写明「将释放多少」的确认框，
+        // 这里换成「多打一个开关」，规矩是同一条：先看见要释放多少，再动手。
+        //
+        // 删的**只有 `.part` 和它的版本记录**。正式模型文件一根手指都不碰，
+        // 哪怕它明显是个下坏了的残骸——那是用户的文件，不归我们清
+        if CommandLine.arguments.contains("--model-cache")
+            || CommandLine.arguments.contains("--model-cache-clean") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let directory = WhisperEngine.modelDirectory
+            let manifest = try? ModelManifest.loadBundled()
+            if let pin = manifest?.defaultPin {
+                print("清单 \(pin.file) @ \(pin.shortRevision)… · \(pin.size) 字节 · \(pin.url.absoluteString)")
+            } else {
+                print("清单 读不出来（下载会拒绝运行，见 --model-download-selftest 的硬闸说明）")
+            }
+            let report = ModelCacheReport.scan(directory: directory, manifest: manifest)
+            for line in report.summaryLines { print(line) }
+
+            guard CommandLine.arguments.contains("--model-cache-clean") else {
+                exitReleasingGgml(0)
+            }
+            let plan = report.plan
+            guard !plan.isEmpty else {
+                print("没有可清理的残留（未完成的下载 0 项）")
+                exitReleasingGgml(0)
+            }
+            print("")
+            // 只印逐条明细：那句总账（About to delete …）上面报告里已经印过了
+            for line in plan.itemLines { print(line) }
+            print("（已确认清理：--model-cache-clean）")
+            do {
+                let freed = try report.clean()
+                let after = ModelCacheReport.scan(directory: directory, manifest: manifest)
+                print("✅ 释放 \(ModelCache.byteText(freed))")
+                print("清理后：Found \(after.partials.count) incomplete download(s)")
+                if !after.models.isEmpty {
+                    print("正式模型文件仍在：\(after.models.map(\.url.lastPathComponent).joined(separator: "、"))")
+                }
+                exitReleasingGgml(0)
+            } catch {
+                print("❌ 清理失败：\(error.localizedDescription)")
+                exitReleasingGgml(1)
+            }
+        }
+
+        // 无头下载一个模型文件：--model-fetch <url> --to <路径> [--min-bytes N]
+        //
+        // 给 `tools/probes/model_resume.sh` 用的：那条探针要真的把进程
+        // `kill -9` 掉，再看 `.part` 有没有接着长——那必须要有一个能被外部
+        // 掐死的进程，所以这里只做「下载这一个文件」这一件事，不碰 App 状态。
+        // **退出码跟着成败走**
+        if let i = CommandLine.arguments.firstIndex(of: "--model-fetch") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let j = args.firstIndex(of: flag), j + 1 < args.count else { return nil }
+                return args[j + 1]
+            }
+            guard i + 1 < args.count, let to = value("--to") else {
+                print("用法：--model-fetch <url> --to <路径> [--min-bytes N]")
+                exitReleasingGgml(2)
+            }
+            guard let url = URL(string: args[i + 1]) else {
+                print("❌ 不是合法的 URL：\(args[i + 1])")
+                exitReleasingGgml(2)
+            }
+            let destination = URL(fileURLWithPath: (to as NSString).expandingTildeInPath)
+            let minimum = value("--min-bytes").flatMap { Int64($0) } ?? WhisperEngine.expectedModelBytes
+            let partURL = ModelDownloader.partURL(for: destination)
+            let counter = ProgressLineCounter()
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                do {
+                    let report = try await ModelDownloader().download(
+                        from: url, to: destination, partURL: partURL, minimumBytes: minimum,
+                        onProgress: { p in counter.report(p) },
+                        onRetry: { next, max, reason in
+                            print("↻ 自动重试 第 \(next)/\(max) 次 · 上次失败：\(reason)")
+                        })
+                    print("✅ 下完 \(report.bytesWritten) 字节（从 \(report.resumedFrom) 接上）"
+                          + " · 请求 \(report.attempts) 次")
+                    for notice in report.notices { print("ℹ️ \(notice)") }
+                    exitReleasingGgml(0)
+                } catch {
+                    print("❌ \(error.localizedDescription)")
+                    exitReleasingGgml(1)
+                }
+                semaphore.signal()
+            }
+            if semaphore.wait(timeout: .now() + 3600) == .timedOut {
+                print("❌ 下载超时（3600 秒）")
+                exitReleasingGgml(1)
+            }
+            exitReleasingGgml(1)
+        }
+
+        // 夹具服务器：--model-fixture-server [--port-file <路径>]
+        //
+        // 配合 `--model-fetch` 做**真的 `kill -9` 续传实验**：探针要先有个
+        // 慢速的源在跑，才能在中途把下载进程掐死。它只绑回环，探针用完就杀。
+        // 路由见 `ModelFixture.routes`（和 `--model-download-selftest` 共用同一份，
+        // 免得两处的假模型长得不一样）
+        if CommandLine.arguments.contains("--model-fixture-server") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            func value(_ flag: String) -> String? {
+                guard let j = args.firstIndex(of: flag), j + 1 < args.count else { return nil }
+                return args[j + 1]
+            }
+            do {
+                let server = try LocalHTTPServer(handler: ModelFixture.handler)
+                print("PORT=\(server.port)")
+                if let path = value("--port-file") {
+                    try? "\(server.port)".write(toFile: (path as NSString).expandingTildeInPath,
+                                                atomically: true, encoding: .utf8)
+                }
+                // 一直服务到被外面杀掉。**不用信号量等**：这里本来就要活着
+                let semaphore = DispatchSemaphore(value: 0)
+                semaphore.wait()
+            } catch {
+                print("❌ 起不了夹具服务器：\(error.localizedDescription)")
+                exitReleasingGgml(1)
+            }
+        }
+
         // 崩溃恢复自检：--recovery-selftest（P9-1）
         //
         // **离线**：不联网、不加载模型、**不录音、不发声**；音频全是往临时目录里

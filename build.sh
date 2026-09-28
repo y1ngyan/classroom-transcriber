@@ -175,6 +175,22 @@ if [ ! -f "$ICON_FILE" ] || [ "$ICON_SCRIPT" -nt "$ICON_FILE" ]; then
 fi
 cp "$ICON_FILE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
+# 模型清单（P7-1）。**和图标同样必须在 codesign 之前进 bundle**，否则
+# 它不在签名覆盖范围内。
+#
+# 为什么是资源文件而不是写死在 Swift 里：它得能 diff、能 review、能被
+# 非 Swift 的工具读（将来核验脚本要拿它去上游比对）。写死在代码里，
+# 「改判据」这件事就藏进了一次代码改动，而不是一次清单改动。
+#
+# 这里用**硬失败**而不是「拷不到就算了」：拷不到的表现是 App 照常起、
+# 照常下模型，只有 sha256 校验悄悄不做了——那正是这个包里最不该有的静默。
+MANIFEST="Sources/Resources/model-manifest.json"
+if [ ! -f "$MANIFEST" ]; then
+  echo "❌ 找不到模型清单：$MANIFEST" >&2
+  exit 1
+fi
+cp "$MANIFEST" "$APP_BUNDLE/Contents/Resources/model-manifest.json"
+
 echo "▶ 签名（ad-hoc）…"
 codesign --force --sign - --timestamp=none "$APP_BUNDLE" 2>&1 | sed 's/^/  /'
 

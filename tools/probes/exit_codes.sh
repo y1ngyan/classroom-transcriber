@@ -7,13 +7,15 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **十三个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）。
+# **十五个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）。
 #
-# ⚠️ 计数说明（P9-2 逐条数过）：这段原先写「十四个入口」，而文件里实际只有 **13**
-# 条 `run_assert` 调用——`grep -c run_assert` 得到的 14 把上面那行函数定义
-# `run_assert() {` 也数进去了。本包补上第 14 条断言，但**它不是 `run_assert` 的
-# 形状**（期望的退出码是 124 而不是 0，见 `--whisper-window-file 超时不 abort`），
-# 所以现在是 **13 条 `run_assert` + 1 条退出码断言 = 14 条**。
+# ⚠️ 计数说明（P9-2 逐条数过，P7-1 加二）：这段原先写「十四个入口」，而文件里实际
+# 只有 **13** 条 `run_assert` 调用——`grep -c run_assert` 得到的 14 把上面那行函数
+# 定义 `run_assert() {` 也数进去了。P9-2 补上第 14 条断言，但**它不是 `run_assert`
+# 的形状**（期望的退出码是 124 而不是 0，见 `--whisper-window-file 超时不 abort`），
+# 所以那时是 **13 条 `run_assert` + 1 条退出码断言 = 14 条**；P7-1 又加了
+# `--model-download-selftest` 与 `--model-cache` 两条，现在是
+# **15 条 `run_assert` + 1 条 = 16 条**。
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -41,7 +43,7 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且十四条断言都命中（13 条 `run_assert` +
+# 退出码 0 = 跑到的入口全部 exit=0、且十六条断言都命中（15 条 `run_assert` +
 # 1 条「超时的退出码必须是 124」——后者期望的本来就不是 0）。
 
 set -uo pipefail
@@ -49,7 +51,7 @@ cd "$(dirname "$0")/../.."
 
 BIN=build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber
 REC="$HOME/Library/Application Support/ClassroomTranscriber/recordings"
-[ -x "$BIN" ] || { echo "❌ 没有 $BIN，先跑 ./build.sh"; exit 1; }
+[ -x "$BIN" ] || { echo "❌ 没有 ${BIN}，先跑 ./build.sh"; exit 1; }
 
 # 挑一条真实录音给 --whisper-window-file 用（它需要 wav）
 SAMPLE="$(ls "$REC"/*.wav 2>/dev/null | head -1)"
@@ -243,6 +245,36 @@ run_assert "--integrity-selftest" "✅ 脏数据自检通过（26 条）" --inte
 # 那两个读数记在 `~/ClassroomTranscriber-design/P9-1核验记录.md` §三 #2a
 # ——注意该记录记的是**测量**（2.000s → 修后 2.300s），没有记这个「拿掉 apply」的变异
 run_assert "--recovery-selftest" "✅ 崩溃恢复自检通过（55 条）" --recovery-selftest
+# 模型下载（P7-1）。这条自检**必须**带 `CLASSROOM_MODELS_DIR` 跑——它会反复
+# 写盘、改名、删 `.part`，不重定向的话动的就是用户真实的 `models/`（约 1.5GB）。
+# 没设这个变量时它**直接拒绝运行**（红），这本身就是一条硬闸。
+#
+# ⚠️ 用完立刻 `unset`，**不能让它漏到后面**：`--whisper-prewarm` 要加载真模型，
+# 一个漏出去的重定向会让它去空目录里找模型，然后以一种和本条完全无关的方式红掉
+export CLASSROOM_MODELS_DIR="$(mktemp -d)"
+run_assert "--model-download-selftest" "✅ 模型下载自检通过（91 条）" --model-download-selftest
+unset CLASSROOM_MODELS_DIR
+#
+# 模型目录占用/清理（P7-1 补充要求 4）。**假目录里放一份伪造的 `.part`**——
+# 它必须在「占用」清单里出现、并且被算进将释放的字节数里。断言抓的就是
+# 那两行（HF 的措辞，刻意没翻译）：`Found 1 incomplete download(s)` 与
+# `About to delete 2 item(s)`（`.part` 自己 + 它的版本记录，**版本记录也占字节**）。
+#
+# 这条**不删任何东西**：`--model-cache` 是只读的 dry-run（要真删得再加
+# `-clean`），所以可以放心地对着临时目录跑。但目录重定向**必须一起设**——
+# `--model-cache` 读的同样是 `WhisperEngine.modelDirectory`，漏了 export
+# 就是把夹具写进用户真实的 `models/`，而这条断言照样会绿（扫描器会读到
+# 假目录里没有、真目录里也没有的那个 `.part`，报 `Found 0`）→ 断言红，
+# 但**夹具已经落在用户库上了**。顺序只能是：先建目录、再放夹具、再 export
+CACHEFIX="$(mktemp -d)"
+printf 'lmgg-part' > "$CACHEFIX/ggml-medium-q5_0.bin.part"
+printf '{"revision":"5359861c739e955e79d9a303bcbc70fb988958b1","size":539212467,"url":"x"}' \
+  > "$CACHEFIX/ggml-medium-q5_0.bin.part.meta.json"
+export CLASSROOM_MODELS_DIR="$CACHEFIX"
+run_assert "--model-cache（夹具·只报不改）" "Found 1 incomplete download(s)" \
+  --model-cache
+unset CLASSROOM_MODELS_DIR
+rm -rf "$CACHEFIX"
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest
 run "--conv-probe"                  --conv-probe
@@ -321,6 +353,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十四条断言：13 条 run_assert + 超时退出码 124）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十六条断言：15 条 run_assert + 超时退出码 124）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

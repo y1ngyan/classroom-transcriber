@@ -4,6 +4,8 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var showsSecretKey = false
+    /// 「清理未完成的下载」的确认框。清的是磁盘上不可逆的东西，所以要有这一步
+    @State private var isConfirmingCleanup = false
 
     private var store: SettingsStore { appState.settings }
 
@@ -108,6 +110,20 @@ struct SettingsView: View {
                         + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
                 )
 
+                // 模型这一段只在选了 Whisper 时出现。默认（Apple）走的是系统
+                // 识别，模型在不在和这次录音无关——把一条无关的信息摆在
+                // 默认路径上，只会让真正的错误更难被看见
+                if store.backend == .whisper {
+                    modelRow()
+                }
+
+                // 未完成的下载残留。**和后端选择无关**：用户下一半切回 Apple，
+                // 那几百 MB 的 `.part` 照样占着盘。它只在自己存在时出现——
+                // 没有残留时不占一行，这是常态
+                if appState.modelDownload.shouldShowCacheRow {
+                    cacheRow()
+                }
+
                 // 预热结果只在这一节里显示：模型路径、准备用时、「不可用」的原因
                 // 都只对「选了 Whisper 的人」有意义，默认（Apple）时这一行不出现
                 if let line = appState.transcription.whisper.statusLine {
@@ -167,11 +183,15 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.textSecondary)
 
                 note(
-                    "检测的是「老师是不是在向全班提问」，命中的段落会在转录里标出来。"
+                    "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
                         + "纯本地规则判定，不联网、不调模型。"
                 )
             }
         }
+        // 进设置页扫一次模型目录。**挂在这里而不是写在 `body` 的求值路径上**：
+        // 扫盘是副作用，而 `body` 一次渲染会被走好几遍。残留那一行只在自己
+        // 存在时出现，所以扫出来是空的时候界面上什么都不会多
+        .onAppear { appState.modelDownload.refreshCache() }
     }
 
     // MARK: - DeepSeek
@@ -372,6 +392,116 @@ struct SettingsView: View {
     /// 所以这里只剩一个图标 + 一段灰字。
     private func note(_ text: String) -> some View {
         StatusMark(kind: .neutral, text: text)
+    }
+
+    /// 「模型」这一行：现在有没有、在下多少、按哪里下/按哪里停。
+    ///
+    /// 一条规则：**状态永远是「小图标 + 一句话」，不是一个色块**（设计规范）。
+    /// 进度条也不画——字节数、百分比、速度、剩余时间这四样已经是全部信息，
+    /// 再加一根条只是把同样的东西画第二遍。
+    @ViewBuilder
+    private func modelRow() -> some View {
+        let center = appState.modelDownload
+        // 每次重算时现探一次磁盘。下载完成后 `phase` 会变，视图跟着重画，
+        // 这一行也就跟着翻到「已就位」
+        let decision = TranscriptionBackend.decide(backend: .whisper)
+
+        VStack(alignment: .leading, spacing: 8) {
+            if center.phase.isBusy {
+                StatusMark(kind: .live, text: center.progressLine)
+                if let retry = center.retryNote {
+                    // 自动重试**必须看得见**：不显示的话，界面看上去就只是
+                    // 「卡住了」，用户既不知道出了什么事，也没有停下来的理由
+                    StatusMark(kind: .warning, text: retry)
+                }
+            } else if case .done(let bytes) = center.phase {
+                StatusMark(kind: .ok, text: "模型已就位 · \(ModelCache.byteText(bytes))")
+            } else {
+                switch decision {
+                case .whisper:
+                    StatusMark(kind: .ok, text: "模型已就位")
+                case .apple:
+                    EmptyView()
+                case .blocked(let reason):
+                    // **拦住的地方就要说全**：路径、期望大小、去哪儿下。
+                    // 这三件事是用户照着就能自己解决的全部信息
+                    StatusMark(kind: .error, text: reason)
+                }
+            }
+
+            if case .failed(let message) = center.phase {
+                StatusMark(kind: .error, text: message)
+            }
+
+            Text("模型位置：\(center.destination.path)")
+                .textStyle(Theme.Text.caption)
+                .foregroundStyle(Theme.textTertiary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // 源给出的诚实提示原样显示（例如「此源不支持续传，将从 0 开始」）。
+            // **不加工**——加工就等于替源撒谎
+            ForEach(center.notices, id: \.self) { notice in
+                StatusMark(kind: .neutral, text: notice)
+            }
+
+            // 一次只放一个 PillButton：进行中就是「取消下载」，其余是「下载模型」。
+            // 取消之后按钮回到「下载模型」——下一次会从 `.part` 接着下，
+            // 所以文案不写「重新下载」（那会让人以为前面的白下了）
+            if center.phase.isBusy {
+                PillButton(title: "取消下载", style: .quiet) { center.cancel() }
+            } else {
+                PillButton(title: center.canRetry ? "重试下载" : "下载模型",
+                           isLoading: false) {
+                    center.start()
+                }
+            }
+        }
+    }
+
+    /// 「未完成的下载」这一行：列出来、说清占了多少、能一键清掉。
+    ///
+    /// 存在的理由：`.part` 是**默认看不见的**——它不叫模型文件的名字，Finder
+    /// 里也不会提示它。用户唯一能察觉它的地方是「磁盘怎么少了 500MB」。
+    /// 而清理必须**先说要释放多少再动手**：删东西这件事，确认框上那个数字
+    /// 是用户唯一的依据
+    @ViewBuilder
+    private func cacheRow() -> some View {
+        let center = appState.modelDownload
+        VStack(alignment: .leading, spacing: 8) {
+            if let plan = center.freeablePlan {
+                StatusMark(kind: .warning,
+                           text: "未完成的下载 \(plan.items.count) 项 · 占用 \(ModelCache.byteText(plan.totalBytes))")
+                ForEach(plan.items) { item in
+                    Text("· \(item.url.lastPathComponent) · \(ModelCache.byteText(item.bytes))")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                PillButton(title: "清理未完成的下载", style: .quiet) {
+                    isConfirmingCleanup = true
+                }
+                .confirmationDialog(
+                    "清理未完成的下载？",
+                    isPresented: $isConfirmingCleanup
+                ) {
+                    // 按钮上写的就是将要释放的字节数——确认框上那个数字是
+                    // 用户唯一的依据，不能含糊成「确定吗？」
+                    Button("删除 \(plan.items.count) 项（释放 \(ModelCache.byteText(plan.totalBytes))）",
+                           role: .destructive) {
+                        center.cleanIncomplete()
+                    }
+                    Button("取消", role: .cancel) {}
+                } message: {
+                    Text("将删除：\n" + plan.itemLines.joined(separator: "\n")
+                         + "\n\n已经下好的模型文件不在此列。")
+                }
+            }
+            if let note = center.cleanupNote {
+                StatusMark(kind: .neutral, text: note)
+            }
+        }
     }
 }
 
