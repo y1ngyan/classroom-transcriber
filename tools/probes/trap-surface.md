@@ -10,16 +10,20 @@ P6-2 的起点就是这一类的实例：C-4 查明 `WhisperEngine` 把 whisper 
 
 ## 怎么保持这份清单不过期
 
-一句命令重列全部候选面（`Sources/` 下，**实测 108 行**）：
+一句命令重列全部候选面（`Sources/` 下，**实测 99 行**）：
 
 ```bash
 cd ~/ClassroomTranscriber && \
 grep -rEn '\.\.<|Range\(|try!|as!' Sources --include='*.swift' \
-  | grep -v '/SelfTest\.swift:' | grep -v 'CommandLine\.arguments' | sort
+  | grep -v 'SelfTest\.swift:' | grep -v 'CommandLine\.arguments' | sort
 ```
 
 剔除 `SelfTest`（自检自己造的夹具不算库里的数据）与 `CommandLine.arguments`
-（命令行参数是操作者敲的，不是库里的数据——154 → 108 行）。
+（命令行参数是操作者敲的，不是库里的数据——114 → 99 行）。
+
+> ⚠️ 那个 `grep -v` 的模式**不要在前面加斜杠**：自检文件叫 `XxxSelfTest.swift`，
+> 写 `/SelfTest\.swift:` 一条也匹配不上，过滤器静默失效、数会偏大。
+> 本文原写「108 行」就是带着这个坏过滤器点的数——数已经按上面这条命令重测过。
 
 **它列的是候选，不是结论**——绝大多数命中是安全的（下节说明为什么）。
 清单要的是「有人新增了一处**跨源**的区间构造时，能在这一眼里看出来」。

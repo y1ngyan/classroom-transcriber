@@ -43,7 +43,7 @@ struct FactCheckView: View {
     }
 
     /// 缺配置是「这个功能现在不能用」的状态，用警告图标 + 颜色说，
-    /// 而不是拿一块底色框起来——规格里的状态表达方式
+    /// 而不是拿一块底色框起来——设计规范里的状态表达方式
     private var configWarning: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             StatusMark(kind: .warning, text: "未配置搜索密钥，核查不可用")
@@ -201,7 +201,7 @@ private struct FactCheckRow: View {
         .frame(width: 18, height: 22)
     }
 
-    /// 规格指定：verified #30D158，unverifiable #FF9F0A，disputed 用系统红
+    /// verified #30D158，unverifiable #FF9F0A，disputed 用系统红
     private var statusColor: Color {
         switch result.phase {
         case .failed: return Theme.error
@@ -257,7 +257,7 @@ private struct FactCheckRow: View {
 
 /// 核查卡片的悬停预览。
 ///
-/// 对应原规格里 Expo Router 的 `<Link.Preview>`（长按窥视详情）。
+/// 对应原 TS 版里 Expo Router 的 `<Link.Preview>`（长按窥视详情）。
 /// macOS 没有长按，改成悬停；语义保留「不离开当前页就能多看一眼」。
 /// 内容刻意**不是**卡片的复读——多出来的是原句前后的上下文，
 /// 判断一句结论可不可信，靠的正是它前后说了什么。

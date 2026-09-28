@@ -233,7 +233,8 @@ enum ReverseSegmentSelfTest {
               statsLine.split(separator: "\n").last.map(String.init) ?? "")
 
         // 反向段 0 条时那一格**不许出现**：正常会话的报告行必须一个字节都不变，
-        // 否则 C-3-1 已核验的那三行格式就漂了
+        // 否则 C-3-1 已核验的那几行格式就漂了
+        //（`~/ClassroomTranscriber-design/C-3-1核验记录.md` §三 逐项对过那张表）
         let (cleanSession, cleanStats) = SpeakerDiarizationService.materialize(
             session: session([part(offset: 0, duration: 120_000, segments: [segment(0, 2_000)])]),
             diarization: diarization([span("S1", 0, 120_000)])

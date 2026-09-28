@@ -98,7 +98,7 @@ run() { # run <名字> <参数…>
     #     那是模型没就位、一次构造都没开始（`WhisperRuntime.warmUp` 在更早的 guard
     #     就返回了），跟并发无关——先去看模型在不在，别去翻构造点；
     #   · 次数是 1 还出 133，看**峰值**：峰值 ≥ 2 说明真的有两条线程同时在造，
-    #     那是锁没兜住（或绕过锁的第 4 个构造点，见核验报告 §F）；峰值是 1 才是
+    #     那是锁没兜住（或出现了绕过锁的第 4 个构造点）；峰值是 1 才是
     #     「损坏来自锁没盖到的地方」（推理期？别的库？）。两种都去
     #     `~/Library/Logs/DiagnosticReports/` 翻现场，按栈查，别猜。
     [ "$code" = "133" ] && printf '       ↑ SIGTRAP：并发写坏堆那一类（根治已落码，见本文件注释）——按**真 bug** 查，先看 context 计数是不是 1\n'
@@ -200,14 +200,16 @@ run_assert "--reverse-selftest" "✅ 反向段自检通过（19 条）" --revers
 # ——否定式判据不测的话，把 guard 删掉界面上一点异常都看不出来。
 # 条数照样钉住：这个入口最容易出的形状是「用例一条都没跑、进程照样 0 退出」。
 # 这些判据**验过会红**：注入「正在跑判成已跑过」/「删掉并发闸」/「失败也落盘」
-# 三个变异，对应的判据各自变红（见 C-3-2 验收记录）
+# 三个变异，对应的判据各自变红（两个记在
+# `~/ClassroomTranscriber-design/C-3-2核验记录.md` §三「我自己跑的两个变异」）
 run_assert "--diarize-ui-selftest" "全部通过 ✅ 65 条" --diarize-ui-selftest
 # 本地诊断日志（P6-1）。**离线**：全部写在临时目录里，真实 logs/ 一个字都不碰
 # （自检里有一条判据专门钉这件事——无头进程的全局出口必须是丢弃出口）。
 # 它覆盖级别过滤 · 环形轮转 · 上限不增长 · 脱敏 · 崩溃前最后 N 条可读。
 # 条数照样钉住，理由同上。
 # 「环形」那几条**验过会红**：把 `LogRingPolicy.shouldRotate` 改成恒 false
-# （＝关掉轮转），对应判据立刻红（见 P6-1 验收记录）。
+# （＝关掉轮转），对应判据立刻红
+# （见 `~/ClassroomTranscriber-design/P6-1核验记录.md` §四「我自己跑的两个变异」①）。
 # 另：「强杀恢复」那条判据要真打死一个进程（`kill -9`），不适合放进这个
 # 一次跑完的扫描里——它单独在 `tools/probes/log_crash.sh`，退出码同样即成败
 run_assert "--log-selftest" "✅ 日志自检通过（58 条）" --log-selftest
@@ -237,7 +239,9 @@ run_assert "--integrity-selftest" "✅ 脏数据自检通过（26 条）" --inte
 #   · 干净库零误报（把正常录音标成「未完成」比漏报更糟——用户会点恢复，然后拿到重复会话）
 #   · 恢复扫描只读（扫前扫后逐文件 sha256 一致）
 # 「恢复顺带修过期头」那句断言是**验过会红**的：把 `RecordingsStore.recover` 里
-# 那次 `WAVHeaderRepair.apply` 拿掉，时长断言立刻从 2.300 掉回 2.000（见 P9-1 验收记录）
+# 那次 `WAVHeaderRepair.apply` 拿掉，时长断言立刻从 2.300 掉回 2.000（一行注入即可自证）。
+# 那两个读数记在 `~/ClassroomTranscriber-design/P9-1核验记录.md` §三 #2a
+# ——注意该记录记的是**测量**（2.000s → 修后 2.300s），没有记这个「拿掉 apply」的变异
 run_assert "--recovery-selftest" "✅ 崩溃恢复自检通过（55 条）" --recovery-selftest
 run "--manual-check-selftest"       --manual-check-selftest
 run "--config-selftest"             --config-selftest

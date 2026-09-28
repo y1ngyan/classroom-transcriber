@@ -1,5 +1,5 @@
 // 联网生成词表探针：跑**真实链路**（Tavily 检索 + DeepSeek 抽取），并把每一级的原始产出打出来。
-// 跑法: ./tools/probe.sh glossary <课程名>
+// 跑法: ./tools/probe.sh glossary_suggest <课程名>
 //
 // 为什么不放在 --xxx-selftest 里：自检必须是纯本地的（不发网络请求、不花钱、
 // 不需要密钥）。而这一段的正确性**只有在真实链路上才能证明**——解析层可以
@@ -35,7 +35,7 @@ struct GlossarySuggestProbe {
 
         let args = CommandLine.arguments
         guard args.count >= 2 else {
-            print("\n用法: ./tools/probe.sh glossary <课程名>")
+            print("\n用法: ./tools/probe.sh glossary_suggest <课程名>")
             exit(2)
         }
         let course = args[1]

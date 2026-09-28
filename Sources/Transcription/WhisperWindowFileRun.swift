@@ -75,7 +75,7 @@ enum WhisperWindowFileRun {
         var probeStepSeconds: Double = WhisperWindowPipeline.stepSeconds
         var sweep = false
         /// 只取前 N 秒音频（0 = 整段）。问「开头那几秒怎么样」时没必要把整条
-        /// 录音跑完——一条 6 分钟的录音跑一趟要三分半，而 §3 只看首段
+        /// 录音跑完——一条 6 分钟的录音跑一趟要三分半，只为看开头几秒不值得
         var headSeconds: Double = 0
         /// 把最慢的 N 窗重新单独转一遍并打印它们的原始输出（0 = 不做）。
         /// 「慢窗在转什么」只有这条路看得见：`advance()` 把原始识别结果交给
@@ -133,7 +133,7 @@ enum WhisperWindowFileRun {
     /// `note` 标出这一行的性质（空转 / 收尾窗）。收尾窗必须单独标出来：
     /// 它也是 `merge()` 的一次调用、也进 `transcriptionSeconds`，只是不经过
     /// `advance()`——漏掉它，这里的「N 窗」就会比 `pipeline.statsLine` 少 1，
-    /// 与用户手上那份数字对不上（阶段 3 踩过：62 对 61）
+    /// 与用户手上那份数字对不上
     private struct WindowTrace {
         let index: Int
         let startMillis: Int?

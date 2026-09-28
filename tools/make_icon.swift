@@ -418,8 +418,8 @@ let iconsetDir = outputDir.appendingPathComponent("AppIcon.iconset")
 try? FileManager.default.removeItem(at: iconsetDir)
 try FileManager.default.createDirectory(at: iconsetDir, withIntermediateDirectories: true)
 
-/// .iconset 要求的固定文件名 —— 名字写错 iconutil 会直接报错，
-/// 所以这里是照 Apple 的规范枚举的，不是猜的
+/// .iconset 要求的固定文件名 —— 名字写错 `iconutil` 会直接报错，
+/// 所以这里是照着它能接受的那套名字枚举的，不是猜的
 let slots: [(name: String, pixels: Int)] = [
     ("icon_16x16.png", 16),
     ("icon_16x16@2x.png", 32),

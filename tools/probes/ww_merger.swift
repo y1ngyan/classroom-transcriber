@@ -362,7 +362,7 @@ struct WWMergerProbe {
             let d1Existing = [seg(aText, true, aRange.0, aRange.1)]
             let d1Candidate = seg(candText, false, cRange.0, cRange.1)
 
-            print("  —— D1：一个已定稿旧段（阶段 1.5 报告里那条「自相矛盾」的构造）——")
+            print("  —— D1：一个已定稿旧段（阶段 1.6 派单里那条「自相矛盾」的构造）——")
             dump(d1Existing, "已有段：")
             dump([d1Candidate], "本窗候选（窗口起点 21000 + 相对 0–600）：")
 
@@ -375,7 +375,7 @@ struct WWMergerProbe {
             print("    文本关系（独立重算）= \(d1Relation)")
             print("    第一趟 [拿候选 vs [0]]：same ≥6 字？→ 不是 same → 不收")
             print("    第二趟 [拿候选 vs [0]]：similar？→ 是；**区间距离** = \(iv)ms ≤ \(tailTol)ms → 命中")
-            print("    ⚠️ 阶段 1.5 报告里写的「第二趟差 1500ms」是**重叠深度**，不是距离：")
+            print("    ⚠️ 阶段 1.6 派单里写的「第二趟差 1500ms」是**重叠深度**，不是距离：")
             print("       (候选起点 21000 − 旧段终点 22500) = \(signedDiff)，负号 = 候选起点落在旧段终点之前，")
             print("       也就是两段**重叠** \(abs(signedDiff))ms。它和第三趟的「时间重叠」不矛盾——")
             print("       同一个几何的两种量，当时是我那个变量名（boundGap）叫错了，不是数据矛盾。")

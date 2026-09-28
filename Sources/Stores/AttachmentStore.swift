@@ -3,7 +3,7 @@ import Observation
 import AppKit
 import UniformTypeIdentifiers
 
-/// 图片附件。选中的图片会**复制**到 App 自己的目录下——原规格用
+/// 图片附件。选中的图片会**复制**到 App 自己的目录下——原 TS 版用
 /// expo-file-system 的 copyAsync 也是这个思路，避免用户移动或删除
 /// 原文件后附件失效。
 @MainActor

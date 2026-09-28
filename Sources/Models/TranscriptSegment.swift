@@ -1,6 +1,6 @@
 import Foundation
 
-/// 转录片段。对应原 TS 规格中的 `TranscriptSegment`。
+/// 转录片段。对应迁移前那版 TS/RN App 里的 `TranscriptSegment`（**那份 spec 不在本仓库**）。
 ///
 /// `languages` 记录这段文字由哪个语言模型产出——因为中英混合是挂载
 /// 多个 SpeechTranscriber（zh-CN / en-US）分别识别，同一时刻可能多个
@@ -114,7 +114,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
 
     /// `00:12:03` 形式的时间戳。
     ///
-    /// 规格里写的是 HH:MM，但纯 HH:MM 会把秒丢掉——一节课里同一分钟
+    /// 原 TS 版写的是 HH:MM，但纯 HH:MM 会把秒丢掉——一节课里同一分钟
     /// 常常有好几段，它们会显示成同一个时间，反而没法定位。带上秒
     /// 既满足 HH:MM 的读法，又不丢信息。
     var formattedTimestamp: String {
@@ -123,7 +123,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
     }
 }
 
-/// 核查引用的来源。原规格的 tool schema 里没有这个字段，
+/// 核查引用的来源。原 TS 版的 tool schema 里没有这个字段，
 /// 但 UI 要显示「来源链接」，所以补上。
 struct FactCheckSource: Identifiable, Equatable, Codable {
     var id: UUID = UUID()
@@ -131,7 +131,7 @@ struct FactCheckSource: Identifiable, Equatable, Codable {
     var url: String
 }
 
-/// 事实核查结果。对应原 TS 规格中的 `FactCheckResult`。
+/// 事实核查结果。对应原 TS 版里的 `FactCheckResult`。
 struct FactCheckResult: Identifiable, Equatable {
     enum Status: String, Codable {
         case verified
@@ -146,7 +146,7 @@ struct FactCheckResult: Identifiable, Equatable {
             }
         }
 
-        /// 规格指定：verified 用 #30D158，unverifiable 用 #FF9F0A
+        /// verified 用 #30D158，unverifiable 用 #FF9F0A
         var symbol: String {
             switch self {
             case .verified: return "✓"
@@ -183,9 +183,9 @@ struct FactCheckResult: Identifiable, Equatable {
     }
 }
 
-/// 图片附件。对应原 TS 规格中的 `ImageAttachment`。
+/// 图片附件。对应原 TS 版里的 `ImageAttachment`。
 ///
-/// 相比原规格多了一个 `timestampMillis`：图片要绑定到转录时间轴上的
+/// 相比原 TS 版多了一个 `timestampMillis`：图片要绑定到转录时间轴上的
 /// 某个位置，才能在对应段落旁边显示缩略图。原来的 `timestamp` 是
 /// 墙上时间（Date），无法跟转录的 startTimeMillis 对齐。
 struct ImageAttachment: Identifiable, Equatable {

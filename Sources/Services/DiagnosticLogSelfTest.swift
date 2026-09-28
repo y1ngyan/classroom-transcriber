@@ -8,7 +8,7 @@ import Foundation
 ///
 /// 判据**验过会红**：把 `LogRingPolicy.shouldRotate` 改成恒 `false`
 /// （＝关掉轮转），「环形」那五条立刻红，同时「总字节封顶」跟着红——
-/// 见验收记录。
+/// 见 `~/ClassroomTranscriber-design/P6-1核验记录.md` §四（变异①）。
 enum DiagnosticLogSelfTest {
 
     struct SelfTestResult {

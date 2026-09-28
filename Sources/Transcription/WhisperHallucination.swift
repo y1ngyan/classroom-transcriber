@@ -129,7 +129,8 @@ enum WhisperHallucination {
     /// 署名的**载荷**——签名标记后面跟的、本身就属于模板的串。只有它才让整段判丢。
     ///
     /// 「我愛你」是 whisper 最有名的收尾幻觉（`whisper` 在静音上最常吐的一句），
-    /// 裁决 B 点名要收。「貝爾」是 /tmp/phase4_whisper_push.md 里实测到的译制署名。
+    /// 裁决 B 点名要收。「貝爾」是实测到的译制署名（
+    /// `~/ClassroomTranscriber-design/派单/phase4_whisper_push.md` 第 21–23 行原文）。
     ///
     /// ⚠️ **名单只收观测到的**，不铺——铺专名是打地鼠，而且每一个都可能撞上
     /// 老师真会说到的人名（「贝尔定理」）。剩下那些没命中的载荷，靠的是
@@ -233,12 +234,14 @@ enum WhisperHallucination {
     /// （「退成『都留』（`(掌声)` `(鼓掌)` 一起留）」）。只收「掌声」的话，
     /// 那笔脏账并没有消掉、只是从「掌声 vs 鼓掌」挪到了「`(掌声响起来)` 留
     /// vs `(鼓掌欢迎)` 丢」——核验者 2026-09-24 就是这么指出来的
+    ///（落盘：`~/ClassroomTranscriber-design/派单/phase4_ruling2.md` 新裁决 A）
     static let standaloneOnlyWords: [String] = ["掌声", "掌聲", "鼓掌"]
 
     /// `annotationWords` / `standaloneOnlyWords` 的**归一化副本** —— 判据里比对的是
     /// 这两份，**不是原表**。
     ///
-    /// 为什么必须有它们（2026-09-24，核验者抓到的回归）：比对左边是
+    /// 为什么必须有它们（2026-09-24 真出过的回归，落盘于
+    /// `~/ClassroomTranscriber-design/派单/phase4_section3.md`「先说 §1 已结案」）：比对左边是
     /// `annotationKey(inner)`，它会把空格删掉，可原表里的 `"no speech"` 是**带空格**的
     /// ——`"nospeech"` 既不等于它、也不被它包含，于是这一条**永远不可达**：表里写了、
     /// 代码永远不认。这正是本项目最怕的「看着对、其实没接上」那类缺陷，只不过这次
@@ -340,8 +343,9 @@ enum WhisperHallucination {
             // ②′ **保底出路：括号里出现了人称代词 → 留下**。
             //
             // 理由（2026-09-24 裁决 3 要求的那条出路）：「(我喜欢听音乐)」是**完整的
-            // 真话**，被整段套进括号、又含标注词「音乐」，原来会被丢——那是 spec 1.c
-            // 「不许误杀」的正面违反。
+            // 真话**，被整段套进括号、又含标注词「音乐」，原来会被丢——违反「不许误杀」
+            //（这条原则的落盘出处：`~/ClassroomTranscriber-design/派单/phase4_ruling1.md`
+            // 裁决 3；它引的原 spec 本体不在盘上）。
             //
             // **为什么是代词这一刀**：whisper 的标注描述的是「响动」或「谁在说」，
             // 它**从不用人称代词指人**——代词的存在本身就说明这是有人在讲话，
@@ -349,7 +353,7 @@ enum WhisperHallucination {
             // （`(观众在听音乐)` 没有代词，照丢不误），只救那些明确有说话人的括号段。
             //
             // ⚠️ **这一刀刻意偏向「留」**：单字代词按子串匹配，「其他」里的「他」
-            // 也会命中。松的方向是漏网、紧的方向是误杀，spec 1.c 要求在这两者之间
+            // 也会命中。松的方向是漏网、紧的方向是误杀，「不许误杀」要求在这两者之间
             // 选漏网，所以这个偏向是故意的，不是没考虑到
             if containsPersonalPronoun(key) {
                 return .keep
@@ -457,10 +461,13 @@ enum WhisperHallucination {
     ///    `no_speech_prob` 是 0。**能用的 no-speech 检测器在这里应该接近 1.0**。
     ///    这一条比前两条都硬——它不依赖任何统计推断。
     ///
-    /// **成因还没完全钉死，但取数路径已排除**：核验者 2026-09-24 逐行核过
-    /// `/tmp/wcpp.cpp`（v1.9.4），赋值（:7299，在第一次 decode 之后、
-    /// `whisper_process_logits` 之前）、两处入 `result_all`（7782/7830）、
-    /// getter（8293）**都是对的**——返回的确实是 `probs[<|nospeech|>]`。
+    /// **成因还没完全钉死，但取数路径已排除**：whisper.cpp v1.9.4 的源码里，
+    /// `no_speech_prob` 确实被赋值（在第一次 decode 之后、`whisper_process_logits`
+    /// 之前）、两处入 `result_all`、也有 getter，**都是对的**——返回的确实是
+    /// `probs[<|nospeech|>]`。
+    /// （2026-09-24 在一份 v1.9.4 源码拷贝上逐行核过，行号 :7299 / 7782 / 7830 / 8293。
+    /// 那份拷贝当时在 `/tmp`，系统已清掉，**行号无从复核**——要复现就按版本号自己取一份
+    /// 源码；本机 `brew --prefix whisper.cpp` 是打包版，只有头文件和库，没有 `.cpp`。）
     /// 所以「getter/接线坏了」基本可以排除，零值更像**这个中文模型第一步
     /// 就不给 `<|nospeech|>` 概率质量**。
     ///
@@ -476,8 +483,9 @@ enum WhisperHallucination {
     /// **无效**的——那只证明 `whisper_full_params` 传对了，而 `no_speech_prob`
     /// 走的是另一个函数（`whisper_full_get_segment_no_speech_prob`），两者不相干。
     ///
-    /// 结论：**判据不能建在这个字段上**。spec 里规定的那条臂
-    ///（「no_speech_prob 门限 + 模板黑名单」）在本项目里是空的，
+    /// 结论：**判据不能建在这个字段上**。派单里那条臂
+    ///（「`no_speech_prob` 门限 + 模板黑名单」，见
+    /// `~/ClassroomTranscriber-design/派单/phase4_whisper_push.md` §1）在本项目里是空的，
     /// 这是要报上去裁决的事，不是可以糊过去的事。
     static let noSpeechProbabilityIsInert = true
 
@@ -548,7 +556,8 @@ enum WhisperHallucination {
     ///
     /// **每一条用例都来自真实数据**，不是编的——这是这个自检唯一有价值的地方：
     /// - 「必须丢」组：whisper 在那条 120 秒麦克风静音和 9/20 那条录音里
-    ///   实际吐出来的东西（`/tmp/phase4_whisper_push.md` 第 21–23 行原文），
+    ///   实际吐出来的东西（`~/ClassroomTranscriber-design/派单/phase4_whisper_push.md`
+    ///   第 21–23 行原文），
     ///   加上 9/18 / 9/20 两条真实录音上实测到的每一段标注
     /// - 「必须留」组：课堂上真会说的话，**尤其是那几个「看着最像幻觉、
     ///   其实老师天天说」的**（「下次见」「分享一下」「一段影片」「观看」
@@ -675,7 +684,7 @@ enum WhisperHallucination {
                                           + "删掉它是为了守住这里——观测到的 `(主席说话)` 里「主席」本来就能单独命中"),
             // ── 裁决 3 的两条保底出路（2026-09-24）──
             // 这两条原来是「已知误杀」被记下来的；裁决 3 判「记用例 ≠ 处理」，
-            // 那是 spec 1.c 的正面违反，所以各修了一条窄缝，现在都留下
+            // 那是「不许误杀」的正面违反，所以各修了一条窄缝，现在都留下
             .init(text: "(我喜欢听音乐)", noSpeech: 0.00, level: loud, floor: floor,
                   shouldDrop: false, note: "**裁决 3 修好的误杀**：6 字 ≤ 8、子串含「音乐」，"
                                          + "原来必丢。现在走 `personalPronouns`——括号里有「我」，说明是有人在说话"),

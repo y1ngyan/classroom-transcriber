@@ -26,7 +26,8 @@ enum TranscriptGrade: String, Codable {
 
 /// 逐字符置信度 → 段落质量档位。纯函数，无网络、无模型、无状态。
 ///
-/// 分档依据（2026-09-20 实测，confprobe 逐字符验证）：
+/// 分档依据（2026-09-20 实测；复现入口是 `--confidence-probe --probe-only`
+/// 那条测量通道，见 `WhisperWindowFileRun`——它逐字符读置信度）：
 ///
 /// ```
 ///   合成语音（转录准确）  平均 0.962 · 低置信(<0.5)字符占比  3%（1/34）
@@ -41,7 +42,7 @@ enum TranscriptGrade: String, Codable {
 /// 占比不会。
 enum TranscriptQualityAssessor {
 
-    /// 低置信阈值：confprobe 实测里，准确文本几乎全部字符 ≥0.9，
+    /// 低置信阈值：`--confidence-probe` 实测里，准确文本几乎全部字符 ≥0.9，
     /// 崩坏文本的蒙猜字符落在 0.5 以下。0.5 是两堆之间的空档
     static let lowConfidenceThreshold = 0.5
 

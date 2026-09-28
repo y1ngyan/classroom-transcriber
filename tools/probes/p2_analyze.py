@@ -3,7 +3,7 @@
 
 用法:
     python3 tools/probes/p2_analyze.py /tmp/p3/s2_conf_*.txt
-    python3 tools/probes/p2_analyze.py --labels tools/probes/p2_labels.tsv /tmp/p3/s2_conf_*.txt
+    python3 tools/probes/p2_analyze.py --labels <你自己标的 TSV> /tmp/p3/s2_conf_*.txt
 
 为什么单独写一个脚本、而不是让 Swift 那边算完拉倒：
 **置信区间要做自助法**，而那需要每段的原始逐字符值。Swift 侧只打印分布的分位数，

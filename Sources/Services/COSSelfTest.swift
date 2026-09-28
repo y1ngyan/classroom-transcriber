@@ -4,7 +4,7 @@ import Foundation
 ///
 /// 全程不碰 `UploadStore`——它是 @MainActor 的，而这里主线程要阻塞在
 /// semaphore 上等结果，从 detached task 去碰 MainActor 必然死锁
-/// （阶段 2 踩过的坑）。队列的持久化单独用 Codable 往返来验。
+/// （本项目踩过的坑）。队列的持久化单独用 Codable 往返来验。
 enum COSSelfTest {
 
     /// 「传完第 N 片就停下来」的确定性开关。

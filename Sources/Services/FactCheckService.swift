@@ -108,7 +108,7 @@ enum FactCheckService {
                             "type": "number",
                             "description": "本次判断的把握，0 到 1",
                         ],
-                        // 原规格的 schema 缺了这个字段，但 UI 要显示来源链接，故补上
+                        // 原 TS 版的 tool schema 缺了这个字段，但 UI 要显示来源链接，故补上
                         "sources": [
                             "type": "array",
                             "description": "实际依据的来源",
@@ -122,7 +122,7 @@ enum FactCheckService {
                             ],
                         ],
                     ],
-                    // 原规格也漏了 required，不写的话模型可能省略字段
+                    // 原 TS 版也漏了 required，不写的话模型可能省略字段
                     "required": ["status", "explanation", "confidence"],
                 ],
             ],

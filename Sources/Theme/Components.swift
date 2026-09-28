@@ -2,16 +2,16 @@ import SwiftUI
 
 // MARK: - PillButton
 
-/// 胶囊按钮。规格：主色 #0071E3、文字白色、圆角 980。
+/// 胶囊按钮。主色 #0071E3、文字白色、圆角 980。
 ///
 /// 980 是「永远等于半高」的惯用写法（大到任何高度都取不到真正的圆角），
 /// SwiftUI 里对应的东西就是 `Capsule()`，所以不写那个数字。
 struct PillButton: View {
 
     enum Style {
-        /// 规格给的主按钮
+        /// 主按钮
         case filled
-        /// 次级操作。规格只定义了主按钮，但界面上确实有「添加图片」这类
+        /// 次级操作。`CLAUDE.md` 设计规范只定义了主按钮，但界面上确实有「添加图片」这类
         /// 不该跟主操作抢眼的地方——都涂成蓝的等于没有主次
         case quiet
     }
@@ -46,7 +46,7 @@ struct PillButton: View {
         .buttonStyle(.plain)
         .opacity(isInteractive ? 1 : 0.35)
         .disabled(!isInteractive)
-        // 悬停反馈取代阴影：规格不要阴影，但按钮总得能看出是可点的
+        // 悬停反馈取代阴影：设计规范不要阴影，但按钮总得能看出是可点的
         .brightness(isHovering && isInteractive ? 0.06 : 0)
         .onHover { isHovering = $0 }
     }
@@ -198,7 +198,7 @@ struct TranscriptLine: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
-            // 提问标记：小图标 + 颜色（规格的状态表达方式），不加底色块。
+            // 提问标记：小图标 + 颜色（设计规范的状态表达方式），不加底色块。
             // L2 是确认的提问，L1 只是点名/祈使预警——颜色和措辞都分开，
             // 混在一起用户会以为每条「谁来回答一下」都是一道完整的问题
             if segment.isQuestion {
@@ -342,7 +342,7 @@ struct TranscriptLine: View {
 
 // MARK: - 图片缩略图
 
-/// 缩略图用圆角裁切是**内容裁切**，不是卡片外壳——规格里「不使用卡片」
+/// 缩略图用圆角裁切是**内容裁切**，不是卡片外壳——设计规范里「不使用卡片」
 /// 说的是不要给内容加容器装饰，不是不能把图片切成圆角。
 struct Thumbnail: View {
     let attachment: ImageAttachment
@@ -382,7 +382,7 @@ struct Thumbnail: View {
 
 // MARK: - 状态标记
 
-/// 状态用小图标 + 颜色表达（规格要求），而不是靠背景色块。
+/// 状态用小图标 + 颜色表达（`CLAUDE.md` 设计规范要求），而不是靠背景色块。
 struct StatusMark: View {
     enum Kind {
         case ok, warning, error, neutral

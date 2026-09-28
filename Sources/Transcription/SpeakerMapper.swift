@@ -12,7 +12,7 @@ struct SpeakerAssignment: Equatable {
     /// 拿它兼职「没有值」就分不开了。物化到 `TranscriptSegment` 时按
     /// `speakerId == nil ? nil : overlapRatio` 转成 `Double?`，判据永远是
     /// `speakerId`。这条形状照 C-1 已冻结的实现（`overlapRatio` 非可选），
-    /// 没有改成 Optional 是为了不偏离那份契约
+    /// 没有改成 Optional 是为了不偏离那份已冻结的字段形状
     var overlapRatio: Double
     /// 本段内第二个人也占了可观时长（见 `isMixed` 的判定）
     var isMixed: Bool
@@ -513,7 +513,8 @@ enum SelfTestSessionFile {
         // 写死 `labeled == 0` 是错的：它把「文件里没有 speakerId 这个键」当成
         // 永远成立的前提，而那个前提 C-3 一落地就不成立了——标签会被物化进
         // 现存会话，这条随即变红，且红得没有道理（文件已经不是「旧文件」了）。
-        // 核验者 2026-09-24 点出过这一点。
+        // 核验者 2026-09-24 点出过这一点（落盘：`~/ClassroomTranscriber-design/C-2核验记录.md`
+        // 第 38 行——真实会话「文件确实缺 `speakerId` 键 → 走强分支」）。
         //
         // 所以判据改成「**文件里真的没有这个键** ⇒ 必须回落到 nil」。这不是放宽：
         // 对缺键的文件断言一字未松，而且现在**多验了一条**——「这个文件确实缺键」

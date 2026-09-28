@@ -1,9 +1,10 @@
 import SwiftUI
 import AppKit
 
-/// 设计 token，对应原规格里的 `theme` 对象。
+/// 设计 token。对应迁移前那版 TS/RN App 里的 `theme` 对象——**那份 spec
+/// 不在本仓库里**，本文件就是这些值的唯一出处。
 ///
-/// **深色模式为什么不用 `useColorScheme()` 手动切**：原规格是 React Native
+/// **深色模式为什么不用 `useColorScheme()` 手动切**：迁移前那版是 React Native
 /// 的写法，那边没有系统级的语义色，只能自己读 scheme 再挑一套值。macOS 上
 /// 手动切会漏——系统在 App 运行时切换外观（或某些控件在别的外观上下文里
 /// 渲染）时，读到的值不会更新，而 `NSColor` 的动态 provider 是每次解析时
@@ -29,11 +30,11 @@ enum Theme {
 
     /// 强调色 / 英文文字色 #0071E3。
     ///
-    /// 两种外观用同一个值：规格只给了一个。实测它在黑底上对比度 4.45:1，
-    /// 紧贴 AA 的 4.5 线但没到——够用，不值得为此偏离规格去换 #0A84FF。
+    /// 两种外观用同一个值：迁移前那版只给了一个。实测它在黑底上对比度 4.45:1，
+    /// 紧贴 AA 的 4.5 线但没到——够用，不值得为此偏离它去换 #0A84FF。
     static let accent = Color(hex: 0x0071E3)
 
-    /// 状态色。规格给的这三个值本身就是苹果深色外观那一套，
+    /// 状态色。迁移前那版给的这三个值本身就是苹果深色外观那一套，
     /// 在白底黑底上都立得住，所以两种外观共用。
     static let success = Color(hex: 0x30D158)
     static let warning = Color(hex: 0xFF9F0A)
@@ -54,7 +55,7 @@ enum Theme {
         static let md: CGFloat = 16
         static let lg: CGFloat = 24
         static let xl: CGFloat = 40
-        /// 区块之间的留白。规格里「section 间距 80」就是它——
+        /// 区块之间的留白。`CLAUDE.md` 设计规范里「`Theme.Spacing.xxl`(80)」就是它——
         /// 取代卡片：靠留白分组，而不是靠框
         static let xxl: CGFloat = 80
     }
@@ -78,7 +79,7 @@ enum Theme {
 
     // MARK: - 字号
 
-    /// 字体 token。规格给的是 fontSize / letterSpacing / lineHeight，
+    /// 字体 token。迁移前那版给的是 fontSize / letterSpacing / lineHeight，
     /// SwiftUI 那边对应 `size` / `tracking` / **`lineSpacing`**——
     /// 注意最后这个不是同一个东西，见 `lineSpacing` 的说明。
     struct TextStyle {
@@ -86,7 +87,7 @@ enum Theme {
         let size: CGFloat
         let weight: Font.Weight
         let tracking: CGFloat
-        /// 规格里的行高（一行占的总高度）
+        /// 迁移前那版的 `lineHeight`（一行占的总高度）
         let lineHeight: CGFloat
         var monospaced = false
 
@@ -97,12 +98,12 @@ enum Theme {
             return .system(size: size, weight: weight)
         }
 
-        /// 规格的 `lineHeight` 是「整行高度」，SwiftUI 的 `lineSpacing` 是
+        /// 那边的 `lineHeight` 是「整行高度」，SwiftUI 的 `lineSpacing` 是
         /// 「行与行之间额外加多少空隙」——两者差一个字体自身的行高。
         /// 直接写 `.lineSpacing(25)` 会得到 25 的空隙，行距翻倍。
         ///
-        /// 负数（规格要求比字体自然行高更紧）SwiftUI 表达不了，只能夹到 0。
-        /// 受影响的只有 largeTitle：48pt 的自然行高约 57，规格要 52。
+        /// 负数（要求比字体自然行高更紧）SwiftUI 表达不了，只能夹到 0。
+        /// 受影响的只有 largeTitle：48pt 的自然行高约 57，那边要 52。
         /// 它只用在单行的页面大标题上，行距本来就不显现。
         var lineSpacing: CGFloat {
             guard !monospaced else { return 0 }

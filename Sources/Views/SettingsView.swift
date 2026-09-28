@@ -9,7 +9,7 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            // 区块之间靠 80 的留白分开，不放卡片框（规格要求）
+            // 区块之间靠 80 的留白分开，不放卡片框（设计规范要求）
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
                 audioSection()
@@ -315,7 +315,7 @@ struct SettingsView: View {
 
     /// 这一节不配置任何东西，只提供「把现场取出来」这一个动作。
     ///
-    /// 规格上它是 `SettingsSection` 的另一种用法——没有步骤、只有一个按钮
+    /// 它是 `SettingsSection` 的另一种用法——没有步骤、只有一个按钮
     /// 和一条说明，和「录音与识别」那一节同一种做法。分组靠留白和发丝线，
     /// 没有框也不该有
     private func diagnosticsSection() -> some View {
@@ -342,7 +342,7 @@ struct SettingsView: View {
 
                 // 说清它会自己封顶——不然「日志」两个字让人担心它哪天把盘写满
                 // 不写 `**强调**`：这里的文案是以 `String` 变量喂进 `Text` 的，
-                // 不走 markdown 解析，星号会原样显示出来（C-3-2 踩过）
+                // 不走 markdown 解析，星号会原样显示出来
                 note("日志目录：\(DiagnosticLog.directoryPath)。最多 4 个文件、约 1 MB，"
                      + "写满之后自动丢掉最老的，不会一直长大。")
             }
@@ -368,7 +368,7 @@ struct SettingsView: View {
         .padding(.top, 8)
     }
 
-    /// 提示行。规格要求分组靠留白和小图标，不靠背景色块，
+    /// 提示行。设计规范要求分组靠留白和小图标，不靠背景色块，
     /// 所以这里只剩一个图标 + 一段灰字。
     private func note(_ text: String) -> some View {
         StatusMark(kind: .neutral, text: text)
@@ -379,7 +379,7 @@ struct SettingsView: View {
 
 /// 一个设置区块：标题、说明、「去哪儿拿」的步骤，然后是表单。
 ///
-/// 没有外框。分组靠上面那条发丝分隔线和 80 的留白——这是规格要的
+/// 没有外框。分组靠上面那条发丝分隔线和 80 的留白——这是设计规范要的
 /// 苹果产品页那种做法，框和阴影都不要。
 ///
 /// 步骤直接印在界面上而不是只写在文档里：用户卡住的那一刻他人就在

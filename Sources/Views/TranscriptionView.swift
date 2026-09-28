@@ -97,11 +97,11 @@ struct TranscriptionView: View {
             }
             .padding(.top, Theme.Spacing.xs)
 
-            // 区块之间用 80 的留白拉开，而不是加个卡片框（规格要求）
+            // 区块之间用 80 的留白拉开，而不是加个卡片框（设计规范要求）
             CaptureDiagnostics()
                 .padding(.top, Theme.Spacing.md)
 
-            // 提问汇总入口：次要操作，按规格退化成文字链接而不是按钮
+            // 提问汇总入口：次要操作，按设计规范退化成文字链接而不是按钮
             if !questionSegments.isEmpty {
                 Button {
                     isShowingQuestions = true
@@ -224,7 +224,7 @@ struct TranscriptionView: View {
 
     // MARK: - 录制按钮
 
-    /// 规格要求不使用阴影。这个按钮原本靠阴影从滚动的文字上"浮"起来，
+    /// 设计规范要求不使用阴影。这个按钮原本靠阴影从滚动的文字上"浮"起来，
     /// 去掉之后改用实心填充 + 留白来拉开层次——它下面那 120pt 的留白
     /// 就是干这个的。
     private var recordButton: some View {

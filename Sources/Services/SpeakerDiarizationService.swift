@@ -189,7 +189,8 @@ struct DiarizationEvaluation {
             + " · 未标注·无有效重叠 \(stats.unlabeledNoOverlap)"
             + " · 未标注·无多数派 \(stats.unlabeledNoMajority)"
             // 只在**真的出现**时才多打这一格：正常会话（反向段 0 条）的报告行
-            // 一个字节都不变，C-3-1 已核验的那三行格式不受影响
+            // 一个字节都不变，C-3-1 已核验的那几行格式不受影响
+            //（`~/ClassroomTranscriber-design/C-3-1核验记录.md` §三 逐项对过那张表）
             + (stats.reversedTranscriptSegments == 0
                 ? ""
                 : " · ⚠️ 反向转录段 \(stats.reversedTranscriptSegments)（数据异常，按零长处理）"))
@@ -503,8 +504,10 @@ enum SpeakerDiarizationService {
                 transcript: part.segments,
                 part: part,
                 diarization: diarization,
-                // **会话**音频总长（不是本片段的）：C-1 裁决 2 点名的坑，
-                // 传小了会把合法的 diar 段夹成零长、判成「这里没人说话」，而且不报错
+                // **会话**音频总长（不是本片段的）：传小了会把合法的 diar 段
+                // 夹成零长、判成「这里没人说话」，而且不报错。
+                //（同一个坑的另一面见 `~/ClassroomTranscriber-design/C-1裁决2.md`
+                // §三 红 2——那里的用例是自己声明了比 span 还短的音频总长）
                 sessionAudioMillis: session.durationMillis
             )
             for segmentIndex in updated.parts[partIndex].segments.indices {

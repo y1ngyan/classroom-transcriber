@@ -11,7 +11,7 @@ import Foundation
 ///
 /// 判据验过会红：
 /// - 把 `WhisperSegmentTiming.resolve` 里 `raw1 < raw0` 那一支删掉 → 反向段
-///   那几条立刻红（见验收记录）；
+///   那几条立刻红（见 `~/ClassroomTranscriber-design/P6-2核验记录.md` §五）；
 /// - 把体检里「干净会话不出现」的前提破坏（给 clean 会话塞一个反向段）
 ///   → 零误报那条红。
 enum IntegrityScanSelfTest {

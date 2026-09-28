@@ -205,9 +205,9 @@ extension DiarizationStore {
         /// 而这正是并发闸能起作用的前提：第一次调用插进 `running` 之后**让出
         /// 主 actor**，第二次才有机会在闸上被拦下。
         ///
-        /// 2026-09-28 实测：不加这一句时两次调用**各跑完整条、一次都不挂起**，
-        /// 「并发闸」三条断言全红（`[true, true]` / 跑了 2 次 / 落盘 2 次）
-        /// ——不是闸坏了，是这个桩把闸要防的那个交错整个消掉了。
+        /// 拿掉这一句重跑 `--diarize-ui-selftest` 即见：两次调用**各跑完整条、
+        /// 一次都不挂起**，「并发闸」三条断言全红（`[true, true]` / 跑了 2 次 /
+        /// 落盘 2 次）——不是闸坏了，是这个桩把闸要防的那个交错整个消掉了。
         /// 一个不挂起的桩测不出任何并发闸
         func call(_ session: RecordingSession) async -> DiarizationEvaluation {
             callCount += 1
@@ -223,7 +223,7 @@ extension DiarizationStore {
     ///
     /// **`async` 是必需的、不是风格问题**：`run` 要 `await`，而在主 actor 上
     /// 用信号量阻塞着等，等的那件事本身正要回主 actor —— 直接死锁。
-    /// 这个坑本项目在阶段 2 踩过，`App.swift` 里那条注释就是它留下的
+    /// 这个坑本项目踩过，`App.swift` 里那条注释就是它留下的
     @MainActor
     static func selfTest() async -> SelfTestResult {
         var r = SelfTestResult()

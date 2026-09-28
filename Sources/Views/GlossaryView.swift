@@ -27,7 +27,7 @@ private struct GlossaryContent: View {
 
     var body: some View {
         ScrollView {
-            // 区块之间靠 80 的留白和发丝分隔线分组，不放卡片框（规格要求）
+            // 区块之间靠 80 的留白和发丝分隔线分组，不放卡片框（设计规范要求）
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
                 coursePreset
@@ -398,7 +398,7 @@ private struct GlossaryContent: View {
         .padding(.leading, Theme.Spacing.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         // 待确认的改动用左侧一条 accent 竖线标出来，而不是整块底色——
-        // 规格里的「状态用小图标 + 颜色表达」
+        // 设计规范里的「状态用小图标 + 颜色表达」
         .overlay(alignment: .leading) {
             Rectangle().fill(Theme.accent).frame(width: 2)
         }

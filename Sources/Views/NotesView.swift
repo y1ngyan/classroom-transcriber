@@ -106,7 +106,7 @@ struct NotesView: View {
             if let reason = store.exportDisabledReason {
                 StatusMark(kind: .neutral, text: reason)
             }
-            // 规格要求不使用阴影。原来靠阴影从内容上「浮」起来，现在靠
+            // 设计规范要求不使用阴影。原来靠阴影从内容上「浮」起来，现在靠
             // 实心填充 + 下方留白拉开层次
             PillButton(
                 title: "导出 Markdown",

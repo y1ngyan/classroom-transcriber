@@ -265,7 +265,7 @@ struct ClassroomTranscriberApp: App {
         // 麦克风链路自检：--mic-selftest
         // 端到端跑一遍「点开始录制」实际走的路径：TCC 权限 → analyzer → tap → 采集 → 停止。
         // 刻意不 exit：主 actor 的调度依赖主线程 run loop，在 init 里阻塞主线程
-        // 会把引擎饿死（阶段 2 踩过的坑），所以这里让 App 照常启动、窗口照常出现。
+        // 会把引擎饿死（本项目踩过的坑），所以这里让 App 照常启动、窗口照常出现。
         if CommandLine.arguments.contains("--mic-selftest") {
             setvbuf(stdout, nil, _IONBF, 0)
             let engine = TranscriptionEngine()
@@ -654,7 +654,7 @@ struct ClassroomTranscriberApp: App {
         // 两组：`DiarizationPanelState` 那组是「输入 → 该显示哪一档」的纯函数；
         // `DiarizationStore` 那组是三条闸（手动触发 / 不并发 / 失败不落盘）。
         // 后者要 `await`，所以这条入口走 Task + MainActor——**不能在主线程上
-        // 用信号量等**（等的那件事正要回主 actor，直接死锁，阶段 2 踩过）
+        // 用信号量等**（等的那件事正要回主 actor，直接死锁，本项目踩过）
         //
         // 退出码跟着红绿走，理由同下面几条：只看退出码的探针要能分出红绿
         if CommandLine.arguments.contains("--diarize-ui-selftest") {
@@ -1276,7 +1276,7 @@ struct ClassroomTranscriberApp: App {
         // 无头核查状态汇总自检：--manual-check-selftest（纯本地，不发网络请求）
         //
         // 走 MainActor：FactCheckStore 是 @MainActor 的，自检要构造它。
-        // 不用 semaphore 阻塞主线程（那会和 MainActor 死锁——阶段 2 踩过的坑），
+        // 不用 semaphore 阻塞主线程（那会和 MainActor 死锁——本项目踩过的坑），
         // 让 App 照常启动、跑完自己 exit
         if CommandLine.arguments.contains("--manual-check-selftest") {
             setvbuf(stdout, nil, _IONBF, 0)
@@ -1361,7 +1361,7 @@ struct ClassroomTranscriberApp: App {
         //
         // 刻意直接调 GlossaryService 而不是 GlossaryStore：Store 是
         // @MainActor 的，而这里主线程要阻塞在 semaphore 上等结果，
-        // 从 detached task 去碰 MainActor 必然死锁（阶段 2 踩过的坑）。
+        // 从 detached task 去碰 MainActor 必然死锁（本项目踩过的坑）。
         // 示例文本里刻意混入「本来就正确」的中文和英文，用来验证
         // 「只改明显错误的术语」这条约束真的守住了。
         if CommandLine.arguments.contains("--glossary") {
@@ -1512,7 +1512,7 @@ struct ClassroomTranscriberApp: App {
         // 退出码跟着红绿走——`--whisper-selftest` 那边踩过的坑是自检失败不改
         // 退出码，于是只看退出码的探针分不出它是红是绿
         //
-        // 走 `Task { @MainActor in }` 而不是信号量阻塞主线程：那是阶段 2 的坑
+        // 走 `Task { @MainActor in }` 而不是信号量阻塞主线程：那是本项目踩过的坑
         // （主线程占着不放，MainActor 的任务永远排不上）。跑完自己 exit
         if CommandLine.arguments.contains("--study-notes-selftest") {
             setvbuf(stdout, nil, _IONBF, 0)
