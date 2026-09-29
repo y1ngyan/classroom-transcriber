@@ -315,6 +315,26 @@ final class RecordingsStore {
         save(session)
     }
 
+    // MARK: - 提问按需回填（B 包 §4.6.4）
+
+    /// 给一条旧会话补出问题条目。返回是否真的跑了（false = 版本已达标、
+    /// 灵敏度关着，或者会话不存在）。
+    ///
+    /// **按需**，不是启动时全量扫：回填要解码正文并逐段跑检测器，
+    /// 一学期几百条会话放在启动路径上就是「打开 App 先卡十秒」。
+    /// 由提问页在打开某一条会话时调它。
+    ///
+    /// **不动 `updatedAt`**：它是「用户最后一次动这条录音」的意思，
+    /// 列表和「最近更新」都读它。回填是派生数据的补齐，把它算成一次用户编辑
+    /// 会让一堆旧录音在同一天集体变成「刚更新过」
+    @discardableResult
+    func backfillQuestions(id: UUID, sensitivity: QuestionSensitivity) -> Bool {
+        guard var session = session(id: id) else { return false }
+        guard session.backfillQuestions(sensitivity: sensitivity) else { return false }
+        save(session)
+        return true
+    }
+
     /// 已有课程名，按出现次数从多到少。给「设置课程」的下拉候选，
     /// 让用户复用已有课程名而不是每次手打——手打早晚会出现
     /// 「机器学习」和「机器学习 」两个组

@@ -614,6 +614,19 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 提问数据层自检：--questions-selftest（B 包 §4 / §6.2 / §6.3 / §4.6）
+        // （离线：临时目录夹具；不联网、不调模型、不碰麦克风、不发声、不读真实库）
+        //
+        // 和 `--question-selftest`（检测器那件）是**两件事**，名字只差一个 s：
+        // 那件验的是「这句话算不算提问」，这件验的是「提问存下来之后怎么活」。
+        // 退出码跟着红绿走，理由同下面几条：只看退出码的探针要能分出红绿
+        if CommandLine.arguments.contains("--questions-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = QuestionDataSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 说话人映射自检：--speaker-mapping-selftest [--session-file <会话 json>]
         // （纯函数 + 旧会话解码；不联网、不加载模型、不碰麦克风、不发声）
         //

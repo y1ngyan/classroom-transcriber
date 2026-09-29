@@ -21,23 +21,41 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     /// 课程名，用于分组。空表示未分类
     var course: String = ""
 
+    // MARK: - 提问与答案（B 包 §4）
+
+    /// 老师问过的问题。**放在会话文件里而不是单独一个 questions.json**（§4.1）：
+    /// 答案必须跟着会话走——删掉一条录音时它的答案也该一起消失，而
+    /// `delete()` 的现有语义（删正文文件）天然覆盖了这件事，不需要第二套级联删除。
+    ///
+    /// 条目量级是几十条、每条答案几 KB，相对已经几百 KB 的 `segments` 不是
+    /// 增量级问题；`save` 的原子写仍然是「一条会话一次写」
+    var questions: [LessonQuestion] = []
+
+    /// 问题条目的 schema 版本，**缺键视作 0**（= 还没回填过）。见
+    /// `backfillQuestions(sensitivity:)` 与 `LessonQuestionSchema`
+    var questionSchemaVersion: Int = 0
+
     // MARK: - 向后兼容
 
-    /// 手写解码而不是用合成的：这两个字段是后加的，磁盘上已有的
-    /// 会话 JSON 里没有这两个键，合成解码会直接抛 keyNotFound 让
+    /// 手写解码而不是用合成的：这几个字段是后加的，磁盘上已有的
+    /// 会话 JSON 里没有这些键，合成解码会直接抛 keyNotFound 让
     /// 整条会话读不出来。加字段不能把旧数据读废
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, updatedAt, parts, title, course
+        case questions, questionSchemaVersion
     }
 
     init(id: UUID, startedAt: Date, updatedAt: Date, parts: [RecordingPart],
-         title: String = "", course: String = "") {
+         title: String = "", course: String = "",
+         questions: [LessonQuestion] = [], questionSchemaVersion: Int = 0) {
         self.id = id
         self.startedAt = startedAt
         self.updatedAt = updatedAt
         self.parts = parts
         self.title = title
         self.course = course
+        self.questions = questions
+        self.questionSchemaVersion = questionSchemaVersion
     }
 
     init(from decoder: any Decoder) throws {
@@ -49,6 +67,11 @@ struct RecordingSession: Identifiable, Codable, Equatable {
         // 缺键视作空串，和「没起过名」「未分类」是同一个意思
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         course = try c.decodeIfPresent(String.self, forKey: .course) ?? ""
+        // 缺键 = 「这节课没有问题条目」，不是「这条会话读不出来」。
+        // 元素包一层 `LenientElement`：数组里一条坏掉的不许连坐整条会话
+        questions = try c.decodeIfPresent([LenientElement<LessonQuestion>].self, forKey: .questions)?
+            .compactMap(\.value) ?? []
+        questionSchemaVersion = try c.decodeIfPresent(Int.self, forKey: .questionSchemaVersion) ?? 0
     }
 
     /// 列表上显示的名字。用户起过就用它，没起过回落到时间——
@@ -76,7 +99,13 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     }
 
     var segmentCount: Int { parts.reduce(0) { $0 + $1.segments.count } }
+    /// **被标成提问的段落数**。B 包之前这就是列表上那句「N 个提问」的来源。
+    /// 它与 `questions`（去重后的问题条目）不是一回事：同一句话老师问两遍，
+    /// 这里算 2、那里算 1。新代码要「提问页里那个 N」请用 `questions.count`，
+    /// 或者读 `SessionSummary.questionCount`（那里有一层旧数据的回落，见其注释）
     var questionCount: Int { parts.reduce(0) { $0 + $1.segments.filter(\.isQuestion).count } }
+    /// 其中已经有答案的条数（`status == .answered`，与 §5 状态机同一把尺子）
+    var answeredQuestionCount: Int { questions.filter { $0.status == .answered }.count }
     var poorCount: Int { parts.reduce(0) { $0 + $1.segments.filter { $0.qualityGrade == .poor }.count } }
     var fairCount: Int { parts.reduce(0) { $0 + $1.segments.filter { $0.qualityGrade == .fair }.count } }
 
@@ -221,7 +250,16 @@ struct SessionSummary: Identifiable, Codable, Equatable {
     var durationMillis: Int
     var partCount: Int
     var segmentCount: Int
+    /// 老师提问的条数（列表上那句「N 个提问」）。
+    ///
+    /// **这个字段的含义在 B 包里变了**，而且必须说清楚变在哪：设计稿 §4.5 说
+    /// 「新增 `questionCount`」，但这个名字在本仓库**已经存在**（那时它数的是
+    /// 「被标成提问的段落数」）。两处指的是同一件产品事实（这节课老师问了多少），
+    /// 只是口径不同——段落计不去重，问题条目按 `normalizedText` 去重（§6.4）。
+    /// 处理办法见 `SessionSummary.init(session:)` 里那段回落说明
     var questionCount: Int
+    /// 其中已经有答案的条数（`status == .answered`，与 §5 状态机同一把尺子）
+    var answeredQuestionCount: Int
     var poorCount: Int
     var fairCount: Int
     /// 首段文本的前 30 字。列表光给一个日期看不出是哪节课，
@@ -239,7 +277,19 @@ struct SessionSummary: Identifiable, Codable, Equatable {
         durationMillis = session.durationMillis
         partCount = session.parts.count
         segmentCount = session.segmentCount
-        questionCount = session.questionCount
+        // 「N 个提问」的口径切换（§4.5）。**已回填的会话走问题条目数**
+        // （提问页里那个 N，去重后）；**没回填过的旧会话回落到段落计数**，
+        // 也就是 B 包之前那个数字。
+        //
+        // 为什么要有这个回落：本包不做全量迁移（§4.6.4），而列表页那句
+        // 「N 个提问」读的正是这个数。直接改成条目数的话，用户库里**所有**旧录音
+        // 的数字会在下一次 save 之后静默归零——用户不会知道那是「还没回填」，
+        // 只会以为 App 把他录的提问弄丢了。回填过的会话一律走条目数，
+        // 于是这个回落随着回填逐步消失
+        questionCount = session.questionSchemaVersion >= LessonQuestionSchema.current
+            ? session.questions.count
+            : session.questionCount
+        answeredQuestionCount = session.answeredQuestionCount
         poorCount = session.poorCount
         fairCount = session.fairCount
         title = session.title
@@ -269,7 +319,7 @@ struct SessionSummary: Identifiable, Codable, Equatable {
     /// 录音消失）。缺键视作空串
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, updatedAt, durationMillis, partCount, segmentCount
-        case questionCount, poorCount, fairCount, firstText, title, course
+        case questionCount, answeredQuestionCount, poorCount, fairCount, firstText, title, course
     }
 
     init(from decoder: any Decoder) throws {
@@ -281,6 +331,8 @@ struct SessionSummary: Identifiable, Codable, Equatable {
         partCount = try c.decode(Int.self, forKey: .partCount)
         segmentCount = try c.decode(Int.self, forKey: .segmentCount)
         questionCount = try c.decode(Int.self, forKey: .questionCount)
+        // 后加的字段：老 index.json 里没有它。缺键 = 「没有已答的问题」
+        answeredQuestionCount = try c.decodeIfPresent(Int.self, forKey: .answeredQuestionCount) ?? 0
         poorCount = try c.decode(Int.self, forKey: .poorCount)
         fairCount = try c.decode(Int.self, forKey: .fairCount)
         firstText = try c.decode(String.self, forKey: .firstText)
