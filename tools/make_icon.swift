@@ -336,7 +336,20 @@ func renderIcon(size: Int, variant: Variant) -> CGImage? {
 }
 
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let outputDir = root.appendingPathComponent("build/icon")
+
+/// 产物目录要跟着 `build.sh` 的 `${BUILD_DIR}` 走（P0-1 补充要求 ⑧）。
+///
+/// 写死 `build/icon` 的后果不是「图标生成到别处」这么无害：一次重定向的构建
+/// 仍然会**往用户那份 `build/` 里写文件**，而 `build.sh` 里那句
+/// 「我这次一个字节都没碰用户的目录」正是人拿来决定要不要重新授权麦克风的
+/// 依据——半吊子的重定向比没有重定向更糟，它让那句话变成假的。
+///
+/// 默认（没设这个变量）仍然是 `build/icon`，行为不变
+let buildDirName = ProcessInfo.processInfo.environment["CLASSROOM_BUILD_DIR"] ?? "build"
+let buildDir = buildDirName.hasPrefix("/")
+    ? URL(fileURLWithPath: buildDirName, isDirectory: true)
+    : root.appendingPathComponent(buildDirName, isDirectory: true)
+let outputDir = buildDir.appendingPathComponent("icon")
 try FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
 
 // MARK: - 对照图
@@ -452,4 +465,4 @@ guard iconutil.terminationStatus == 0 else {
     FileHandle.standardError.write("❌ iconutil 失败\n".data(using: .utf8)!)
     exit(1)
 }
-print("✅ build/icon/AppIcon.icns")
+print("✅ \(outputDir.appendingPathComponent("AppIcon.icns").path)")

@@ -1,6 +1,12 @@
 # 构建产物。build.sh 每次都先 rm -rf 再重建，里面全是生成物
 build/
 
+# 验证侧的构建目录（P0-1 补充要求 ⑧）。App 是 ad-hoc 签名的，系统的麦克风
+# 授权按二进制指纹 cdhash 记；重编一次 `build/` 就作废用户之前授过的那次授权
+# （2026-09-30 真的发生了两次，表现为「点开始录制就崩」）。所以验证这一侧用
+# `CLASSROOM_BUILD_DIR=build-verify ./build.sh` 编到别处，这个目录同样是生成物
+build-verify/
+
 # SwiftPM 的构建目录（Vendor/DiarizeHelper/.build/）。二进制不进仓库——
 # 进 bundle 的那一份是 build.sh 从这里拷过去的
 .build/

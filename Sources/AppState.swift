@@ -127,6 +127,13 @@ final class AppState {
                 .init("后端", AppConfig.transcriptionBackend.rawValue),
                 .init("增益", AppConfig.micGain.rawValue),
                 .init("日志目录", DiagnosticLog.directoryPath),
+                // 采集设备（P0-1 ②）。**只读 CoreAudio 表**——不碰 AVAudioEngine、
+                // 不开设备、不触发授权（`InputDeviceCatalog` 就是为这条约束写的）。
+                //
+                // 这一条说的是**进程起来时**系统默认是哪只；「这节录音是哪个麦」
+                // 是每次开始录制另记的一行（`TranscriptionEngine.beginCaptureTracking`），
+                // 两者可以不同，别拿这一条去归属某一节课
+                .init("默认输入", Self.defaultInputSummary()),
             ])
 
             // 退出的写法是通知，不是 `deinit`：`AppState` 是 `App` 的
@@ -139,6 +146,16 @@ final class AppState {
                 DiagnosticLog.info(.app, "退出")
             }
         }
+    }
+
+    /// 启动日志里那格「默认输入」。
+    ///
+    /// 读不到就给一句实话，**不编一个设备名**——那行日志的全部价值在于事后
+    /// 能回答「当时到底是哪只麦」，写一只猜出来的比留空更糟
+    private static func defaultInputSummary() -> String {
+        let id = InputDeviceCatalog.defaultInputDeviceID()
+        guard let info = InputDeviceCatalog.info(of: id) else { return "（读不到，ID \(id)）" }
+        return "\(info.name) [\(info.uid) · \(info.channels)ch · \(Int(info.sampleRate))Hz]"
     }
 
     /// 开始转录。术语表在这里灌给识别器。

@@ -35,6 +35,9 @@ struct RecordingDraft: Codable, Equatable {
     /// 最后一次写入时间（墙上时间）。恢复界面按它排序，
     /// 也用来告诉用户「这份草稿停在什么时候」
     var savedAt: Date
+    /// 本次录制用的是哪个麦（P0-1）。**草稿也必须带它**，否则崩溃恢复出来的
+    /// 那条会话会丢掉设备——而崩溃恢复恰恰是最需要「这条录音当时什么形态」的场合
+    var capture: RecordingCapture?
     /// 草稿结构版本。**手写解码而不是用合成的**：加字段不能把已写下的草稿读废
     /// ——崩溃现场只出现一次，读不出来就等于没写
     var version: Int
@@ -47,6 +50,7 @@ struct RecordingDraft: Codable, Equatable {
         durationMillis: Int,
         segments: [TranscriptSegment],
         savedAt: Date,
+        capture: RecordingCapture? = nil,
         version: Int = RecordingDraft.currentVersion
     ) {
         self.id = id
@@ -56,13 +60,15 @@ struct RecordingDraft: Codable, Equatable {
         self.durationMillis = durationMillis
         self.segments = segments
         self.savedAt = savedAt
+        self.capture = capture
         self.version = version
     }
 
     static let currentVersion = 1
 
     private enum CodingKeys: String, CodingKey {
-        case id, targetSessionID, recordingFileName, startedAt, durationMillis, segments, savedAt, version
+        case id, targetSessionID, recordingFileName, startedAt, durationMillis, segments,
+             savedAt, capture, version
     }
 
     init(from decoder: any Decoder) throws {
@@ -74,6 +80,8 @@ struct RecordingDraft: Codable, Equatable {
         durationMillis = try c.decode(Int.self, forKey: .durationMillis)
         segments = try c.decode([TranscriptSegment].self, forKey: .segments)
         savedAt = try c.decodeIfPresent(Date.self, forKey: .savedAt) ?? startedAt
+        // 后加的键：本包之前写下的草稿里没有它。缺键视作 nil（「不知道是哪个麦」）
+        capture = try c.decodeIfPresent(RecordingCapture.self, forKey: .capture)
         version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
     }
 
@@ -86,7 +94,8 @@ struct RecordingDraft: Codable, Equatable {
             recordingFileName: recordingFileName,
             startedAt: startedAt,
             durationMillis: durationMillis,
-            segments: segments
+            segments: segments,
+            capture: capture
         )
     }
 }

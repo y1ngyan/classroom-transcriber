@@ -224,6 +224,54 @@ struct RecordingPart: Identifiable, Codable, Equatable {
     var offsetMillis: Int
     /// 相对本片段 0 点的转录
     var segments: [TranscriptSegment]
+    /// 这一段录音是**用哪个麦**录的（P0-1）。nil = 这条片段存于本包之前，
+    /// 或者当时根本没读到设备。
+    ///
+    /// **跟着片段走，不跟着会话走**：设备是「这一次开始→停止」的属性。挂在会话上
+    /// 的话，「接着录」第二段换了麦（换教室、外置麦没带）就记不出来了——而
+    /// 那恰恰是最需要第二种记录的场景
+    var capture: RecordingCapture?
+
+    /// 手写解码：`capture` 是后加的键，磁盘上已有的会话 JSON 里没有它。
+    /// 合成解码会抛 keyNotFound 让**整条会话**读不出来——那不是「新字段是空的」，
+    /// 是「用户录的这节课消失了」。缺键视作 nil（= 不知道是哪个麦），
+    /// 而不是编一个默认设备顶上
+    private enum CodingKeys: String, CodingKey {
+        case id, fileName, startedAt, durationMillis, offsetMillis, segments, capture
+    }
+
+    init(id: UUID, fileName: String?, startedAt: Date, durationMillis: Int,
+         offsetMillis: Int, segments: [TranscriptSegment], capture: RecordingCapture? = nil) {
+        self.id = id
+        self.fileName = fileName
+        self.startedAt = startedAt
+        self.durationMillis = durationMillis
+        self.offsetMillis = offsetMillis
+        self.segments = segments
+        self.capture = capture
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        fileName = try c.decodeIfPresent(String.self, forKey: .fileName)
+        startedAt = try c.decode(Date.self, forKey: .startedAt)
+        durationMillis = try c.decode(Int.self, forKey: .durationMillis)
+        offsetMillis = try c.decode(Int.self, forKey: .offsetMillis)
+        segments = try c.decode([TranscriptSegment].self, forKey: .segments)
+        capture = try c.decodeIfPresent(RecordingCapture.self, forKey: .capture)
+    }
+
+    /// 「这一段是哪个麦」。读不出来时给一句实话，**不编设备名**
+    var captureSummary: String {
+        guard let capture else { return "未记录（这条片段存于记录设备之前）" }
+        var text = "\(capture.device.name)"
+        if capture.source == InputDeviceResolution.Source.systemDefault.rawValue {
+            text += "（回落自系统默认）"
+        }
+        for change in capture.changes { text += "\n  · \(change.summary)" }
+        return text
+    }
 }
 
 /// 引擎 stop() 收尾完成后交给 Store 的快照。引擎不认识 RecordingsStore
@@ -236,6 +284,10 @@ struct SessionDraft {
     var durationMillis: Int
     /// 本次录制新产出的 segments（不含会话里已有的）
     var segments: [TranscriptSegment]
+    /// 本次录制用的是哪个麦（P0-1）。nil = 没读到（不是「没变」）。
+    /// 放在 draft 上而不是让 Store 自己去查：查出来的是**此刻**的系统默认设备，
+    /// 而这一段的设备是**录制当时**引擎自己报的那一只，两者可以不同
+    var capture: RecordingCapture? = nil
 }
 
 /// 列表页用的会话摘要。sessions/index.json 里存的就是它。

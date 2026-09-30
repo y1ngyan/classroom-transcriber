@@ -826,6 +826,62 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(0)
         }
 
+        // 输入设备清单：--audio-devices（P0-1 ①）
+        //
+        // **只读**：整条路走 CoreAudio 的 HAL 属性读取，一次都不碰
+        // `AVAudioEngine` 的输入节点（碰了就会把设备占住）。不录音、不发声、
+        // 不改任何系统音频设置、不弹授权框
+        if CommandLine.arguments.contains("--audio-devices") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            for line in AudioDeviceProbe.run() { print(line) }
+            // 未授权时**照样退 0**：这个入口的契约是「把系统现在是什么样说出来」，
+            // 而「未授权」正是它要说出来的事实之一。用非零退出码会让
+            // `exit_codes.sh` 把它当成「这个入口坏了」——那不是同一件事。
+            // 「未授权就拒绝」是 `--mic-level` 的规矩，不是这一条的
+            exitReleasingGgml(0)
+        }
+
+        // 采集设备自检：--mic-device-selftest（纯离线，**不开麦**）
+        //
+        // 覆盖「该记哪只设备」的判定、换设备状态机、存档的读写与旧格式兼容、
+        // 电平判据的算法。全部用构造出来的输入驱动，**不碰真实设备**
+        if CommandLine.arguments.contains("--mic-device-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let args = CommandLine.arguments
+            var legacyPath: String?
+            if let i = args.firstIndex(of: "--legacy-session"), i + 1 < args.count {
+                legacyPath = args[i + 1]
+            }
+            let result = MicDeviceSelfTest.run(legacySessionPath: legacyPath)
+            for line in result.lines { print(line) }
+            print("")
+            print(result.failed == 0
+                  ? "✅ 采集设备自检通过（\(result.passed) 条）"
+                  : "❌ 采集设备自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 麦克风电平探针：--mic-level（P0-1 ①，**会真的开麦录音**）
+        //
+        // 必须用 detached + 信号量：`App.init` 是 `@MainActor` 隔离的，
+        // 普通 Task 会继承主 actor，而主线程正阻塞在下面的 wait 上 → 死锁
+        // （同 `--model-download-selftest` 那条）
+        if CommandLine.arguments.contains("--mic-level") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                let outcome = await MicLevelProbe.run(arguments: CommandLine.arguments)
+                for line in outcome.lines { print(line) }
+                exitReleasingGgml(outcome.exitCode)
+            }
+            // 上限给得比录音时长宽：探针最多录 600 秒，这里留够余量
+            if semaphore.wait(timeout: .now() + 700) == .timedOut {
+                print("❌ 麦克风电平探针超时（700 秒）")
+                exitReleasingGgml(1)
+            }
+            exitReleasingGgml(1)
+        }
+
         // 模型目录占用：--model-cache（只看）/ --model-cache-clean（真删）
         //
         // 对应「占用可见可清理」。**默认只看不动**——只有显式多打一个

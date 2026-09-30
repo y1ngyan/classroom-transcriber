@@ -185,6 +185,22 @@ final class TranscriptionEngine {
     private var micTap: MicTap?
     private var recorder: WAVRecorder?
 
+    // MARK: - 采集设备（P0-1）
+
+    /// 「这一段用的是哪个麦」。**采集真的起来了之后才定**（见 `beginCaptureTracking`）
+    private var captureTracker = InputDeviceTracker()
+    /// 每秒看一眼设备有没有换。拔外置麦 / AirPods 断连都要靠它才发现
+    private var captureWatchTask: Task<Void, Never>?
+    /// 起录那一刻的增益档与后端快照。
+    ///
+    /// **为什么快照而不是收尾时现读**：`micGain`/`backend` 是「设置」，
+    /// 录音中途可以改，而存档要记的是**这一段录制当时**用的那一档。
+    /// 和 `activeBackend` 同一个道理（那个也是起录时定死的）
+    private var captureGain = ""
+    private var captureSource = ""
+    /// 采集设备的名字，给界面状态条用（读的是引擎实际用的那一只）
+    private(set) var captureDeviceName: String?
+
     // MARK: - Whisper 链路的内部状态
 
     /// 这一段录音实际用的后端。`backend` 是「设置」，这个是「这次真的走了哪条」
@@ -666,7 +682,99 @@ final class TranscriptionEngine {
             return false
         }
 
+        // **设备是在这里读的，不是起录前**：实测引擎没启动时
+        // `inputNode.auAudioUnit.deviceID` 报的是一个内部占位值（本机 121，
+        // 不在设备表里）。启动之后报的那个才是真设备——早读一步就会把一只
+        // 不存在的麦写进档案，而它看起来完全是真的
+        beginCaptureTracking(engineDeviceID: input.auAudioUnit.deviceID)
         return true
+    }
+
+    // MARK: - 采集设备（P0-1）
+
+    /// 记下「这一段是哪个麦」，并开始盯着它有没有变。
+    ///
+    /// 两条链路（Apple / Whisper）共用 `startMicrophone`，所以这一处覆盖了两边
+    private func beginCaptureTracking(engineDeviceID: AudioDeviceID) {
+        let resolved = InputDeviceResolution.resolveFromCatalog(engineDeviceID: engineDeviceID)
+        captureGain = micGain.rawValue
+        captureSource = resolved?.source.rawValue ?? "unknown"
+        captureDeviceName = resolved?.info.name
+        captureTracker.start(with: resolved?.info)
+
+        if let resolved {
+            // 诊断日志那一行（派单书 ②：「加在现有那行上」）。这里单独一行而不是
+            // 塞进 AppState 的「启动」行：那一行记的是 App 起来时的事，而这是
+            // **每次开始录制**的事——一节课可以录好几段，还可能是不同的麦
+            DiagnosticLog.info(.transcription, "输入设备", fields: [
+                .init("设备", resolved.info.name),
+                .init("uid", resolved.info.uid),
+                .init("声道", "\(resolved.info.channels)"),
+                .init("采样率", "\(Int(resolved.info.sampleRate))"),
+                .init("增益", captureGain),
+                .init("后端", (activeBackend ?? backend).rawValue),
+                .init("来源", resolved.source.rawValue),
+                .init("引擎deviceID", "\(resolved.engineDeviceID)"),
+            ])
+        } else {
+            DiagnosticLog.warn(.transcription, "输入设备", fields: [
+                .init("设备", "（读不到）"),
+                .init("引擎deviceID", "\(engineDeviceID)"),
+            ])
+        }
+
+        startCaptureWatch()
+    }
+
+    /// 每秒看一眼。**必须轮询**：CoreAudio 没有「某只设备被拔了 / 默认设备换了」
+    /// 的低成本推送，而这一条的信息价值恰恰在于「中途变了」
+    private func startCaptureWatch() {
+        captureWatchTask?.cancel()
+        captureWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled else { return }
+                self?.pollCaptureDevice()
+            }
+        }
+    }
+
+    /// 一次设备观测。变了就再记一条日志、并往 tracker 里追加一条。
+    ///
+    /// 用的是**和起录时同一个** `resolveFromCatalog`——两处规则不一致的话，
+    /// 「起录记的是 A、一秒后又记一条 A → A」这种假变化就会出现
+    private func pollCaptureDevice() {
+        guard let engine = audioEngine else { return }
+        let resolved = InputDeviceResolution.resolveFromCatalog(
+            engineDeviceID: engine.inputNode.auAudioUnit.deviceID
+        )
+        let atMillis = Int(Date().timeIntervalSince(partStartedAt ?? Date()) * 1000)
+        guard let change = captureTracker.observe(resolved?.info, atMillis: atMillis) else { return }
+
+        captureDeviceName = resolved?.info.name
+        DiagnosticLog.warn(.transcription, "输入设备已变", fields: [
+            .init("从", change.from?.name ?? "（无）"),
+            .init("到", change.to?.name ?? "（无）"),
+            .init("第几秒", "\(change.atMillis / 1000)"),
+        ])
+    }
+
+    /// 交给 `SessionDraft` / `RecordingDraft` 的那一份。
+    /// `nil` = 全程没读到过设备——**不编一个默认设备顶上**
+    private func currentCapture() -> RecordingCapture? {
+        guard let device = captureTracker.current else { return nil }
+        return RecordingCapture(
+            device: device,
+            source: captureSource,
+            gain: captureGain,
+            backend: (activeBackend ?? backend).rawValue,
+            changes: captureTracker.changes
+        )
+    }
+
+    private func endCaptureTracking() {
+        captureWatchTask?.cancel()
+        captureWatchTask = nil
     }
 
     /// 建一个本次录音的存档文件。返回 nil 表示不存档，或创建失败。
@@ -1549,6 +1657,9 @@ final class TranscriptionEngine {
         // 先停草稿循环再卸 tap：反过来的话，一条已经排队的草稿推送可能在
         // 收尾落盘**之后**才落地，把一份过期的转录覆盖回去
         stopDraftLoop()
+        // 设备监视要在摘设备之前停：它下一秒还会去读 `engine.inputNode`，
+        // 而下面马上就把 audioEngine 置 nil + 把设备还给系统了
+        endCaptureTracking()
         audioEngine?.inputNode.removeTap(onBus: 0)
         micTap = nil
         // 关闭语音处理，把音频设备还给系统
@@ -1653,7 +1764,11 @@ final class TranscriptionEngine {
                         recordedSeconds * 1000,
                         newSegments.map(\.endTimeMillis).max() ?? 0
                     ),
-                    segments: newSegments
+                    segments: newSegments,
+                    // 「这一段是哪个麦」，含中途换设备的记录。**在 endCaptureTracking
+                    // 之前取**——stop() 里设备监视先停、tracker 不动，但这里取的是
+                    // 收尾时的快照，必须保证 tracker 还在
+                    capture: currentCapture()
                 )
                 sessionID = onSessionComplete(draft) ?? sessionID
             }
@@ -1720,7 +1835,8 @@ final class TranscriptionEngine {
             startedAt: startedAt,
             durationMillis: max(recordedSeconds * 1000, newSegments.map(\.endTimeMillis).max() ?? 0),
             segments: newSegments,
-            savedAt: Date()
+            savedAt: Date(),
+            capture: currentCapture()
         )
     }
 
@@ -1744,6 +1860,13 @@ final class TranscriptionEngine {
         sessionID = nil
         sessionSegmentBase = 0
         partStartedAt = nil
+        // 采集设备同理：留着上一次的 tracker，下一段录音的存档里会多出
+        // 一条「从上一节课的麦 → 这一节课的麦」的假变化
+        endCaptureTracking()
+        captureTracker = InputDeviceTracker()
+        captureDeviceName = nil
+        captureGain = ""
+        captureSource = ""
         // 草稿一起断掉：`clear()` 的语义是「这一课翻篇了」，
         // 留着一个指向上一次的草稿键，下一次录制会把它当成自己的草稿覆盖掉
         stopDraftLoop()

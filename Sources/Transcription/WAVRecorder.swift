@@ -469,6 +469,20 @@ enum RecordingStorage {
     ///
     /// 返回 nil = 放行；返回字符串 = 拒绝的理由（调用方打印它以非 0 退出）
     static func probeDirectoryRejection(_ requested: URL) -> String? {
+        guard let geometric = libraryContainmentRejection(requested) else { return nil }
+        return geometric + "。这个入口会删掉该目录下的 sessions/ 和 recordings/ "
+            + "并写入合成内容，不许指向真实库：\(libraryRoot.path)"
+    }
+
+    /// 「这个目录和真实库有没有包含关系」——**纯几何，不带任何入口的具体后果**。
+    ///
+    /// 分成两层（这里是几何、上面那层补上后果）是因为后果不同的入口不止一个：
+    /// 崩溃恢复探针会**删库**，而 `--mic-level` 只是往目录里写一个 wav。
+    /// 两者都要拦，但「拦下来之后该说什么」不一样。**被共用的是「哪算库的边界」
+    /// 这条规则**——那才是会漂移的部分；写两句后果文案不会漂移。
+    ///
+    /// 返回 nil = 放行
+    static func libraryContainmentRejection(_ requested: URL) -> String? {
         // 解析符号链接再比：`/var` 是 `/private/var` 的符号链接，
         // 不解析的话前缀比较会把两条其实是同一个地方的路当成没关系
         let root = requested.standardizedFileURL.resolvingSymlinksInPath()
@@ -477,12 +491,10 @@ enum RecordingStorage {
             child == parent || child.hasPrefix(parent.hasSuffix("/") ? parent : parent + "/")
         }
         if contains(library.path, root.path) {
-            return "--dir 落在真实库里（\(root.path)）。这个入口会删掉该目录下的 "
-                + "sessions/ 和 recordings/ 并写入合成内容，不许指向真实库：\(library.path)"
+            return "目录落在真实库里（\(root.path)）"
         }
         if contains(root.path, library.path) {
-            return "--dir（\(root.path)）把真实库（\(library.path)）包在里面。"
-                + "同上，请换一个和真实库没有包含关系的目录"
+            return "目录（\(root.path)）把真实库（\(library.path)）包在里面"
         }
         return nil
     }

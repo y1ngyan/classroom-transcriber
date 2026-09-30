@@ -7,7 +7,7 @@
 # 「这个入口是好的」，唯一的判据是退出码本身。2026-09-22 就是靠它发现
 # `--whisper-prewarm` / `--mic-selftest` 三个入口都在 134。
 #
-# **十六个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）。
+# **十八个入口另外还断言输出里的一行**（`run_assert`，见那里的注释）。
 #
 # ⚠️ 计数说明（P9-2 逐条数过，P7-1 加二）：这段原先写「十四个入口」，而文件里实际
 # 只有 **13** 条 `run_assert` 调用——`grep -c run_assert` 得到的 14 把上面那行函数
@@ -15,7 +15,10 @@
 # 的形状**（期望的退出码是 124 而不是 0，见 `--whisper-window-file 超时不 abort`），
 # 所以那时是 **13 条 `run_assert` + 1 条退出码断言 = 14 条**；P7-1 又加了
 # `--model-download-selftest` 与 `--model-cache` 两条；B-1 加了
-# `--questions-selftest`，现在是 **16 条 `run_assert` + 1 条 = 17 条**。
+# `--questions-selftest`，现在是 17 条；P0-1 又加了 `--audio-devices` 与
+# `--mic-device-selftest` 两条 `run_assert`，所以是 **18 条 `run_assert`
+# + 2 条「期望的退出码不是 0」的断言 = 20 条**（后两条见下面 `--mic-level`
+# 那一段的注释：它们验的是「该拒绝的时候真的拒绝了」）。
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -43,13 +46,23 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且十七条断言都命中（16 条 `run_assert` +
-# 1 条「超时的退出码必须是 124」——后者期望的本来就不是 0）。
+# 退出码 0 = 跑到的入口全部 exit=0、且二十条断言都命中（18 条 `run_assert` +
+# 1 条「超时的退出码必须是 124」+ 1 条「没重定向必须拒绝」——后两条期望的
+# 本来就不是 0）。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-BIN=build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber
+# 二进制路径可重定向（P0-1 补充要求 ⑧）。
+#
+# 默认仍是 `build/`，行为不变。存在的理由：App 是 **ad-hoc 签名**的，系统的
+# 麦克风授权（TCC）按**二进制指纹 cdhash** 记；谁重编一次 `build/`，用户之前
+# 授过的那次授权就作废，表现为「点开始录制就崩」（2026-09-30 真的发生了两次）。
+# 所以验证这一侧要能在**别的目录**里编、在别的目录里跑判据：
+#   CLASSROOM_BUILD_DIR=build-verify ./build.sh
+#   CLASSROOM_BIN=build-verify/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber \
+#     ./tools/probes/exit_codes.sh
+BIN="${CLASSROOM_BIN:-build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber}"
 REC="$HOME/Library/Application Support/ClassroomTranscriber/recordings"
 [ -x "$BIN" ] || { echo "❌ 没有 ${BIN}，先跑 ./build.sh"; exit 1; }
 
@@ -154,8 +167,70 @@ run_assert() { # run_assert <名字> <输出里必须出现的行> <参数…>
   fi
 }
 
+# 同 `run`，但**期望的退出码不是 0**、并且输出里要说出理由。
+#
+# 给「该拒绝的时候真的拒绝了」这一类用。只看退出码是不够的：一个直接崩掉的
+# 实现（133/134）退出码也非 0，而那不是「拒绝」，是没有守住闸
+refuse() { # refuse <名字> <输出里必须出现的行> <env 赋值|-> <参数…>
+  local name="$1"; shift
+  local want="$1"; shift
+  local envspec="$1"; shift
+  local out code
+  if [ "$envspec" = "-" ]; then
+    out="$("$BIN" "$@" 2>&1)"
+  else
+    out="$(env "$envspec" "$BIN" "$@" 2>&1)"
+  fi
+  code=$?
+  if [ "$code" != "0" ] && printf '%s' "$out" | grep -qF "$want"; then
+    printf '  ✅ %-34s exit=%s · 断言命中\n' "$name" "$code"
+    PASS=$((PASS + 1))
+  else
+    printf '  ❌ %-34s exit=%s（期望非 0 **且**说出理由）\n' "$name" "$code"
+    printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 echo "════ 纯本地入口（不需要模型 / 网络 / 麦克风）════"
 run "--selftest"                    --selftest
+# 输入设备清单（P0-1）。**只读**：走 CoreAudio 的 HAL 属性读取，一次都不碰
+# `AVAudioEngine` 的输入节点——不录音、不发声、不改任何系统音频设置、
+# 不弹授权框。所以它可以放在这个「不需要麦克风」的一段里。
+#
+# 断言取的是「系统默认输入设备：」这一行：设备一只都列不出来时，代码会在
+# 那行**之前**就返回（并打印为什么），所以这行命中 = 设备表真读到了。
+# 未授权**不影响**这一条（枚举设备不需要授权），所以它在哪种授权状态下都该绿。
+# 这也是它和 `--mic-level` 的分工：那个要真开麦，只能在 WITH_MIC 里跑
+run_assert "--audio-devices" "系统默认输入设备：" --audio-devices
+# 采集设备自检（P0-1）：该记哪只设备 / 中途换设备 / 存档读写与旧格式兼容 /
+# 电平判据。**全程离线、不开麦**——真设备那一段靠上面的 `--audio-devices` 和
+# 用户上课录一段来确认，这条自检不假装验过它。
+# 条数钉住，理由同下面几条（用例掉到 0 时进程照样 exit=0）。
+# 这条里的判据**验过会红**（两个变异，注入后对应断言立刻红、还原后逐字节一致，
+# 记录见 `~/ClassroomTranscriber-design/P0-1核验记录.md`）：
+#   · 不写 capture 字段 → 「会话 JSON 字节里有 capture 键」等 4 条红
+#   · 改成读系统默认设备（`resolve` 里不看引擎报的那个）→ 「取的是引擎的」那两条红
+run_assert "--mic-device-selftest" "✅ 采集设备自检通过（53 条）" --mic-device-selftest
+#
+# ── `--mic-level` 的**拒绝**路径（P0-1 补充要求 ①/⑩）──
+#
+# 这是本仓库**唯一会真的开麦录音**的入口，所以它默认必须拒绝运行：没把输出
+# 重定向出去，它要写的就是用户真实的 `recordings/`。
+#
+# **这一条能放进这个自动段，是因为它在碰麦克风之前就退出了**（闸在构造
+# `AVAudioEngine` 之前）。真录那一段在下面的 `WITH_MIC=1` 里，由人显式触发。
+#
+# 两种拒绝都要：
+#   ① 完全没有重定向；
+#   ② 重定向到真实库里面去（`CLASSROOM_MIC_OUT` 指过去）——「带了重定向」
+#      不等于「重定向到安全的地方」，只验①的话，把②那条闸删掉照样全绿。
+#
+# **显式 `unset`**：前面若有人 export 过这个变量，①会退化成一个空转的假绿
+unset CLASSROOM_MIC_OUT
+refuse "--mic-level 无重定向必须拒绝" "拒绝运行：没有指定输出目录" - --mic-level
+refuse "--mic-level 指向真实库必须拒绝" "拒绝运行：目录落在真实库里" \
+  "CLASSROOM_MIC_OUT=$REC" --mic-level
 run "--quality-selftest"            --quality-selftest
 run "--hallucination-selftest"      --hallucination-selftest
 # 离线重算入口用固定夹具跑（夹具说明见 tools/probes/fixtures/hallucination_replay.log）。
@@ -357,12 +432,23 @@ if [ "${WITH_MIC:-0}" = "1" ]; then
   echo "════ 麦克风入口（WITH_MIC=1；会独占麦克风，需要真人说话）════"
   run "--mic-selftest（默认后端）"        --mic-selftest --seconds 3
   run "--mic-selftest --backend whisper"  --mic-selftest --backend whisper --seconds 3
+
+  # 真录一段并打印电平判据（P0-1 ①）。**必须重定向**——重定向到临时目录，
+  # 用户真实的 `recordings/` 一个字都不许写进去。
+  #
+  # 默认 5 秒。这一段量的是**设备本身的电平**（不走增益、不走语音处理），
+  # 所以「对着麦说几句话」是这一步唯一有意义的做法：全程不说话的话，
+  # 逐秒那几张表会全是「几乎没人说话」，动态范围量不出来
+  MICOUT="$(mktemp -d)"
+  run "--mic-level（真录 5 秒）" --mic-level --out "$MICOUT"
+  echo "     ↳ 落盘：$(ls -1 "$MICOUT" 2>/dev/null | tr '\n' ' ')"
+  rm -rf "$MICOUT"
 fi
 
 echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含十七条断言：16 条 run_assert + 超时退出码 124）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含二十条断言：18 条 run_assert + 超时退出码 124 + 无重定向必须拒绝）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

@@ -86,7 +86,12 @@ final class RecordingsStore {
             startedAt: draft.startedAt,
             durationMillis: draft.durationMillis,
             offsetMillis: offset,
-            segments: draft.segments
+            segments: draft.segments,
+            // 「这一段是哪个麦」由引擎在**录制当时**读出来、跟着 draft 交过来。
+            // 这里绝不自己去查一次设备：Store 是在 stop 之后才被调用的，
+            // 那时用户可能已经把外置麦拔了，查出来的是「现在」的默认设备，
+            // 不是「录这一段时」用的那只
+            capture: draft.capture
         )
         session.parts.append(part)
         session.updatedAt = Date()

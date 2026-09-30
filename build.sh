@@ -5,7 +5,21 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="ClassroomTranscriber"
-BUILD_DIR="build"
+
+# 产物目录。**默认仍是 `build/`，行为一个字节没变**；`CLASSROOM_BUILD_DIR`
+# 只用来把它整个挪走。
+#
+# 为什么需要这个开关（P0-1 补充要求 ⑧，2026-09-30 的真实事故）：这个 App 是
+# **ad-hoc 签名**，系统的麦克风授权（TCC）是**按二进制指纹 cdhash 记的**。
+# 核验侧每重编一次 `build/`，指纹就变 → 用户之前给的麦克风授权作废 →
+# 用户「点开始录制就崩」。2026-09-30 一天重编 8 次以上，用户撞了两次。
+# 有了重定向，核验可以在别的目录编、跑判据，用户那份 `build/` 一动不动。
+#
+# **底下每一处派生的路径都必须走 ${BUILD_DIR}**（bundle、modulemap、图标缓存）。
+# 漏一处就等于「说是重定向了、其实还是往 build/ 里写」——那种半吊子比没有更糟：
+# 它让「我这次没碰用户那份」这句话变成假的，而人正是拿这句话来决定要不要
+# 重新授权的
+BUILD_DIR="${CLASSROOM_BUILD_DIR:-build}"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 SDK_PATH="$(xcrun --show-sdk-path)"
 TARGET="arm64-apple-macos26.0"
@@ -166,12 +180,16 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# 图标得赶在签名之前放进 bundle，否则它不在签名覆盖的范围内
+# 图标得赶在签名之前放进 bundle，否则它不在签名覆盖的范围内。
+# 缓存文件也放在 ${BUILD_DIR} 底下——留在写死的 `build/` 里的话，
+# 一次重定向的构建仍然会往用户那份目录里写东西（见上面 ${BUILD_DIR} 的注释）
 ICON_SCRIPT="tools/make_icon.swift"
-ICON_FILE="build/icon/AppIcon.icns"
+ICON_FILE="$BUILD_DIR/icon/AppIcon.icns"
 if [ ! -f "$ICON_FILE" ] || [ "$ICON_SCRIPT" -nt "$ICON_FILE" ]; then
   echo "▶ 生成图标…"
-  swift "$ICON_SCRIPT" | sed 's/^/  /'
+  # 把**解析后**的目录显式传下去：`BUILD_DIR` 只是个 shell 变量、没 export，
+  # 子进程看不到它，图标脚本会回落到写死的 `build/icon`
+  CLASSROOM_BUILD_DIR="$BUILD_DIR" swift "$ICON_SCRIPT" | sed 's/^/  /'
 fi
 cp "$ICON_FILE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
