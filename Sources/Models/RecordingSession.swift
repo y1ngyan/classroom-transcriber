@@ -231,6 +231,16 @@ struct RecordingPart: Identifiable, Codable, Equatable {
     /// 的话，「接着录」第二段换了麦（换教室、外置麦没带）就记不出来了——而
     /// 那恰恰是最需要第二种记录的场景
     var capture: RecordingCapture?
+    /// **这段转录是哪个模型产出的**（P11-1 目标 4）。nil 有两种含义，
+    /// 都写在这里免得被读成同一种：
+    ///   · 这一段存于本包之前——那时候不记出处（旧存档**不回写**，见下面
+    ///     `init(from:)` 的注释）；
+    ///   · 这一段是**实时录出来**的，还没重转过。
+    /// 实时那条链路固定 medium（`RetranscribeEngine.preferred` 只用于课后重转），
+    /// 所以「nil = 实时 medium」在今天是成立的——但**不要把它当字段用**：
+    /// 以后实时链路换模型、或者加了第三种来源，nil 就不再等于 medium 了。
+    /// 要判断「这份转录是什么产出的」，看这个字段有没有值，别去推
+    var transcriptionProvenance: TranscriptionProvenance?
 
     /// 手写解码：`capture` 是后加的键，磁盘上已有的会话 JSON 里没有它。
     /// 合成解码会抛 keyNotFound 让**整条会话**读不出来——那不是「新字段是空的」，
@@ -238,10 +248,12 @@ struct RecordingPart: Identifiable, Codable, Equatable {
     /// 而不是编一个默认设备顶上
     private enum CodingKeys: String, CodingKey {
         case id, fileName, startedAt, durationMillis, offsetMillis, segments, capture
+        case transcriptionProvenance
     }
 
     init(id: UUID, fileName: String?, startedAt: Date, durationMillis: Int,
-         offsetMillis: Int, segments: [TranscriptSegment], capture: RecordingCapture? = nil) {
+         offsetMillis: Int, segments: [TranscriptSegment], capture: RecordingCapture? = nil,
+         transcriptionProvenance: TranscriptionProvenance? = nil) {
         self.id = id
         self.fileName = fileName
         self.startedAt = startedAt
@@ -249,6 +261,7 @@ struct RecordingPart: Identifiable, Codable, Equatable {
         self.offsetMillis = offsetMillis
         self.segments = segments
         self.capture = capture
+        self.transcriptionProvenance = transcriptionProvenance
     }
 
     init(from decoder: any Decoder) throws {
@@ -260,6 +273,11 @@ struct RecordingPart: Identifiable, Codable, Equatable {
         offsetMillis = try c.decode(Int.self, forKey: .offsetMillis)
         segments = try c.decode([TranscriptSegment].self, forKey: .segments)
         capture = try c.decodeIfPresent(RecordingCapture.self, forKey: .capture)
+        // 同 `capture`：老存档里没有这个键，而合成解码会为一个**缺失的新字段**
+        // 抛 keyNotFound、把整条会话读废。缺键 = 不知道出处，不是「没有出处」
+        transcriptionProvenance = try c.decodeIfPresent(
+            TranscriptionProvenance.self, forKey: .transcriptionProvenance
+        )
     }
 
     /// 「这一段是哪个麦」。读不出来时给一句实话，**不编设备名**

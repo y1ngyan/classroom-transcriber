@@ -43,10 +43,22 @@ final class ModelDownloadCenter {
     private var task: Task<Void, Never>?
     private let downloader = ModelDownloader()
 
+    /// **这次在下的那一份**（清单里钉的文件名）。默认是实时链路那份 medium；
+    /// 课后重转要的 large 走的是**同一套**下载器、同一份进度、同一个取消，
+    /// 只有「下哪一份」这一个参数不同——所以它是这里的一个字段，
+    /// 而不是第二套并行的下载状态（两套状态迟早会各说各话）
+    private(set) var activeFile: String = ModelDownloadCenter.defaultPinFile
+
+    /// 默认那一份的名字。**从 `WhisperEngine` 取，不在这里重写一遍**：
+    /// 写两遍就会出现「界面说在下 A，其实在下 B」
+    static var defaultPinFile: String { WhisperEngine.modelPath.lastPathComponent }
+
     static var defaultDestination: URL { WhisperEngine.modelPath }
     static var defaultPartURL: URL { ModelDownloader.partURL(for: defaultDestination) }
 
-    var destination: URL { Self.defaultDestination }
+    var destination: URL {
+        WhisperEngine.modelDirectory.appendingPathComponent(activeFile)
+    }
 
     /// 清单里钉住的那一版。见 `ModelManifest.bundledDefaultPin`
     static var bundledPin: ModelPin? { ModelManifest.bundledDefaultPin }
@@ -112,10 +124,11 @@ final class ModelDownloadCenter {
     /// 地址**不再由这里拼**，而是从清单里那一版推出来（见 `ModelPin.url`）。
     /// 原来那个 `URL(string: WhisperEngine.modelURL)!` 有两个问题：它指向的是
     /// `resolve/main` 这个移动目标，而且那句强制解包一旦失败就是启动即崩
-    func start(
-        to destination: URL = WhisperEngine.modelPath,
-        minimumBytes: Int64 = WhisperEngine.expectedModelBytes
-    ) {
+    ///
+    /// - Parameter file: 要下清单里的哪一份。nil = 默认那一份（medium，实时链路用）。
+    ///   课后重转要的 large-v3 就从这儿指名要——**不多一套下载状态**，
+    ///   下面每一条闸、每一句进度、取消/续传的语义对两档完全一样
+    func start(file: String? = nil, minimumBytes: Int64 = WhisperEngine.expectedModelBytes) {
         guard !phase.isBusy else { return }
         cleanupNote = nil
 
@@ -130,16 +143,16 @@ final class ModelDownloadCenter {
                             ?? error.localizedDescription)
             return
         }
-        guard let pin = manifest.defaultPin else {
-            phase = .failed("模型清单里没有可用条目（\(ModelManifest.resourceName).json）")
+        let wantedPin = file == nil ? manifest.defaultPin : manifest.pin(forFile: file!)
+        guard let pin = wantedPin else {
+            phase = .failed(file == nil
+                ? "模型清单里没有可用条目（\(ModelManifest.resourceName).json）"
+                : "模型清单里没有 \(file!) 这一条（\(ModelManifest.resourceName).json）")
             return
         }
-        guard pin.file == destination.lastPathComponent else {
-            // 清单描述的是另一个文件。下下来对不上任何判据，不如当场说清
-            phase = .failed("清单钉的是 \(pin.file)，要下的是 \(destination.lastPathComponent)"
-                            + "——两者对不上，先看看 model-manifest.json")
-            return
-        }
+        // 下哪一份由清单说，destination 跟着它走——不能让调用方指定一个
+        // 和清单对不上的目标：那样下下来的字节没有任何判据能校验
+        activeFile = pin.file
 
         phase = .running
         progress = nil
@@ -149,12 +162,13 @@ final class ModelDownloadCenter {
 
         let partURL = ModelDownloader.partURL(for: destination)
         let throttle = ProgressThrottle()
+        let target = destination
 
         task = Task { [downloader] in
             do {
                 let report = try await downloader.download(
                     from: pin.url,
-                    to: destination,
+                    to: target,
                     partURL: partURL,
                     minimumBytes: minimumBytes,
                     pin: pin,
@@ -184,7 +198,7 @@ final class ModelDownloadCenter {
                     // **取消不是失败**：`.part` 留着，下次从这儿续
                     self.phase = .cancelled
                     self.retryNote = nil
-                    self.notices.append("已取消。已下载的部分保留在 \(WhisperEngine.modelPath.lastPathComponent).part，下次从这里接着下")
+                    self.notices.append("已取消。已下载的部分保留在 \(self.activeFile).part，下次从这里接着下")
                     self.refreshCache()
                 }
             } catch {

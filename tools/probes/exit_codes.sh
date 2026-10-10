@@ -19,6 +19,14 @@
 # `--mic-device-selftest` 两条 `run_assert`，所以是 **18 条 `run_assert`
 # + 2 条「期望的退出码不是 0」的断言 = 20 条**（后两条见下面 `--mic-level`
 # 那一段的注释：它们验的是「该拒绝的时候真的拒绝了」）。
+# P11-1 又加了 **3 条**：`--retranscribe-selftest`（`run_assert`）、
+# `--retranscribe 缺 large 必须响亮拒绝`（`refuse`，期望非 0 且说出理由）、
+# 以及「被拦住时不落盘」（普通断言，不是 `run_assert`——它查的是输出目录为空，
+# 没有「输出里的一行」可断言）。所以现在是 **19 条 `run_assert` + 3 条期望
+# 非 0 的 refuse + 1 条不落盘 + 1 条「超时必须是 124」= 24 条**。
+# 真实模型那一段的 A/B（large 与 medium 各跑一遍）**不在这个文件里**，
+# 见 `tools/probes/retranscribe.sh`：六七分钟的量级不该进这条快扫描。
+
 #   · `--whisper-prewarm`：`构造 ggml context 次数: 1`——133 的正面判据
 #   · `--whisper-selftest`：自检总结行——里面有「构造锁·两条线程不重叠」，
 #     而自检失败**不改退出码**，不看输出就等于没测
@@ -46,9 +54,9 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且二十条断言都命中（18 条 `run_assert` +
-# 1 条「超时的退出码必须是 124」+ 1 条「没重定向必须拒绝」——后两条期望的
-# 本来就不是 0）。
+# 退出码 0 = 跑到的入口全部 exit=0、且二十四条断言都命中（19 条 `run_assert` +
+# 3 条「必须拒绝」+ 1 条「被拦住时不落盘」+ 1 条「超时的退出码必须是 124」——
+# 后五条期望的本来就不是 0）。逐条计数见文件开头那段。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -232,6 +240,62 @@ refuse "--mic-level 无重定向必须拒绝" "拒绝运行：没有指定输出
 refuse "--mic-level 指向真实库必须拒绝" "拒绝运行：目录落在真实库里" \
   "CLASSROOM_MIC_OUT=$REC" --mic-level
 run "--quality-selftest"            --quality-selftest
+# ── `--retranscribe` 的**拒绝**路径（P11-1 目标 2 / 验收 ②④）──
+#
+# 模型缺失时**必须响亮失败**，而它最容易在这次改动里退化成「那就用 medium 跑吧」。
+# 这一条把那个退化按死在闸上：模型目录里**只有 medium、没有 large**，退出码必须
+# 非 0，且输出里要出现「不会静默回落到 medium」。
+#
+# ⚠️ **medium 必须真的在那边**（下面用 `cp -c` 做 APFS 克隆，不复制 539MB 的实体）。
+# 这是这条判据能不能红的全部关键：目录**全空**时，一个「缺 large 就换 medium」的
+# 实现照样会走到「medium 也不在」，于是照样 exit=3——**判据全绿，而回落已经写进
+# 去了**。那种假绿本仓库吃过亏（见 CLAUDE.md「判据必须能红」），所以这里刻意造出
+# 「回落真的能成功」的现场，回落一旦落码就当场变红。把 large 那一条注回
+# `RetranscribeRun` 里验过：exit=0 → 这条断言红。
+#
+# 也**不能用符号链接**（试过，不行）：`ModelAvailability.probe` 走的是
+# `FileManager.attributesOfItem(atPath:)`，它**不跟随符号链接**，拿到的是链接
+# 自身的大小（实测 89 字节 = 目标路径的长度），于是裁决报「只有 89 字节」——
+# 夹具就变成了「medium 也不在」那种假绿。`cp -c` 在 APFS 上是写时复制，
+# 不占第二份空间，而且是一个真的普通文件。
+#
+# **它秒级、且不加载任何模型**：模型的裁决发生在读音频之前，所以夹具会话不需要
+# 真音频——一条把 segments 清空的会话就够走到那一支。夹具在临时目录里造，
+# **用户真实的 sessions/ 一个字节都不碰**。
+#
+# 真音频那一段（两个引擎各跑一遍、比段数字数、比输入文件 sha256）在
+# `tools/probes/retranscribe.sh`——large 跑 120 秒样本要六七分钟，
+# 不该塞进这条「快、确定性」的扫描里
+RTRFIX="$(mktemp -d)"
+RTRIN="$(mktemp -d)"
+RTROUT="$(mktemp -d)"
+cat > "$RTRIN/fixture.json" <<'JSON'
+{"id":"00000000-0000-0000-0000-0000000000AA","startedAt":0,"updatedAt":0,
+ "parts":[{"id":"00000000-0000-0000-0000-0000000000BB","fileName":"fixture.wav",
+ "startedAt":0,"durationMillis":120000,"offsetMillis":0,"segments":[]}]}
+JSON
+RTRMED="$HOME/Library/Application Support/ClassroomTranscriber/models/ggml-medium-q5_0.bin"
+if [ -f "$RTRMED" ]; then
+  cp -c "$RTRMED" "$RTRFIX/ggml-medium-q5_0.bin"
+  # 目录重定向必须在**这一句里**（`refuse` 的 env 参数），不 export：漏出去会让
+  # 后面的 `--whisper-prewarm` 去空目录里找模型，以一条完全无关的方式红掉
+  refuse "--retranscribe 缺 large 必须响亮拒绝" "不会静默回落到 medium" \
+    "CLASSROOM_MODELS_DIR=$RTRFIX" \
+    --retranscribe "$RTRIN/fixture.json" --out "$RTROUT" --engine large
+  # 被拦住了却往 --out 里写了半份 = 把拦截变成一个更隐蔽的假绿
+  if [ -z "$(ls -A "$RTROUT" 2>/dev/null)" ]; then
+    printf '  ✅ %-34s %s\n' "--retranscribe 被拦住时不落盘" "输出目录是空的"
+    PASS=$((PASS + 1))
+  else
+    printf '  ❌ %-34s 被拦住了却写了：%s\n' "--retranscribe 被拦住时不落盘" \
+      "$(ls -A "$RTROUT" | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  ⏭  --retranscribe 缺 large 必须响亮拒绝：本机没有 medium 模型，"
+  echo "      「回落能不能成功」这个现场造不出来（造一个假文件不是这个现场）——跳过"
+fi
+rm -rf "$RTRFIX" "$RTRIN" "$RTROUT"
 run "--hallucination-selftest"      --hallucination-selftest
 # 离线重算入口用固定夹具跑（夹具说明见 tools/probes/fixtures/hallucination_replay.log）。
 # 它值得覆盖：这个入口要读文件、解析、再走一遍判据，正是「输出看着对但进程 abort」
@@ -281,6 +345,15 @@ run_assert "--diarize-selftest" "✅ 说话人识别自检通过（82 条）" --
 # **进程直接 SIGTRAP（133）且一个字都不打印**，所以「看输出都对」在这里
 # 完全失效，退出码本身才是判据。条数照样钉住，理由同上
 run_assert "--reverse-selftest" "✅ 反向段自检通过（19 条）" --reverse-selftest
+# 课后重转（P11-1）。**离线**：纯函数 + 内存夹具，不加载模型、不联网、不碰音频。
+# 它守两条本包最要紧的判据，而两条都**只在特定输入下才现形**：
+#   · 实时链路的模型仍是 medium——谁把 large 改成全默认，这里立刻红；
+#   · 缺 / 残 / 张冠李戴（文件名写着 large、内容其实是 medium 的 539MB）→
+#     拦住，且文案里明说**不会静默回落**。
+# 条数照样钉住，理由同上（用例掉到 0 时进程照样 exit=0）。
+# 「实际加载的是哪一个模型」那条判据不在这里——它要真模型，在
+# `tools/probes/retranscribe.sh` 里（large 与 medium 各跑一遍、两套数字都打出来）
+run_assert "--retranscribe-selftest" "✅ 课后重转自检通过（51 条）" --retranscribe-selftest
 # 说话人识别的界面档位 + store 三条闸（C-3-2）。**离线**：helper 打桩、不写盘、
 # 不联网、不加载模型、不碰音频。这一条覆盖的是**界面判断**（详情页那条路没有窗口
 # 可点，只能靠纯函数 + 这条断言）和三条否定式闸（手动触发 / 不并发 / 失败不落盘）
@@ -449,6 +522,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含二十条断言：18 条 run_assert + 超时退出码 124 + 无重定向必须拒绝）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含二十四条断言：19 条 run_assert + 3 条必须拒绝 + 被拦住不落盘 + 超时退出码 124）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

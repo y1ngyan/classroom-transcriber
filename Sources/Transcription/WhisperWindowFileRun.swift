@@ -507,67 +507,61 @@ enum WhisperWindowFileRun {
     ) throws -> Round {
         var round = Round()
         round.label = label
-        let pipeline = WhisperWindowPipeline()
-        let chunk = max(1, Int(chunkSeconds * WhisperWindowPipeline.sampleRate))
-        let windowFrames = Int(WhisperWindowPipeline.windowSeconds * WhisperWindowPipeline.sampleRate)
-        var fed = 0
-        var nextWindowAt = Int(options.firstWindowSeconds * 1000)
         var seenIds: Set<UUID> = []
         var lastText: [UUID: String] = [:]
-        let runStarted = ContinuousClock.now
 
-        while fed < samples.count {
-            let end = min(fed + chunk, samples.count)
-            pipeline.append(Array(samples[fed..<end]))
-            fed = end
-
-            // 实时链路是「每过一个步长取一次窗」，这里用「已喂进去的音频够一个
-            // 步长了」代替——喂进来的音频就是时间轴本身，两者的取窗时刻一致
-            let fedMillis = Int(Double(fed) / WhisperWindowPipeline.sampleRate * 1000)
-            guard fedMillis >= nextWindowAt else { continue }
-            nextWindowAt += WhisperWindowPipeline.stepMillis
-
-            let callStarted = ContinuousClock.now
-            let charsBefore = pipeline.recognizedConfidences.count
-            let update = try pipeline.advance(engine: engine)
-            let charsRecognized = pipeline.recognizedConfidences.count - charsBefore
-            let elapsed = secondsSince(callStarted)
-            round.attempts += 1
-
-            let startMillis = update == nil ? nil : pipeline.lastWindowStartMillis
+        // 取窗 / 合并 / 收尾全在 `WhisperFileTranscription.run` 里——**和课后重转
+        // 是同一次调用**。这里只做「把每一窗的事实记进 Round」这一件事。
+        // 以前这段驱动循环在这里另写了一份，重转那条路又要再写第三份：
+        // 三份之间只要有一份的取窗节奏漂了，探针量出来的数字就不再描述
+        // 重转实际跑的那条路，而**漂了不报任何错**。P11-1 把它收成一份
+        let result = try WhisperFileTranscription.run(
+            samples: samples,
+            engine: engine,
+            firstWindowSeconds: options.firstWindowSeconds
+        ) { facts in
+            let startMillis = facts.startMillis
             let startSamples = (startMillis ?? 0) * 16      // 16kHz → 毫秒 × 16
-            let endSamples = max(startSamples, min(startSamples + windowFrames, fed))
-            let windowAudioSeconds = Double(endSamples - startSamples) / WhisperWindowPipeline.sampleRate
-            let windowEndMillis = (startMillis ?? 0) + Int(windowAudioSeconds * 1000)
-
-            round.windows.append(WindowTrace(
-                index: round.attempts,
-                startMillis: startMillis,
-                elapsedSeconds: elapsed,
-                audioSeconds: windowAudioSeconds,
-                newSegments: 0,
-                charsRecognized: charsRecognized,
-                rms: update == nil ? 0 : peakOrRMS(samples, startSamples, endSamples, rms: true),
-                peak: update == nil ? 0 : peakOrRMS(samples, startSamples, endSamples, rms: false),
-                voicedRatio: update == nil ? 0 : frames.voicedRatio(
-                    fromMillis: startMillis ?? 0, toMillis: windowEndMillis
-                ),
-                footprintMB: footprintMB()
+            let endSamples = max(startSamples, min(
+                startSamples + Int(WhisperWindowPipeline.windowSeconds * WhisperWindowPipeline.sampleRate),
+                samples.count
             ))
-            round.maxFootprintMB = max(round.maxFootprintMB, round.windows[round.windows.count - 1].footprintMB)
+            let footprint = footprintMB()
+            round.windows.append(WindowTrace(
+                index: facts.index,
+                startMillis: startMillis,
+                elapsedSeconds: facts.elapsedSeconds,
+                audioSeconds: facts.audioSeconds,
+                newSegments: 0,
+                charsRecognized: facts.charsRecognized,
+                rms: startMillis == nil ? 0 : peakOrRMS(samples, startSamples, endSamples, rms: true),
+                peak: startMillis == nil ? 0 : peakOrRMS(samples, startSamples, endSamples, rms: false),
+                voicedRatio: startMillis == nil ? 0 : frames.voicedRatio(
+                    fromMillis: startMillis ?? 0, toMillis: facts.windowEndMillis
+                ),
+                footprintMB: footprint,
+                note: facts.isFinishWindow ? "（收尾窗：录音最后那一段补转）" : ""
+            ))
+            round.maxFootprintMB = max(round.maxFootprintMB, footprint)
 
-            guard let update else { continue }
-            round.segments = update.segments
-            round.finalized = update.segments.filter(\.isFinal).count
+            // 收尾窗**只进窗口表**，不记新增/改写/首段轨迹——原实现就是这样
+            // （它把收尾窗的段变化留给最后 `round.segments = final.segments` 统一落）。
+            // 这里是原样搬过来的，不是新决定：改成「也走一遍账」会让
+            // `--whisper-window-file` 的输出在别处悄悄多几行，而这一包不改探针报告
+            guard !facts.isFinishWindow else { return }
+            round.attempts = facts.index
+
+            // 空转那几轮（`startMillis == nil`）没有新段，后面的账不用记
+            guard startMillis != nil else { return }
 
             // 新增段 / 改写次数：合并器把候选追加进列表，所以「新 id 出现」是
             // 新增，「同 id 文本变了」是覆盖。两个都要数——只数新增的话，
             // 「同一句被反复改写成最终版本」这件事在输出里完全看不见
-            let fresh = update.segments.filter { !seenIds.contains($0.id) }
+            let fresh = facts.segments.filter { !seenIds.contains($0.id) }
             for segment in fresh { seenIds.insert(segment.id) }
             round.windows[round.windows.count - 1].newSegments = fresh.count
 
-            for segment in update.segments {
+            for segment in facts.segments {
                 if let previous = lastText[segment.id] {
                     if previous != segment.text { round.revisionCounts[segment.id, default: 0] += 1 }
                 } else {
@@ -576,57 +570,32 @@ enum WhisperWindowFileRun {
                 lastText[segment.id] = segment.text
             }
 
-            // 首段轨迹：整轮里第一个出现的段，之后每一窗都看它还在不在、文本变了没
-            let orderedNow = update.segments.sorted { $0.startTimeMillis < $1.startTimeMillis }
+            // 首段轨迹：整轮里第一个出现的段，之后每一窗都看它还在不在、文本变了没。
+            //
+            // 「喂进去多少秒了」原实现读的是驱动循环里的 `fed`，回调不带它。
+            // 这里用 `windowEndMillis` 代替——两者是同一个位置：窗口右端就是
+            // 「已经喂进来的音频」的末尾（见 `WhisperFileTranscription.windowBounds`）
+            let fedSeconds = Double(facts.windowEndMillis) / 1000
+            let orderedNow = facts.segments.sorted { $0.startTimeMillis < $1.startTimeMillis }
             if round.firstSegmentId == nil, let first = orderedNow.first {
                 round.firstSegmentId = first.id
-                round.firstSegmentSeenAtSeconds = Double(fed) / WhisperWindowPipeline.sampleRate
-                round.firstSegmentSeenAtWindow = round.attempts
-                round.firstSegmentTrace.append((Double(fed) / WhisperWindowPipeline.sampleRate, first.text))
+                round.firstSegmentSeenAtSeconds = fedSeconds
+                round.firstSegmentSeenAtWindow = facts.index
+                round.firstSegmentTrace.append((fedSeconds, first.text))
             } else if let id = round.firstSegmentId,
-                      let now = update.segments.first(where: { $0.id == id }),
+                      let now = facts.segments.first(where: { $0.id == id }),
                       round.firstSegmentTrace.last?.text != now.text {
-                round.firstSegmentTrace.append((Double(fed) / WhisperWindowPipeline.sampleRate, now.text))
+                round.firstSegmentTrace.append((fedSeconds, now.text))
             }
         }
 
-        // 收尾：把缓冲里最后那段补转 + 强制定稿（接线后的路径就是这么收的）
-        let transcriptionsBeforeFinish = pipeline.transcriptionSeconds.count
-        let charsBeforeFinish = pipeline.recognizedConfidences.count
-        let final = try pipeline.finish(engine: engine)
-        // 收尾窗也是一次 `merge()`：它进了 `transcriptionSeconds`，但没经过
-        // `advance()`，不补进表里的话这张表就少一行、统计口径也和
-        // `pipeline.statsLine` 对不上
-        if pipeline.transcriptionSeconds.count > transcriptionsBeforeFinish {
-            let elapsed = pipeline.transcriptionSeconds.last ?? 0
-            let startMillis = pipeline.lastWindowStartMillis
-            let startSamples = (startMillis ?? 0) * 16
-            let endSamples = min(startSamples + windowFrames, samples.count)
-            let windowAudioSeconds = Double(max(0, endSamples - startSamples))
-                / WhisperWindowPipeline.sampleRate
-            let windowEndMillis = (startMillis ?? 0) + Int(windowAudioSeconds * 1000)
-            round.windows.append(WindowTrace(
-                index: round.attempts + 1,
-                startMillis: startMillis,
-                elapsedSeconds: elapsed,
-                audioSeconds: windowAudioSeconds,
-                newSegments: 0,
-                charsRecognized: pipeline.recognizedConfidences.count - charsBeforeFinish,
-                rms: peakOrRMS(samples, startSamples, endSamples, rms: true),
-                peak: peakOrRMS(samples, startSamples, endSamples, rms: false),
-                voicedRatio: frames.voicedRatio(fromMillis: startMillis ?? 0, toMillis: windowEndMillis),
-                footprintMB: footprintMB(),
-                note: "（收尾窗：录音最后那一段补转）"
-            ))
-            round.maxFootprintMB = max(round.maxFootprintMB, round.windows[round.windows.count - 1].footprintMB)
-        }
-        round.transcriptSeconds = pipeline.transcriptionSeconds
-        round.segments = final.segments
-        round.finalized = final.segments.filter(\.isFinal).count
-        round.guardTrips = pipeline.guardTrips
-        round.confidences = pipeline.recognizedConfidences
-        round.hallucinations = pipeline.hallucinationLog
-        round.wallSeconds = secondsSince(runStarted)
+        round.transcriptSeconds = result.transcriptionSeconds
+        round.segments = result.segments
+        round.finalized = result.segments.filter(\.isFinal).count
+        round.guardTrips = result.guardTrips
+        round.confidences = result.confidences
+        round.hallucinations = result.hallucinations
+        round.wallSeconds = result.wallSeconds
         return round
     }
 

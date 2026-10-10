@@ -35,15 +35,21 @@ struct RecordingDetailView: View {
             titleVisibility: .visible
         ) {
             Button("重新转录", role: .destructive) {
-                for part in session.parts {
-                    Task {
-                        await store.retranscribe(sessionID: session.id, partID: part.id)
-                    }
-                }
+                store.retranscribe(sessionID: session.id)
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("会用新的识别结果替换现有的 \(session.segmentCount) 段转录内容。这个过程不可撤销，耗时较长。")
+            // 三句话，各有各的用处（P11-1 目标 3、5）：
+            //   · 第一句说清这是覆盖式操作、不可撤销；
+            //   · 第二句是**派生数据的失效提醒**——说话人标签和课后笔记锚点
+            //     都挂在段 id 上，重转把段整个换掉，那些东西就对不上了。
+            //     按既有语义处理（`RecordingsStore.retranscribe` 不动这两样），
+            //     所以这里只负责**在点下去之前说出来**；
+            //   · 第三句是代价：large 只有 0.49× 实时，一节课要跑一节课的时间，
+            //     不先说清楚，用户会以为它卡死了
+            Text("会用新的识别结果替换现有的 \(session.segmentCount) 段转录内容。这个过程不可撤销。\n"
+                 + "重转会让已生成的笔记和说话人标签失效，需要重跑。\n"
+                 + store.retranscribeEstimate(for: session))
         }
     }
 
@@ -156,14 +162,32 @@ struct RecordingDetailView: View {
             }
 
             // 重转进行中：一条几十分钟的录音要跑很久，不给状态用户会
-            // 以为卡死了，进而去点别的地方把界面搞乱
+            // 以为卡死了，进而去点别的地方把界面搞乱。
+            // 「取消」是文字链接（一行只放一个 PillButton，上面那个位置
+            // 是「在访达中显示」的）——它必须在这儿，因为这是唯一一个
+            // 「跑错档了想停下」的时刻
             if store.isRetranscribing {
                 HStack(spacing: Theme.Spacing.sm) {
                     ProgressView().controlSize(.small)
-                    Text("\(store.retranscribeProgress)请勿关闭窗口")
+                    Text(store.retranscribeProgress)
                         .textStyle(Theme.Text.caption)
                         .foregroundStyle(Theme.textSecondary)
+                    Button { store.cancelRetranscribe() } label: {
+                        Text("取消").textStyle(Theme.Text.caption).foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
                 }
+            }
+
+            // 上一次重转的结果 / 被打回来的理由。**这一条以前不存在**，
+            // 于是「缺 large 模型」那种拦截就只写进了 statusMessage 而没有任何
+            // 地方显示——用户看到的是「点了重转，什么都没发生」
+            if !store.statusMessage.isEmpty {
+                Text(store.statusMessage)
+                    .font(.system(size: Theme.Text.caption.size, design: .monospaced))
+                    .foregroundStyle(store.statusMessage.hasPrefix("❌")
+                        ? Theme.error : Theme.textSecondary)
+                    .textSelection(.enabled)
             }
 
             if !session.course.isEmpty {
@@ -215,6 +239,19 @@ struct RecordingDetailView: View {
                         .monospacedDigit()
                         .foregroundStyle(Theme.textTertiary)
                 }
+            }
+
+            // 这段转录是哪个模型产出的（P11-1 目标 4）。**没有就不显示**——
+            // 不写「模型未知」那种占位：老存档本来就没这个字段，一句
+            // 没有信息量的话只会把这一段挤高
+            if let provenance = part.transcriptionProvenance {
+                HStack(spacing: Theme.Spacing.xs) {
+                    Image(systemName: "cpu").font(.system(size: 10))
+                    Text("转录模型 \(provenance.summary)")
+                        .textStyle(Theme.Text.caption)
+                        .monospacedDigit()
+                }
+                .foregroundStyle(Theme.textTertiary)
             }
 
             if part.segments.isEmpty {

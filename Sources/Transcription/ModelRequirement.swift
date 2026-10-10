@@ -31,7 +31,9 @@ struct ModelAvailability: Equatable, Sendable {
     /// 的就是「它到底多小」
     /// 1KB 以下再补一档字节数——`%.0f` 会把 9 字节印成「0 KB」，那是
     /// **文件非空却说成零**，比「0.0 MB」更难看出来（见 `ModelCache.byteText`）
-    private static func mbText(_ bytes: Int64) -> String {
+    /// 内部（不是 private）：重转那条路的拦截文案也要用它，而两处各写一份
+    /// 「怎么把字节数说成人话」迟早会漂移成两种说法
+    static func mbText(_ bytes: Int64) -> String {
         if bytes < 1_000 { return "\(bytes) 字节" }
         if bytes < 1_000_000 { return String(format: "%.0f KB", Double(bytes) / 1_000) }
         let mb = Double(bytes) / 1_000_000

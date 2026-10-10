@@ -117,6 +117,12 @@ struct SettingsView: View {
                     modelRow()
                 }
 
+                // 课后重转要的 large-v3。**和后端选择无关**（P11-1 目标 2）：
+                // 重转是对已经录好的音频做事，走的是自己那条路，用户哪怕
+                // 选了 Apple 也照样能重转——把它藏在 `backend == .whisper`
+                // 后面，就会出现「提示我去下 large，可设置里没有这一行」
+                retranscribeModelRow()
+
                 // 未完成的下载残留。**和后端选择无关**：用户下一半切回 Apple，
                 // 那几百 MB 的 `.part` 照样占着盘。它只在自己存在时出现——
                 // 没有残留时不占一行，这是常态
@@ -454,6 +460,63 @@ struct SettingsView: View {
                 PillButton(title: center.canRetry ? "重试下载" : "下载模型",
                            isLoading: false) {
                     center.start()
+                }
+            }
+        }
+    }
+
+    /// 「课后重转模型」这一行（P11-1 目标 2）。
+    ///
+    /// 什么时候出现，只有两条：
+    ///   · **large-v3 缺着或不全**（裁决 `.blocked`）——这是它存在的主要理由。
+    ///     拦截文案本身就写全了「缺哪个文件 / 路径 / 期望多大 / 去哪儿下」，
+    ///     这里再加一个按钮，用户照着就能自己解决；
+    ///   · 正在下这一份 / 刚下完这一份——下完了要看见「已就位」，
+    ///     否则界面上下完和没下一样，用户会再点一次。
+    ///
+    /// 齐全且没在动 = 常态，**不占一行**（和 `cacheRow` 同一条规矩）。
+    ///
+    /// 它**不挂在 `backend == .whisper` 后面**：重转是对已经录好的音频做事，
+    /// 走自己那条路，用户选了 Apple 后端也照样能重转。
+    @ViewBuilder
+    private func retranscribeModelRow() -> some View {
+        let center = appState.modelDownload
+        let engine = RetranscribeEngine.large
+        let decision = RetranscribeRequirement.resolve(engine: engine)
+        let activeHere = center.activeFile == engine.fileName
+        let busyHere = center.phase.isBusy && activeHere
+
+        VStack(alignment: .leading, spacing: 8) {
+            if busyHere {
+                StatusMark(kind: .live, text: "正在下载重转模型 · \(center.progressLine)")
+                if let retry = center.retryNote {
+                    StatusMark(kind: .warning, text: retry)
+                }
+                // 同 modelRow：一次只放一个 PillButton，下完之前那一个位置是取消
+                PillButton(title: "取消下载", style: .quiet) { center.cancel() }
+                Text("模型位置：\(center.destination.path)")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                switch decision {
+                case .ready:
+                    if case .done(let bytes) = center.phase, activeHere {
+                        StatusMark(kind: .ok, text: "重转模型已就位 · \(ModelCache.byteText(bytes))")
+                    }
+                case .blocked(let reason):
+                    // 文案里带着路径和一个下载地址，**原样显示**：它是照着做的全部信息
+                    StatusMark(kind: .error, text: reason)
+                    if case .failed(let message) = center.phase, activeHere {
+                        StatusMark(kind: .error, text: message)
+                    } else if case .cancelled = center.phase, activeHere {
+                        StatusMark(kind: .warning,
+                                   text: "下载已取消。已下的部分留着，下次从这里接着下")
+                    }
+                    PillButton(title: "下载重转模型（large-v3）") {
+                        center.start(file: engine.fileName)
+                    }
                 }
             }
         }

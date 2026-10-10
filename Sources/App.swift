@@ -262,6 +262,59 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 课后重转（P11-1）：--retranscribe <会话.json> --out <目录> [--engine large|medium]
+        //                [--part N] [--head <秒>] [--allow-partial]
+        //
+        // **只处理已经录好的音频**：读一条会话 JSON + 它指向的 wav，把重转结果
+        // 写到 `--out` 的一份副本里。输入会话文件一个字节都不动（验收要求 ③ 的
+        // sha256 比对就是它），也**一次都不碰麦克风**。
+        //
+        // 判据是输出里那两行 `🔎 实际加载的模型` / `🔎 模型字节数`——它们是
+        // whisper 真的打开的那个文件，不是一句「已用 large」
+        if CommandLine.arguments.contains("--retranscribe") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            // 退出码要**从 detached 任务带回主线程**再退出。
+            //
+            // 这里踩过一个坑（首次跑出来 exit=1，而输出全对）：原写法是
+            // detached 任务里 `semaphore.signal()` 之后**自己也**调
+            // `exitReleasingGgml(code)`，而主线程被唤醒后紧接着调
+            // `exitReleasingGgml(1)`——两边抢着退出，谁先到谁说了算。
+            // 退出码是由**主线程**决定的那一个：`RetranscribeRun.run` 的返回值
+            // 不上路，跑得再对也可能落地成 1。
+            //
+            // `@unchecked Sendable` 的依据：只写一次，且**写在 signal 之前**；
+            // 读发生在 `semaphore.wait` 返回之后，两边有明确的 happens-before
+            // 关系（同 `MicTap` 那类「由调用顺序保证」的包装）
+            final class ExitCodeBox: @unchecked Sendable {
+                var value: Int32 = 1
+            }
+            let box = ExitCodeBox()
+            let semaphore = DispatchSemaphore(value: 0)
+            Task.detached {
+                // 边跑边打：一条课堂量级的会话要跑一节课的时间，攒到最后
+                // 一次性交的话中途超时/被打断就一个字都看不到
+                box.value = await RetranscribeRun.run(arguments: CommandLine.arguments) { print($0) }
+                semaphore.signal()
+            }
+            // 同 `--whisper-window-file`：默认 1800 秒，`--timeout <秒>` 可以抬高
+            // （课堂量级的整条重转是小时级的）。超时那一刻 `whisper_full` **还在算**，
+            // 所以走 `exitWithoutReleasingGgml`——释放会把后端从正在计算的图底下
+            // 抽走，实测当场 `GGML_ASSERT(backend) failed` + exit=134
+            let retranscribeTimeout: Double = {
+                guard let j = CommandLine.arguments.firstIndex(of: "--timeout"),
+                      j + 1 < CommandLine.arguments.count,
+                      let parsed = Double(CommandLine.arguments[j + 1]), parsed > 0
+                else { return 1800 }
+                return parsed
+            }()
+            if semaphore.wait(timeout: .now() + retranscribeTimeout) == .timedOut {
+                print("❌ 课后重转超时（上限 \(Int(retranscribeTimeout)) 秒）——"
+                      + "抬上限用 --timeout <秒>；输入会话文件一个字都没动")
+                exitWithoutReleasingGgml(124)
+            }
+            exitReleasingGgml(box.value)
+        }
+
         // 麦克风链路自检：--mic-selftest
         // 端到端跑一遍「点开始录制」实际走的路径：TCC 权限 → analyzer → tap → 采集 → 停止。
         // 刻意不 exit：主 actor 的调度依赖主线程 run loop，在 init 里阻塞主线程
@@ -659,6 +712,41 @@ struct ClassroomTranscriberApp: App {
             let result = ReverseSegmentSelfTest.run()
             for line in result.lines { print(line) }
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 课后重转自检：--retranscribe-selftest（P11-1）
+        // （离线：纯函数 + 内存夹具；不加载模型、不联网、不碰音频、不发声）
+        //
+        // 它守两条机器判据，而这两条都**只在特定输入下才现形**，所以必须有
+        // 一条不依赖磁盘现状的路把它们跑红一次：
+        //   · 实时链路的模型仍是 medium——谁把 large 改成全默认，这里就红；
+        //   · 缺 / 残 / 张冠李戴（文件名 large、内容 medium）→ 拦住且
+        //     **不会静默回落**。
+        // 退出码跟着红绿走，理由同上面那条
+        if CommandLine.arguments.contains("--retranscribe-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = RetranscribeSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
+        // 课后重转 · **store 那条路**的自检：--retranscribe-store-selftest（P11-1）
+        // （要真模型 + 合成音频；全部落在临时目录，**不碰真实库、不碰麦克风、不发声**）
+        //
+        // 上一条 `--retranscribe-selftest` 守的是纯函数，`--retranscribe` 那个入口
+        // 走的是 `RetranscribeRun`；而**用户点「重转」走的是 `RecordingsStore`**——
+        // 第三条路。这条自检把 store 真的驱动一遍（真的加载模型、真的转音频），
+        // 因为「取消之后旧转录还在不在」这句话只有跑起来才验得了，而那是本包
+        // 唯一会**悄悄毁掉用户看过的内容**的地方。
+        // 走 Task + MainActor：store 是 @MainActor 的，**不能在主线程上用信号量等**
+        // （等的那件事正要回主 actor，死锁）——同 `--diarize-ui-selftest`
+        if CommandLine.arguments.contains("--retranscribe-store-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            Task { @MainActor in
+                let result = await RetranscribeStoreSelfTest.run()
+                for line in result.lines { print(line) }
+                exitReleasingGgml(result.failed == 0 ? 0 : 1)
+            }
         }
 
         // 说话人识别的界面自检：--diarize-ui-selftest

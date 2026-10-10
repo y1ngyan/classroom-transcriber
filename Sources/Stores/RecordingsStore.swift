@@ -360,96 +360,225 @@ final class RecordingsStore {
     private(set) var retranscribing: UUID?
     private(set) var retranscribeProgress = ""
 
-    var isRetranscribing: Bool { retranscribing != nil }
-
-    /// 重新转录某条会话的某个片段，用新的结果替换该片段原有的 segments。
+    /// 正在进行的那次重转任务。**必须自己拿住句柄**：取消要靠它。
     ///
-    /// **默认不过 AGC**（`gainMode: nil`）：同一条录音的对照实测显示，
-    /// 补 AGC 后平均置信度反而从 0.684 降到 0.619——AGC 是逐帧变速增益，
-    /// 给识别器引入了时不变的原始音频所没有的时变特性。详见
-    /// `FileTranscription.Preprocess` 的注释。
+    /// `Task {}` 从外面 `.cancel()` 才会把取消传到驱动循环里；而重转的活儿
+    /// 跑在 `Task.detached` 上（它**不继承**外面的取消），所以取消要经
+    /// `withTaskCancellationHandler` 显式转发一层——见 `retranscribeSegment`。
+    /// 少了这个句柄，「取消」就只是一个改不动的按钮
+    private var retranscribeWork: Task<Void, Never>?
+
+    /// 「正在重转」的判据是**任务句柄**，不是 `retranscribing`。
+    /// 两者差着一段实实在在的时间：句柄在 `retranscribe()` 里同步置上，
+    /// 而 `retranscribing` 要等走到那一段才填。模型裁决 + 加载引擎那几秒
+    /// （large 冷启动更久）界面必须已经在报「在跑」——否则用户看到的是
+    /// 「点了一下没反应」，然后再点一次
+    var isRetranscribing: Bool { retranscribeWork != nil }
+
+    /// 取消这一轮重转。**只置位，不直接停**——真正的停点在
+    /// `WhisperFileTranscription.run` 的每一窗之前（单次 `whisper_full`
+    /// 是秒级的阻塞调用，中途插不进去）。所以用户点完最多还要等一窗
+    func cancelRetranscribe() {
+        guard retranscribeWork != nil else { return }
+        retranscribeWork?.cancel()
+        retranscribeProgress = "正在取消…（等这一窗转完）"
+    }
+
+    /// 本次重转预计要跑多久（派单目标 3 的第一条：代价先摆出来）。
+    /// 纯计算，不碰磁盘也不碰模型
+    func retranscribeEstimate(
+        for session: RecordingSession,
+        engine: RetranscribeEngine = .preferred
+    ) -> String {
+        let audioSeconds = Double(session.parts.reduce(0) { $0 + $1.durationMillis }) / 1000
+        return engine.estimatedText(audioSeconds: audioSeconds)
+    }
+
+    /// 重新转录一条会话的**所有**有音频的片段，用新的结果替换各片段原有的 segments。
+    ///
+    /// **默认档是 `RetranscribeEngine.preferred`（large-v3）**：课后重转离线跑，
+    /// 慢一点换准确度（实测覆盖率 85.9% → 100%，见 `RetranscribeEngine` 的注释）。
+    /// 实时链路不走这里，它固定 medium。
+    ///
+    /// **旧转录怎么处理**（派单要求交付时说清的一条）：**保留到新的一整段跑完为止**。
+    /// 结果先攒在内存里，一个片段转完了才写回存档；取消或失败时那个片段
+    /// **一个字都不动**（见 `retranscribeSegment` 的返回值和本轮末尾的落盘）。
+    /// 「不许留下半个转录」这条因此落在两处：分段成原子单位 + 只认跑完的结果。
     ///
     /// 覆盖是不可逆的：原 segments 上可能已经有用户看过的内容，所以
     /// UI 层必须先确认再调这里
-    func retranscribe(
-        sessionID: UUID,
-        partID: UUID,
-        locales: [String] = ["zh-CN"],
-        gainMode: MicGainMode? = nil
-    ) async {
-        guard retranscribing == nil else { return }
-        guard var session = session(id: sessionID),
-              let partIndex = session.parts.firstIndex(where: { $0.id == partID }),
-              let fileName = session.parts[partIndex].fileName
-        else {
-            statusMessage = "❌ 找不到要重转的片段"
+    func retranscribe(sessionID: UUID, engine: RetranscribeEngine = .preferred) {
+        guard retranscribeWork == nil else { return }
+        retranscribeProgress = "正在准备（\(engine.fileName)）…"
+        retranscribeWork = Task { [weak self] in
+            guard let self else { return }
+            await self.performRetranscribe(sessionID: sessionID, engine: engine)
+            self.retranscribeWork = nil
+            self.retranscribing = nil
+            self.retranscribeProgress = ""
+        }
+    }
+
+    private func performRetranscribe(sessionID: UUID, engine: RetranscribeEngine) async {
+        guard var session = session(id: sessionID) else {
+            statusMessage = "❌ 找不到要重转的会话"
             return
         }
 
-        let url = recordingsDirectory.appendingPathComponent(fileName)
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            statusMessage = "❌ 音频文件不存在：\(fileName)"
+        // 1. 先裁决模型，**在动手之前**。
+        //    缺 large 时这一段就是本包的全部答案：说出来 + 怎么补，
+        //    然后**什么都不做**——不回落 medium（那会让你以为这份转录是
+        //    large 的产物）。文案里带着路径、期望大小、下载入口三件事
+        let decision = RetranscribeRequirement.resolve(engine: engine)
+        guard case .ready(let modelPath, let bytes, let revision) = decision else {
+            if case .blocked(let reason) = decision { statusMessage = reason }
+            return
+        }
+        statusMessage = ""
+
+        // 2. 加载引擎（一次，几秒到十几秒）。`Task.detached`：`WhisperEngine.init`
+        //    会编译 Metal 内核、同步阻塞，放主 actor 上界面就僵在那儿
+        let whisper: WhisperEngine
+        do {
+            whisper = try await Task.detached(priority: .userInitiated) {
+                try WhisperEngine(modelURL: URL(fileURLWithPath: modelPath))
+            }.value
+        } catch {
+            statusMessage = "❌ 重转引擎加载失败：\(error.localizedDescription)\n   模型位置：\(modelPath)"
             return
         }
 
-        retranscribing = partID
-        retranscribeProgress = "正在重转 \(fileName)…"
-        defer {
-            retranscribing = nil
-            retranscribeProgress = ""
-        }
-
-        // 收集结果。sink 在 analyzer 的消费任务里被调用，所以用锁保护——
-        // 那条任务不在主 actor 上
-        let collected = Collector()
-        let preprocess = gainMode.map { FileTranscription.Preprocess(gainMode: $0) }
-
-        await FileTranscription.run(
-            path: url.path,
-            locales: locales,
-            presetChoice: .timeIndexed,
-            preprocess: preprocess,
-            sink: { segment in collected.append(segment) }
+        let provenance = TranscriptionProvenance(
+            modelFile: engine.fileName, revision: revision, bytes: bytes,
+            retranscribedAt: Date()
         )
 
-        let fresh = collected.snapshot()
-        guard !fresh.isEmpty else {
-            statusMessage = "⚠️ 重转没有产出内容，保留原有转录"
-            return
+        // 3. 逐片段跑。**串行、一个 Task 里跑完**：原先 UI 那层是
+        //    `for part in parts { Task { … } }`，而 `retranscribe` 的入口
+        //    guard 只放行第一个——并发起 N 个任务、N-1 个被静默丢掉
+        var done: [(index: Int, segments: [TranscriptSegment])] = []
+        var skipped: [String] = []
+        var cancelled = false
+
+        for (index, part) in session.parts.enumerated() {
+            if Task.isCancelled { cancelled = true; break }
+            guard let fileName = part.fileName else {
+                // 这一片没开存档（recordsAudio 关着）——没有音频可转，
+                // 跳过而不是报错。原有的 segments 一个字不动
+                skipped.append("第 \(index + 1) 段没有音频文件")
+                continue
+            }
+            let url = recordingsDirectory.appendingPathComponent(fileName)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                skipped.append("第 \(index + 1) 段音频不在：\(fileName)")
+                continue
+            }
+
+            retranscribing = part.id
+            let total = session.parts.count
+            retranscribeProgress = "正在重转第 \(index + 1)/\(total) 段 \(fileName)…"
+
+            switch await retranscribeSegment(
+                url: url, whisper: whisper, engine: engine, partIndex: index, partCount: total
+            ) {
+            case .success(let segments):
+                done.append((index, segments))
+            case .cancelled:
+                cancelled = true
+            case .failed(let message):
+                skipped.append(message)
+            }
+            if cancelled { break }
         }
 
-        // 重转出来的段要补上质量分档和提问标记：这两件事在实时链路里
-        // 是定稿时做的（见 TranscriptionEngine.upsert），文件路径没有
-        // 那个环节，不补的话重转完质量标记会整片消失
-        var enriched = fresh
-        let detector = QuestionDetector(sensitivity: .normal)
-        for i in enriched.indices {
-            if let hit = detector.detect(enriched[i].text) {
-                enriched[i].questionLevel = hit.level
-                enriched[i].coreQuestion = hit.coreQuestion
+        // 4. 落盘。**只有跑完的片段**进得来（`done` 里全是完整结果），
+        //    取消/失败的那些片段保持原样——这就是「不许留下半个转录」
+        for entry in done {
+            session.parts[entry.index].segments = entry.segments
+            session.parts[entry.index].transcriptionProvenance = provenance
+        }
+        if !done.isEmpty {
+            session.updatedAt = Date()
+            save(session)
+        }
+
+        var notes = ["模型 \(engine.fileName)"]
+        if !done.isEmpty { notes.append("已重转 \(done.count) 段录音") }
+        if cancelled { notes.append("⏹ 已取消") }
+        notes.append(contentsOf: skipped.map { "⚠️ \($0)" })
+        if done.isEmpty {
+            statusMessage = notes.joined(separator: "；")
+                + (cancelled ? "——原有转录全部保留" : "")
+        } else {
+            statusMessage = "✅ " + notes.joined(separator: "；")
+        }
+    }
+
+    private enum SegmentOutcome: Sendable {
+        case success([TranscriptSegment])
+        case cancelled
+        case failed(String)
+    }
+
+    /// 转一个片段。**返回成功才代表这一片可以覆盖旧转录**。
+    ///
+    /// 取消要显式往下传：`Task.detached` 不继承外面的取消状态，所以这里用
+    /// `withTaskCancellationHandler` 把 `cancel()` 转发进那个 detached 任务，
+    /// 驱动循环里的 `Task.isCancelled` 才看得见（见 `WhisperFileTranscription.run`）
+    private func retranscribeSegment(
+        url: URL,
+        whisper: WhisperEngine,
+        engine: RetranscribeEngine,
+        partIndex: Int,
+        partCount: Int
+    ) async -> SegmentOutcome {
+        let path = url.path
+        // 进度里的「已转 X / 共 Y 秒」靠回调报上来。窗口级回调在**工作线程**上，
+        // 所以过一道 MainActor；每窗一次（3~6 秒一个），这点开销可以忽略
+        let onWindow: @Sendable (WhisperFileTranscription.WindowFacts) -> Void = { facts in
+            let covered = Double(facts.windowEndMillis) / 1000
+            Task { @MainActor [weak self] in
+                guard let self, self.isRetranscribing else { return }
+                self.retranscribeProgress = String(
+                    format: "正在重转第 %d/%d 段 %@ · 已转 %.0f 秒（第 %d 窗）",
+                    partIndex + 1, partCount, url.lastPathComponent, covered, facts.index
+                )
             }
         }
 
-        session.parts[partIndex].segments = enriched
-        session.updatedAt = Date()
-        save(session)
-        statusMessage = "✅ 已重转 \(fileName)：\(fresh.count) 段"
-    }
-
-    /// 跨线程收集重转结果。FileTranscription 的 sink 在它的消费任务里
-    /// 被调用，不在主 actor 上，所以要自己加锁
-    private final class Collector: @unchecked Sendable {
-        private let lock = NSLock()
-        private var items: [TranscriptSegment] = []
-
-        func append(_ segment: TranscriptSegment) {
-            lock.lock(); defer { lock.unlock() }
-            items.append(segment)
+        let work = Task.detached(priority: .userInitiated) { () -> SegmentOutcome in
+            do {
+                let loaded = try WhisperFileTranscription.loadSamples(path: path)
+                let result = try WhisperFileTranscription.run(
+                    samples: loaded.samples, engine: whisper, onWindow: onWindow
+                )
+                guard !result.segments.isEmpty else {
+                    return .failed("第 \(partIndex + 1) 段重转没有产出内容，保留原有转录")
+                }
+                // 重转出来的段要补上质量分档和提问标记：这两件事在实时链路里
+                // 是定稿时做的（见 TranscriptionEngine.upsert），文件路径没有
+                // 那个环节，不补的话重转完质量标记会整片消失
+                var enriched = result.segments
+                let detector = QuestionDetector(sensitivity: .normal)
+                for i in enriched.indices {
+                    if let hit = detector.detect(enriched[i].text) {
+                        enriched[i].questionLevel = hit.level
+                        enriched[i].coreQuestion = hit.coreQuestion
+                    }
+                }
+                return .success(enriched)
+            } catch let failure as WhisperFileTranscription.Failure {
+                if case .cancelled = failure { return .cancelled }
+                return .failed("第 \(partIndex + 1) 段：\(failure.localizedDescription)")
+            } catch {
+                return .failed("第 \(partIndex + 1) 段：\(error.localizedDescription)")
+            }
         }
 
-        func snapshot() -> [TranscriptSegment] {
-            lock.lock(); defer { lock.unlock() }
-            return items
+        return await withTaskCancellationHandler {
+            await work.value
+        } onCancel: {
+            work.cancel()
         }
     }
 
