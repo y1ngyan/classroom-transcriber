@@ -479,6 +479,39 @@ final class WhisperEngine: @unchecked Sendable {
         ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_TEMPERATURE_INC"].flatMap(Float.init)
     }
 
+    /// `initial_prompt` 是否**每个解码窗都前置**（`whisper.h:528`）。**取 `false`**。
+    ///
+    /// 先把机制说准——下面这些是读 **v1.9.4 的 `src/whisper.cpp`** 得到的，
+    /// 不是照 header 那半句注释猜的。`carry` 只换词表**存在哪儿**，两种都受
+    /// `whisper_n_text_ctx()/2`（这些模型是 224）这个上限约束：
+    ///
+    /// - `false`（实测的出厂值）：词表的 token 进**滚动上下文**（`prompt_past1`，
+    ///   源码 `whisper.cpp:7078` 起），随窗口推进按「只留最近 `max_prompt_ctx`
+    ///   个 token」的规则逐条老化（`7228` 起），老的那几条被挤出去。
+    /// - `true`：改进**静态上下文**（`prompt_past0`，`whisper.cpp:7065` 起），
+    ///   每个解码窗都把它整段前置，代价是本窗自己的前文只剩
+    ///   `max_prompt_ctx − prompt_n_tokens` 个 token 的位置。
+    ///
+    /// **为什么选 `false`**：
+    /// ① 「每窗都吃到词表」这件事**已经是免费的**——我们的解码单位是**一窗一次
+    ///    `whisper_full`**（`WhisperWindowPipeline` 每窗单独调 `transcribe`），
+    ///    而词表在**每次调用的开头**都会被重新塞进上下文，所以每个窗口的第一段
+    ///    天然就带着它。`carry = true` 并不能多给什么。
+    /// ② 它多给的只有「同一窗里第 2、3 段也前置」，代价却实打实：200 token 的词表
+    ///    会占掉 224 上限里的 200，留给**本窗前文**的只剩 ~24 token（十几个汉字）。
+    ///    窗口内「接着上一段往下说」的连续性是真信息，短窗（10 秒 / 70% 重叠）
+    ///    里本来就少，不该再挤掉——这正是 header 那句 "may reduce conditioning
+    ///    on previous text" 说的事。
+    /// ③ 窗短，老化的那几条词在真正解码时多半还留在上下文里（老化是按 token 数、
+    ///    不是按窗数），所以 `false` 在真实窗长下并不比 `true` 少给多少偏置。
+    ///
+    /// **为什么显式写出来而不是听任默认**：whisper 的出厂值今天确实是 `false`
+    /// （实测 `whisper_full_default_params` 打出来就是 false），但那是**上游的
+    /// 实现细节**——它哪天翻了，我们的行为会跟着变而没有任何东西变红。钉住它，
+    /// 「翻默认」就必须是一次看得见的改动。只在真的送 prompt 时才写这个字段，
+    /// 所以关掉开关的那一趟仍然与加这个功能之前逐字节一致
+    static let carryInitialPrompt = false
+
     enum WhisperError: LocalizedError {
         case modelMissing
         case initFailed
@@ -579,20 +612,57 @@ final class WhisperEngine: @unchecked Sendable {
     src/whisper.cpp:6373。
     """
 
+    /// 这串文本在**这个模型的分词器**下有多少 token。
+    ///
+    /// 术语表前移要一个 token 上限（whisper.h:526 的 224），而字符和 token
+    /// 的换算是 1:0.5 到 1:3 都有——只有模型自己算得出这个数。
+    ///
+    /// **不用 `whisper_token_count`**：它等价于 `whisper_tokenize(ctx, text, NULL, 0)`，
+    /// 而缓冲区为 0 会让 whisper 每调一次就往 stderr 打一行
+    /// 「too many resulting tokens: N (max 0)」。术语表有 100 多条时，
+    /// 构造 prompt 要调它 100 多次——那 100 多行噪声会混进诊断日志里，
+    /// 把真出问题时要看的那几行淹掉。这里自己给一块够大的缓冲，一条都不打。
+    ///
+    /// 容量 512 对「100 多条术语」这个量级有 2 倍以上余量（实测全量词表
+    /// 约 200 token）；真超了也只会打一次，然后按 whisper 的约定扩容重来。
+    func promptTokenCount(_ text: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let context, !text.isEmpty else { return 0 }
+
+        var capacity = 512
+        while capacity <= 16_384 {
+            var tokens = [whisper_token](repeating: 0, count: capacity)
+            let count = tokens.withUnsafeMutableBufferPointer { buffer in
+                whisper_tokenize(context, text, buffer.baseAddress, Int32(capacity))
+            }
+            // ≥ 0 = 装下了（返回值就是 token 数）
+            if count >= 0 { return Int(count) }
+            // < 0 = 缓冲不够，其绝对值就是需要的容量（whisper.h 的约定）
+            capacity = max(capacity * 2, Int(-count) + 1)
+        }
+        return 0
+    }
+
     /// 转一段 16kHz 单声道 Float32 PCM。
     ///
     /// - Parameters:
     ///   - language: 课堂是中文为主，默认 zh
     ///   - suppressRegex: 交给 whisper 的 `suppress_regex`。**默认 nil（不启用）**——
     ///     实测语义和代价都不如预期，见 `Self.suppressRegexCaveat`
-    /// - Returns: 转出来的段（含时间范围和逐字符置信度），文本已经是简体
+    ///   - initialPrompt: 交给 whisper 的 `initial_prompt`（P12-1）。
+    ///     **默认 nil = 完全不设这个字段**，与加这个参数之前逐字节一致。
+    ///     构造那串文本是 `GlossaryPrompt` 的事，这里只管把它送进去——
+    ///     引擎层不认识术语表，也不该认识
     ///   - audio: 「哪条音频」的标签，**只用于诊断日志**（时间戳非法时那条）。
     ///     实时链路传窗口起点、文件链路传文件名。不参与任何计算，
     ///     默认空串——探针和自检不关心它
+    /// - Returns: 转出来的段（含时间范围和逐字符置信度），文本已经是简体
     func transcribe(
         _ samples: [Float],
         language: String = "zh",
         suppressRegex: String? = nil,
+        initialPrompt: String? = nil,
         audio: String = ""
     ) throws -> [WhisperSegment] {
         lock.lock()
@@ -632,6 +702,21 @@ final class WhisperEngine: @unchecked Sendable {
         let regexCString = suppressRegex.flatMap { strdup($0) }
         defer { if let regexCString { free(regexCString) } }
         params.suppress_regex = regexCString.map { UnsafePointer($0) }
+
+        // initial_prompt：同样是一个要在 whisper_full 期间存活的 C 字符串。
+        //
+        // 只在拿到**非空**文本时才设这个字段——空串和 nil 都表示「不送」，
+        // 但两条路径要走同一个结果：`params` 每窗都是新构造的（`whisper_full_default_params`），
+        // 而 `initial_prompt` 的默认值是 nullptr。留 nil 就是「和加这个功能之前
+        // 一模一样」，这正是「关掉开关时参数逐字节不变」那条判据要的
+        let promptCString = initialPrompt.flatMap { $0.isEmpty ? nil : strdup($0) }
+        defer { if let promptCString { free(promptCString) } }
+        params.initial_prompt = promptCString.map { UnsafePointer($0) }
+        // carry_initial_prompt 只在**真的送了词表**时才写（理由见 carryInitialPrompt）：
+        // 没送的那一趟连这个字段都不碰，`params` 与加这一包之前逐字节相同
+        if params.initial_prompt != nil {
+            params.carry_initial_prompt = Self.carryInitialPrompt
+        }
 
         var mutable = samples
         let code = mutable.withUnsafeMutableBufferPointer { buf in

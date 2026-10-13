@@ -145,6 +145,35 @@ final class TranscriptionEngine {
     /// 错的方向偏。中文同理——理由见 GlossaryDefaults 的注释。
     var contextualTerms: [String] = []
 
+    /// 这一场 whisper 实际送出去的 `initial_prompt` 说明（P12-1）。
+    /// 起录时算一次、记下来，界面读到它就能回答「这一场到底送了什么」
+    /// ——送没送、装进几条、丢了几条，三件事都要答得上来。见 `GlossaryPrompt.Resolution`
+    private(set) var whisperGlossaryPromptNote = ""
+
+    /// 术语前移的裁决。**本进程内唯一构造点**：实时链路和文件链路都从这里过。
+    ///
+    /// 实时链路的词表来自 `contextualTerms`（AppState 已从 `GlossaryStore` 灌好），
+    /// 不去重读磁盘——`GlossaryStore.promptResolution()` 那条路是给
+    /// **没有 store 实例的文件链路**用的（`--retranscribe` 不启动界面）。
+    /// - Parameter engine: 用来数 token 的引擎（`promptTokenCount`）。上限是
+    ///   token 数，只有模型的分词器算得出来——所以**必须在引擎就绪之后**才算
+    func glossaryPromptResolution(engine: WhisperEngine) -> GlossaryPrompt.Resolution {
+        let resolution = GlossaryPrompt.resolve(
+            terms: contextualTerms,
+            enabled: AppConfig.glossaryPromptEnabled,
+            sourceNote: "本场词表 \(contextualTerms.count) 条",
+            tokenCount: { engine.promptTokenCount($0) }
+        )
+        whisperGlossaryPromptNote = resolution.reportLine
+        DiagnosticLog.info(.transcription, "术语前移", fields: [
+            .init("开关", resolution.enabled ? "开" : "关"),
+            .init("装进", "\(resolution.built.kept.count)/\(contextualTerms.count)"),
+            .init("丢掉", "\(resolution.built.dropped.count)"),
+            .init("字数", "\(resolution.built.characterCount)"),
+        ])
+        return resolution
+    }
+
     /// 送进识别器之前的软件增益档。
     ///
     /// **只作用于送入识别器的那一份，存档永远是未加增益的原始音频。**
@@ -438,7 +467,7 @@ final class TranscriptionEngine {
     /// 约 20 秒后毁掉音频，见 `useVoiceProcessing`），这条链路连开关都不碰；
     /// ③ 采样目标固定 16kHz 单声道，而不是问 analyzer 要什么格式。
     private func startWhisper() async {
-        guard await whisper.engineForRecording() != nil else {
+        guard let whisperEngine = await whisper.engineForRecording() else {
             // **绝不静默退回 Apple**：用户把后端设成 Whisper 就是在等 Whisper
             // 的结果，悄悄换回系统识别会让「今天怎么突然不准了」变成一个查不
             // 出来的谜。宁可这里停下、把原因摆在界面上
@@ -486,7 +515,15 @@ final class TranscriptionEngine {
 
         // 已经在界面上的段要交给管线：合并器的输入就是「已显示的段 + 本窗结果」。
         // 传进去的是一份拷贝，之后以管线吐回来的整份为准（见 adoptWhisperSegments）
-        let pipeline = WhisperWindowPipeline(segments: segments)
+        // 术语表前移（P12-1）：把本场的词表作为 `initial_prompt` 交给每一窗。
+        // **词表来源就是 `contextualTerms`**——它已经被 AppState 从
+        // `GlossaryStore.contextualTerms` 灌进来（见 AppState.startTranscription），
+        // 再读一遍磁盘就是第二份来源，两份会在某次改动里分家。
+        //
+        // 这里**只构造一次**、交给管线存着：术语表是开录前的先验，
+        // 整场不变（见 WhisperWindowPipeline.init 的注释）
+        let glossaryPrompt = glossaryPromptResolution(engine: whisperEngine)
+        let pipeline = WhisperWindowPipeline(segments: segments, initialPrompt: glossaryPrompt.text)
         whisperPipeline = pipeline
         whisperSkippedRounds = 0
         whisperRoundSeconds.removeAll()

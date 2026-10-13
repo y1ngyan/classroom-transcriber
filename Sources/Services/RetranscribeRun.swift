@@ -195,6 +195,17 @@ enum RetranscribeRun {
             retranscribedAt: Date()
         )
 
+        // 术语表前移（P12-1）。**和界面走同一个出处**（`GlossaryStore.promptResolution()`）：
+        // 探针无头跑出来的 A/B 数字要拿来当判据，它就必须描述界面实际跑的那条路。
+        // 这一行是「送了什么」的唯一凭证——不能只说「已启用」
+        let glossaryPrompt = GlossaryStore.promptResolution(
+            tokenCount: { whisper.promptTokenCount($0) }
+        )
+        emit("  \(glossaryPrompt.reportLine)")
+        if let text = glossaryPrompt.text {
+            emit("    prompt 前 200 字：\(String(text.prefix(200)))")
+        }
+
         emit("")
         emit("─── 重转 ───")
         var produced: [(index: Int, segments: [TranscriptSegment])] = []
@@ -218,7 +229,8 @@ enum RetranscribeRun {
                     path: audioURL.path, headSeconds: options.headSeconds
                 )
                 let result = try WhisperFileTranscription.run(
-                    samples: loaded.samples, engine: whisper
+                    samples: loaded.samples, engine: whisper,
+                    initialPrompt: glossaryPrompt.text
                 ) { facts in
                     // 进度：每窗一行。**和界面用的是同一份回调**（每窗的
                     // `WindowFacts`），所以「进度说跑了几窗」和「最终统计说几窗」
@@ -242,6 +254,12 @@ enum RetranscribeRun {
                 emit(String(format: "    ✅ %d 段 · %d 字 · %d 窗 · 墙钟 %.1f 秒（音频 %.1f 秒）",
                             enriched.count, enriched.reduce(0) { $0 + $1.text.count },
                             result.windowCount, result.wallSeconds, result.audioSeconds))
+                // 回读核对（`TranscriptionEngine` 的 contextualStrings 也有一条同名的）：
+                // 「我打算送 X」和「管线实际送的是 X」是两件事，中间隔着一次传参。
+                // 传丢了这个不报任何错，只表现为「开了但没用」
+                emit(result.initialPrompt == glossaryPrompt.text
+                     ? "      ✅ 管线回读的 initial_prompt 与送出去的一致"
+                     : "      ❌ 管线回读的 initial_prompt 与送出去的不一致（实际 \(result.initialPrompt.map { "\($0.count) 字" } ?? "nil")）")
                 produced.append((index, enriched))
             } catch {
                 emit("    ❌ 这一段转写失败：\(error.localizedDescription)")

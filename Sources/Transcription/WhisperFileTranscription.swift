@@ -139,6 +139,11 @@ enum WhisperFileTranscription {
         let hallucinations: [String]
         let guardTrips: Int
         let confidences: [Double]
+        /// 这一趟实际送进 whisper 的 `initial_prompt`。**从管线回读、不是
+        /// 把入参回显一遍**——探针/A-B 要拿它证明「两趟唯一的差别就是这个」，
+        /// 回显入参证明不了（入参可能是 nil，也可能中途被谁改了）。
+        /// nil = 没送
+        let initialPrompt: String?
     }
 
     /// 把样本喂完、定稿，返回最终段。
@@ -151,10 +156,11 @@ enum WhisperFileTranscription {
         samples: [Float],
         engine: WhisperEngine,
         firstWindowSeconds: Double = WhisperWindowPipeline.stepSeconds,
+        initialPrompt: String? = nil,
         onWindow: ((WindowFacts) -> Void)? = nil
     ) throws -> Result {
         let started = ContinuousClock.now
-        let pipeline = WhisperWindowPipeline()
+        let pipeline = WhisperWindowPipeline(initialPrompt: initialPrompt)
         let chunk = max(1, Int(chunkSeconds * WhisperWindowPipeline.sampleRate))
         let windowFrames = Int(WhisperWindowPipeline.windowSeconds * WhisperWindowPipeline.sampleRate)
         var fed = 0
@@ -235,7 +241,8 @@ enum WhisperFileTranscription {
             transcriptionSeconds: pipeline.transcriptionSeconds,
             hallucinations: pipeline.hallucinationLog,
             guardTrips: pipeline.guardTrips,
-            confidences: pipeline.recognizedConfidences
+            confidences: pipeline.recognizedConfidences,
+            initialPrompt: pipeline.initialPrompt
         )
     }
 

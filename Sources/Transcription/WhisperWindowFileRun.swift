@@ -22,6 +22,7 @@ import whisper
 ///                            [--repeat <n>] [--label <文字>]
 ///                            [--confidence-probe [--probe-step <秒>] [--probe-only]] [--sweep]
 ///                            [--head <秒>]
+///                            [--glossary-prompt | --glossary-prompt-text <文字>] [--glossary-score]
 /// ```
 ///
 /// - `--timing`：逐窗耗时表（窗序号 / 起点毫秒 / 耗时 / 该窗音频时长 /
@@ -45,6 +46,13 @@ import whisper
 ///   **必须显式传才启用**，因为上游语义（整 token 精确匹配、每 token 遍历
 ///   整个词表、模式非法即 abort）使它的效果和代价都得先量再说，见
 ///   `WhisperEngine.suppressRegexCaveat`。探针会单独报单窗耗时以便对照。
+/// - `--glossary-prompt`：把磁盘术语表（和界面/重转同一个出处）作为 whisper 的
+///   `initial_prompt` 送进去；`--glossary-prompt-text <文字>` 直接送那串。
+///   **探针缺省不送**（历史数字都是在不送下量的，默认改掉就没法比了）；
+///   生产链路的缺省是**关**（A/B 实测翻过来的），见 `AppConfig.glossaryPromptEnabled`。
+/// - `--glossary-score`：**只把磁盘词表读进来数命中，一个字节都不送**。
+///   给 A/B 的「关」那一臂用：命中数是差值，关臂没有词表就只能看开臂自己
+///   转出了几个词，回答不了「前移有没有用」。见 `scoringSection` 的注释。
 /// - 探针输出的末尾会附**幻觉治理的改动前后对照**（`hallucinationSection`），
 ///   一趟跑出两条臂。生产链路自己的丢弃记录则由滑窗那一趟打印。
 enum WhisperWindowFileRun {
@@ -89,6 +97,26 @@ enum WhisperWindowFileRun {
         /// token 遍历一遍词表，代价和效果都要先量。见 `WhisperEngine.suppressRegexCaveat`
         var suppressRegex: String?
 
+        /// 术语表前移（P12-1）在探针里的三种取法。
+        /// **探针缺省是 `.off`，不是生产缺省**——探针是量尺，量尺不能跟着
+        /// 被测对象一起变：这个开关加进来之前跑出来的历史数字（覆盖率、
+        /// 段数、单窗耗时）都是在「不送 prompt」下量的，探针默认改成送，
+        /// 那些数字就和新数字不可比了，而不可比在输出上看不出来
+        enum GlossaryPromptMode: Equatable {
+            case off
+            /// 用磁盘术语表（和界面/重转同一个出处，`GlossaryStore.promptResolution()`）
+            case disk
+            /// 直接给一串（A/B 对照、边界实验用）
+            case literal(String)
+        }
+        var glossaryPrompt: GlossaryPromptMode = .off
+
+        /// **只打分、不送**：把磁盘词表读进来数命中，但 `initial_prompt` 照旧不设。
+        ///
+        /// 存在的唯一理由是 A/B 的「关」那一臂——见 `scoringSection` 的注释。
+        /// `.disk` 时隐含为开（那本来就要读词表）
+        var glossaryScore = false
+
         static func parse(_ arguments: [String]) -> Options {
             var options = Options()
             func value(_ flag: String) -> String? {
@@ -115,6 +143,12 @@ enum WhisperWindowFileRun {
             }
             if let raw = value("--label") { options.label = raw }
             if let raw = value("--suppress-regex") { options.suppressRegex = raw }
+            if let raw = value("--glossary-prompt-text") {
+                options.glossaryPrompt = .literal(raw)
+            } else if arguments.contains("--glossary-prompt") {
+                options.glossaryPrompt = .disk
+            }
+            options.glossaryScore = arguments.contains("--glossary-score")
             options.timing = arguments.contains("--timing")
             options.dumpAll = arguments.contains("--dump-all")
             options.probeOnly = arguments.contains("--probe-only")
@@ -163,6 +197,16 @@ enum WhisperWindowFileRun {
         var segments: [TranscriptSegment] = []
         var finalized = 0
         var maxFootprintMB = 0.0
+        /// 这一轮**实际**送进 whisper 的 `initial_prompt`（从管线回读）。
+        /// A/B 两臂唯一的差别应当是它——回显选项而不是回读管线的话，
+        /// 「选项传了但没接上」在输出里看不出来
+        var initialPrompt: String?
+        /// A/B 用的词表（命中数要在**同一份词表**上数，不然两臂各数各的）
+        var glossaryTerms: [String] = []
+        /// 「送了什么」的一行说明（`GlossaryPrompt.Resolution.reportLine`）。
+        /// 单独记它而不是从 `initialPrompt` 反推：装进几条、丢了几条
+        /// 从那串文本上数不出来（词表里有没有这个词，文本自己不说）
+        var glossaryNote = ""
         /// 首段（整轮里第一个出现的段）的文本随窗口推进的完整轨迹。
         /// 「首段是不是碎片、后来有没有被修正」只能这样看——只看最终列表
         /// 的话，被改写过的中间版本一点痕迹都不留
@@ -390,6 +434,7 @@ enum WhisperWindowFileRun {
         // 只有这个数能回答。它数的是最终输出的字，不含窗口重叠的重复计入
         // （那部分见下面的逐字符置信度行，那个是带重叠的）
         lines.append("  总字数 \(segments.reduce(0) { $0 + $1.text.count })（最终输出）")
+        lines.append(contentsOf: glossarySection(round))
         if segments.count != finalized {
             lines.append("  ⚠️ 有 \(segments.count - finalized) 段没收尾定稿（收尾定稿应当把最后一段也带上）")
         }
@@ -498,6 +543,66 @@ enum WhisperWindowFileRun {
 
     // MARK: - 跑一轮（生产路径）
 
+    /// 术语表前移这一趟的凭证（P12-1）。
+    ///
+    /// **四件事必须同时在**：送的是哪串（前 200 字）、它多长、
+    /// 词表里有多少词正确出现在转录里（主判据）、这些词一共出现了多少次。
+    /// 只报「已启用」是不够的——那是**动作**，不是一个数。
+    ///
+    /// 命中数用 `GlossaryPrompt.hits`（只认正确写法，不认 aliases）——
+    /// 它和事后校正那条路数的是同一件事：词表里的词有没有以正确形式出现。
+    private static func glossarySection(_ round: Round) -> [String] {
+        var lines = glossaryPromptSection(round)
+        lines.append(contentsOf: scoringSection(round))
+        return lines
+    }
+
+    /// 「送了什么」的那一半：**只在真的送了（或明确决定不送）时打**。
+    ///
+    /// 这一段是 A/B 里「关掉那一臂逐字节一致」的机器判据所在——关臂的输出里
+    /// 不许出现 `术语表前移` / `initial_prompt` / `prompt 长度` 任何一处。
+    private static func glossaryPromptSection(_ round: Round) -> [String] {
+        guard round.initialPrompt != nil || !round.glossaryNote.isEmpty else { return [] }
+        var lines: [String] = [""]
+        lines.append("─── 术语表前移（initial_prompt）───")
+        lines.append("  \(round.glossaryNote)")
+        if let prompt = round.initialPrompt {
+            lines.append("  prompt 长度 \(prompt.count) 字 · 前 200 字：「\(String(prompt.prefix(200)))」")
+        } else {
+            lines.append("  prompt: **没送**（params.initial_prompt 未设）")
+        }
+        // 把 carry 的取值摆出来：它是**引擎里那个常量**（不是本探针的选项），
+        // 报出来是为了让「每个解码窗都前置」还是「只进滚动上下文」这件事在每次
+        // A/B 的日志里都看得见——见 `WhisperEngine.carryInitialPrompt` 里的取舍
+        lines.append("  carry_initial_prompt: \(WhisperEngine.carryInitialPrompt ? "true（每个解码窗都前置）" : "false（词表进滚动上下文，随窗口老化）")")
+        return lines
+    }
+
+    /// 「转出了多少词」的那一半：**与送不送无关**。
+    ///
+    /// 为什么打分要独立成一段、而且要能在「关」那一臂单独开着（`--glossary-score`）：
+    /// 主判据是「命中数上去了没有」，而那是个**差值**。关的那一臂如果不带词表，
+    /// 它就只有一个空白的命中栏——**A/B 会退化成「只看开臂自己转出了几个词」**，
+    /// 而那个数回答不了「前移有没有用」（课堂内容本身就能让词自然出现）。
+    /// 所以打分属于测量层，送 prompt 属于功能层，两件事分开。
+    ///
+    /// 这一段的标题与正文刻意**不含**「术语表前移 / initial_prompt / prompt 长度」
+    /// ——关臂的日志要经得起「一个字节都没送」那条 grep。
+    private static func scoringSection(_ round: Round) -> [String] {
+        guard !round.glossaryTerms.isEmpty else { return [] }
+        var lines: [String] = [""]
+        lines.append("─── 命中打分（与送不送无关）───")
+        let text = round.segments.map(\.text).joined(separator: "\n")
+        let hits = GlossaryPrompt.hits(terms: round.glossaryTerms, in: text)
+        lines.append("  词表命中：\(hits.count)/\(round.glossaryTerms.count) 个词正确出现"
+                     + " · 出现次数合计 \(GlossaryPrompt.occurrenceCount(terms: round.glossaryTerms, in: text))")
+        let missed = round.glossaryTerms.filter { !hits.contains($0) }
+        if !missed.isEmpty {
+            lines.append("  没出现的词（前 20 个）：\(missed.prefix(20).joined(separator: "、"))")
+        }
+        return lines
+    }
+
     private static func runRound(
         samples: [Float],
         engine: WhisperEngine,
@@ -510,6 +615,34 @@ enum WhisperWindowFileRun {
         var seenIds: Set<UUID> = []
         var lastText: [UUID: String] = [:]
 
+        // 术语表前移（P12-1）：探针里缺省是 .off（见 Options.GlossaryPromptMode 的注释）
+        let resolvedPrompt: String?
+        switch options.glossaryPrompt {
+        case .off:
+            resolvedPrompt = nil
+        case .disk:
+            // `enabled: true` 是**必须**的：不给就是「跟着 App 缺省走」，而缺省是
+            // 用户设置里那个开关（今天是关）。`--glossary-prompt` 的语义是
+            // 「这一臂我要送」，不是「App 恰好开着的时候才送」——传 nil 会让
+            // 开臂静默退化成关臂，两臂跑出同一份结果而判据只说「没送」。
+            // 见 `GlossaryStore.promptResolution(enabled:)` 的注释
+            let resolution = GlossaryStore.promptResolution(
+                tokenCount: { engine.promptTokenCount($0) },
+                enabled: true
+            )
+            resolvedPrompt = resolution.text
+            round.glossaryNote = resolution.reportLine
+            round.glossaryTerms = GlossaryStore.termsFromDisk()
+        case .literal(let text):
+            resolvedPrompt = text.isEmpty ? nil : text
+            round.glossaryNote = "术语前移：开（--glossary-prompt-text 字面量）→ \(text.count) 字"
+        }
+        // 关臂也能打分：上面 `.off` 那一支不碰词表，这一句把「打分」单独补上。
+        // `--glossary-score` 只在 `.off` 时有意义（另外两支本来就读了）
+        if options.glossaryScore, round.glossaryTerms.isEmpty {
+            round.glossaryTerms = GlossaryStore.termsFromDisk()
+        }
+
         // 取窗 / 合并 / 收尾全在 `WhisperFileTranscription.run` 里——**和课后重转
         // 是同一次调用**。这里只做「把每一窗的事实记进 Round」这一件事。
         // 以前这段驱动循环在这里另写了一份，重转那条路又要再写第三份：
@@ -518,7 +651,8 @@ enum WhisperWindowFileRun {
         let result = try WhisperFileTranscription.run(
             samples: samples,
             engine: engine,
-            firstWindowSeconds: options.firstWindowSeconds
+            firstWindowSeconds: options.firstWindowSeconds,
+            initialPrompt: resolvedPrompt
         ) { facts in
             let startMillis = facts.startMillis
             let startSamples = (startMillis ?? 0) * 16      // 16kHz → 毫秒 × 16
@@ -590,6 +724,7 @@ enum WhisperWindowFileRun {
         }
 
         round.transcriptSeconds = result.transcriptionSeconds
+        round.initialPrompt = result.initialPrompt
         round.segments = result.segments
         round.finalized = result.segments.filter(\.isFinal).count
         round.guardTrips = result.guardTrips

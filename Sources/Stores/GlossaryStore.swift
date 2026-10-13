@@ -55,14 +55,68 @@ final class GlossaryStore {
             .filter { !$0.isEmpty }
     }
 
-    private static let storeURL: URL = {
+    /// `nonisolated`：下面两条非隔离的读取器（`termsFromDisk` / `promptResolution`）
+    /// 要用它，而它们必须在没有主 actor 的无头入口里可用
+    nonisolated private static let storeURL: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base
             .appendingPathComponent("ClassroomTranscriber", isDirectory: true)
             .appendingPathComponent("glossary.json")
     }()
 
-    static var storeFilePath: String { storeURL.path }
+    /// `nonisolated`：无头入口（自检、`--retranscribe`）没有主 actor 上下文，
+    /// 但它们要能把这个路径打出来——「词表从哪读的」是这个功能的一部分解释，
+    /// 说不出来就没法排查「为什么它没起作用」
+    nonisolated static var storeFilePath: String { storeURL.path }
+
+    /// 从磁盘读术语（只要 `term`，去空白、丢掉空串）。**给无头入口和
+    /// 文件链路用**——`--retranscribe` 和文件转录不启动界面，没有 store 实例，
+    /// 但它们必须看到和界面**同一份**词表：不然「A/B 探针测出来的效果」
+    /// 和「用户点重转实际跑的效果」是两份词表，探针的数字就不再描述那条路。
+    ///
+    /// 文件不存在 → 返回空，**不返回 `GlossaryDefaults.entries`**。
+    /// 界面首次启动会种下默认词表，所以正常机器上这个文件总是在的；
+    /// 而这里回落到默认词表等于**替用户决定**「这节课用的是那批内置词」，
+    /// 而他可能从没打开过术语表页面。宁可返回空（= 不送 prompt，
+    /// 与今天的行为一致），也不要凭空给一段他没选过的先验。
+    nonisolated static func termsFromDisk() -> [String] {
+        guard let data = try? Data(contentsOf: storeURL),
+              let decoded = try? JSONDecoder().decode([GlossaryEntry].self, from: data)
+        else { return [] }
+        return decoded
+            .map { $0.term.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// **「本次录音的术语表 → initial_prompt」的唯一出处。**
+    /// 实时链路（`TranscriptionEngine`）、文件链路（`WhisperFileTranscription`）、
+    /// 无头入口（`--retranscribe`）都调它，谁都不许自己拼那串字符串——
+    /// 拼法一旦分家，探针量出来的效果就不描述实际跑的那条路。
+    /// - Parameter tokenCount: 分词器的计数函数（生产传 `WhisperEngine.promptTokenCount`）。
+    ///   **必须从外面传进来**：磁盘这层没有模型，而「装得下几条」只有模型算得出来。
+    ///   传 `{ $0.count }`（1 token/字）只该出现在自检里
+    /// - Parameter enabled: 送不送。`nil`（生产）= 读 `AppConfig.glossaryPromptEnabled`，
+    ///   也就是用户在设置里那个开关。**无头探针不许走 `nil`**——见下。
+    ///
+    /// **为什么这里必须留一个显式覆盖口**（2026-10-13 被真事抓出来的）：
+    /// A/B 探针的「开」那一臂原先直接走 `nil`，等于「跟着 App 缺省走」。
+    /// 缺省是 true 的时候它碰巧是对的；缺省一翻成 false，`--glossary-prompt`
+    /// 就**静默退化成了关**——两臂跑出同一份结果（13 段 / 141 字，一模一样），
+    /// 而报告只说「术语前移：关」，探针的三条判据同时红。
+    /// 量尺不能跟着被测对象的缺省走：探针要的「开」是**我让你开**，
+    /// 不是「App 现在恰好开着」。所以探针显式传 `true`。
+    nonisolated static func promptResolution(
+        tokenCount: (String) -> Int,
+        enabled: Bool? = nil
+    ) -> GlossaryPrompt.Resolution {
+        let terms = termsFromDisk()
+        return GlossaryPrompt.resolve(
+            terms: terms,
+            enabled: enabled ?? AppConfig.glossaryPromptEnabled,
+            sourceNote: "磁盘术语表 \(terms.isEmpty ? "读不出来或为空" : "\(terms.count) 条")",
+            tokenCount: tokenCount
+        )
+    }
 
     init() {
         load()

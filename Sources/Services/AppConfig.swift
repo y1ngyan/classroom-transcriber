@@ -38,6 +38,9 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// 是否把术语表作为 whisper 的 `initial_prompt` 送进去（P12-1）。
+        /// 缺省见 `AppConfig.glossaryPromptEnabled`——那里的注释写了为什么
+        var glossaryPrompt: Bool?
     }
 
     private static let configURL: URL = {
@@ -226,6 +229,61 @@ enum AppConfig {
         .of(value(env: "TRANSCRIBE_BACKEND", file: box.current.transcriptionBackend))
     }
 
+    /// 术语表前移（作为 whisper 的 `initial_prompt`）的开关。**缺省关**。
+    ///
+    /// **为什么缺省关 —— 这是实测改的，不是一开始就这么写的。**
+    /// 原先缺省开，理由是「它什么都不花」（不联网、不调模型，只多塞一个字符串
+    /// 参数），代价则是「可能诱发幻觉」。2026-10-13 拿真录音跑了 A/B
+    /// （`tools/probes/glossary_prompt.sh`，课堂-20260923 第 3000 秒起 60 秒、
+    /// 18 窗、medium，同一段音频同一个模型，唯一变量是这个开关），**代价是实的、
+    /// 好处没测到**：
+    ///
+    ///   项                   关            开（198 token 词表）
+    ///   段数                 13            4
+    ///   总字数               141           72
+    ///   词表命中             0/105         0/105
+    ///   逐字符置信度 均/中位 0.775/0.928   0.729/0.876   ← 框架原生置信度，§10
+    ///   p10 / <0.5 占比      0.324/21.5%   0.182/25.2%
+    ///   质量档位 可信        3             1
+    ///
+    /// **不是「段数少但更准」——置信度是全面下降的。** 而且有个配对观察：同一段
+    /// 音频的同一时刻（00:50），关臂吐的是「(听不懂)」，开臂吐的是
+    /// 「这也是正确的方法去看,就是叫做Fractive data analysis。」（标「可信」）。
+    /// 这正是注释里担心的那件事的形状。
+    ///
+    /// **这一趟量不出「词表对得上时有没有好处」**：磁盘上那份内置词表是
+    /// 机器学习/线代混合词（machine learning、eigenvalue…），而这节课是另一门课，
+    /// 两臂命中都是 0/105。所以这一趟只测到了**危害方向**。
+    ///
+    /// 而危害方向恰恰是**缺省状态**：一个从没配过术语表的新用户，词表就是那份
+    /// 内置的机器学习词，他的课多半不是机器学习。缺省开 = 给每一堂课都注入一段
+    /// 无关的英文术语。所以缺省改成关——**要翻回开，需要先有一份「与所录课程
+    /// 匹配」的词表上的实测**（[[glossary-course-presets]]：词表必须先于录音）。
+    ///
+    /// 环境变量 `GLOSSARY_PROMPT`（1/true/yes/on 为开）只给无头 A/B 用。
+    static var glossaryPromptEnabled: Bool {
+        glossaryPromptEnabled(
+            fileValue: box.current.glossaryPrompt,
+            envValue: ProcessInfo.processInfo.environment["GLOSSARY_PROMPT"]
+        )
+    }
+
+    /// 上面那条的**纯函数**形式，两个入参都是显式喂进来的。
+    ///
+    /// 抽出来是「判据必须能红」的要求：自检要断言「文件里没这一项 → 关」，
+    /// 而真实的 accessor 读的是本进程的配置和环境变量——测试进程里那两样
+    /// 都不是缺省状态。拿 accessor 断言缺省值，只能在「碰巧是缺省」的时候绿，
+    /// 那不是判据，是撞运气。缺省值由 `--glossary-prompt-selftest` 的第八节钉住。
+    static func glossaryPromptEnabled(fileValue: Bool?, envValue: String?) -> Bool {
+        if let raw = envValue, !raw.trimmingCharacters(in: .whitespaces).isEmpty {
+            return ["1", "true", "yes", "on"].contains(raw.lowercased())
+        }
+        // 文件里没写这一项 = 从没配过。这不是「用户关掉了」——
+        // 两种情形在结果上不同：没配过要走缺省（关，理由见上），配成 true 才是开
+        guard let fileValue else { return false }
+        return fileValue
+    }
+
     static var configFilePath: String { configURL.path }
 
     /// 供 UI 提示用：哪些能力当前可用
@@ -296,6 +354,10 @@ enum AppConfig {
         seed.questionSensitivity = "low"
         seed.autoFactCheck = true
         seed.transcriptionBackend = "whisper"
+        // 这一项**写的是 true，不是它的缺省值（false）**：这条自检验的是
+        // 「落盘往返」，写一个和缺省相同的值就分不出「存进去了」和
+        // 「没存、读的时候回落到了缺省」——那正是这条自检要抓的 bug
+        seed.glossaryPrompt = true
 
         do {
             try save(seed)
@@ -331,6 +393,7 @@ enum AppConfig {
             ("questionSensitivity", onDisk.questionSensitivity == seed.questionSensitivity),
             ("autoFactCheck", onDisk.autoFactCheck == seed.autoFactCheck),
             ("transcriptionBackend", onDisk.transcriptionBackend == seed.transcriptionBackend),
+            ("glossaryPrompt", onDisk.glossaryPrompt == seed.glossaryPrompt),
         ]
         let lost = fields.filter { !$0.1 }.map(\.0)
         lines.append("  \(lost.isEmpty ? "✅" : "❌") \(fields.count) 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
@@ -342,6 +405,20 @@ enum AppConfig {
         // 翻默认值必须是有人显式改这一行、并且在这里看见红——不是某次
         // 顺手重构把它带过去的（那会让「明天照常录课」变成一句空话）
         lines.append("  \(TranscriptionBackend.of("whisper") == .whisper && TranscriptionBackend.of("APPLE") == .apple && TranscriptionBackend.of("笔误") == .apple && TranscriptionBackend.of(nil) == .apple ? "✅" : "❌") 后端解析：whisper → whisper；APPLE / 无效值 / 缺省 → apple（默认值）")
+
+        // 术语表前移的缺省值。**单独钉一条**的理由和后端那条一样：
+        // 它决定「明天照常录课」时 whisper 收到的参数是什么，翻默认值
+        // 必须是一次看得见红的显式改动，不是某次重构顺手带过去的。
+        // 这一条喂的是**纯函数**的边界值，不是「读一次真实配置看看」：
+        //   文件里没写 + 没环境变量   → 关（缺省；2026-10-13 由 A/B 从「开」翻过来）
+        //   文件里写了 false          → 关（用户显式关掉）
+        //   文件里写了 true           → 开（用户显式打开，不许被缺省盖过）
+        //   文件写了 false + 环境变量 1 → 开（环境变量只给无头 A/B 用，优先级更高）
+        let dflt = AppConfig.glossaryPromptEnabled(fileValue: nil, envValue: nil)
+        let offByFile = AppConfig.glossaryPromptEnabled(fileValue: false, envValue: nil)
+        let onByFile = AppConfig.glossaryPromptEnabled(fileValue: true, envValue: nil)
+        let envWins = AppConfig.glossaryPromptEnabled(fileValue: false, envValue: "1")
+        lines.append("  \(!dflt && !offByFile && onByFile && envWins ? "✅" : "❌") 术语表前移开关：缺省 \(dflt ? "开" : "关")、文件写 false → \(offByFile ? "开" : "关")、文件写 true → \(onByFile ? "开" : "关")、环境变量 1 覆盖 → \(envWins ? "开" : "关")")
 
         // 4. 权限：这文件里有密钥，同机其他账户不该读得到
         let mode = (try? FileManager.default.attributesOfItem(atPath: configURL.path))?[.posixPermissions] as? NSNumber
@@ -384,7 +461,8 @@ enum AppConfig {
           "micGain": "auto",
           "questionSensitivity": "normal",
           "autoFactCheck": false,
-          "transcriptionBackend": "apple"
+          "transcriptionBackend": "apple",
+          "glossaryPrompt": true
         }
         """
         try? FileManager.default.createDirectory(

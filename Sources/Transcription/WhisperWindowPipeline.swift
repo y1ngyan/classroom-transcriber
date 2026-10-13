@@ -62,8 +62,23 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 左右），所以它是分布参考，不是逐句的精确统计。
     private(set) var recognizedConfidences: [Double] = []
 
-    init(segments: [TranscriptSegment] = [], capacitySeconds: Double = 15) {
+    /// 本次录音的 `initial_prompt`（P12-1）。
+    ///
+    /// **在 init 时定死、整场不变**：它描述的是「这门课的术语表」，
+    /// 而术语表是开录前的先验（`GlossaryStore` 的注释：「术语表必须先于录音」）。
+    /// 每窗现拼的话，用户录到一半改了词表，同一场课的前后两段就会用两套先验，
+    /// 而转录文本上看不出这个分界。
+    /// （`let` 但对外可读：A/B 要**从管线本身**回读实际用的那串，
+    /// 而不是把入参回显一遍——见 `WhisperFileTranscription.Result.initialPrompt`）
+    let initialPrompt: String?
+
+    init(
+        segments: [TranscriptSegment] = [],
+        capacitySeconds: Double = 15,
+        initialPrompt: String? = nil
+    ) {
         self.segments = segments
+        self.initialPrompt = initialPrompt
         self.buffer = WhisperWindowBuffer(capacitySeconds: capacitySeconds, sampleRate: Self.sampleRate)
     }
 
@@ -177,7 +192,11 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         let started = ContinuousClock.now
         // `audio` 只喂诊断日志：时间戳一旦非法，光说「有个段坏了」没用，
         // 得能翻回是这次录音的哪一窗
-        let raw = try engine.transcribe(windowSamples, audio: "实时 · 窗口@\(windowStartMillis)ms")
+        let raw = try engine.transcribe(
+            windowSamples,
+            initialPrompt: initialPrompt,
+            audio: "实时 · 窗口@\(windowStartMillis)ms"
+        )
         // 幻觉过滤放在**合并之前**：合并器会把「同一句的多次识别」揉成一个段，
         // 幻觉一旦进了合并器就可能和真话粘在一起，那时再按段判就判不干净了。
         let recognized = filterHallucinations(raw, windowSamples: windowSamples)

@@ -188,6 +188,20 @@ struct SettingsView: View {
                     .textStyle(Theme.Text.caption)
                     .foregroundStyle(Theme.textSecondary)
 
+                // 只对 whisper 后端有效。**不把这一项藏在「后端 = whisper」后面**：
+                // 那一栏是可以随时改的，而这一项一藏，用户切到 whisper 之后
+                // 会以为这一页里根本没有这个词表开关
+                LabeledField(label: "术语前移") {
+                    Toggle("", isOn: $store.glossaryPrompt)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .frame(width: 360, alignment: .leading)
+                }
+
+                Text("开启后把术语表作为先验送进 whisper（不联网、不调模型）；顶部是 Apple 后端时不生效")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
                 note(
                     "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
                         + "纯本地规则判定，不联网、不调模型。"

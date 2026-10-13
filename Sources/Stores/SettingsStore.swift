@@ -39,6 +39,12 @@ final class SettingsStore {
     /// 下来是几十次请求——默认替他花掉不合适。关掉不影响手动核查。
     var autoFactCheck = false
 
+    /// 是否把术语表作为 whisper 的 `initial_prompt`（P12-1）。**默认关**：
+    /// 缺省开会被 A/B 实测推翻（段数塌、置信度全面下降、命中 0），
+    /// 理由和那组数字写在 `AppConfig.glossaryPromptEnabled` 的注释里。
+    /// 只对 whisper 后端有效；Apple 后端那条走 `contextualStrings`，本来就在送
+    var glossaryPrompt = false
+
     // MARK: - 状态
 
     private(set) var saveMessage = ""
@@ -108,6 +114,11 @@ final class SettingsStore {
         questionSensitivity = QuestionSensitivity.of(config.questionSensitivity)
         autoFactCheck = config.autoFactCheck ?? false
         backend = .of(config.transcriptionBackend)
+        // 缺省走同一个纯函数，不在这里另写一个 `?? true`——
+        // 「界面缺省」和「无头入口缺省」是两处独立的 `?? true` 的话，
+        // 改了一处另一处不会跟着动，而两处不一致在界面上看不出来
+        glossaryPrompt = AppConfig.glossaryPromptEnabled(
+            fileValue: config.glossaryPrompt, envValue: nil)
     }
 
     var configFilePath: String { AppConfig.configFilePath }
@@ -133,6 +144,7 @@ final class SettingsStore {
         config.questionSensitivity = questionSensitivity.rawValue
         config.autoFactCheck = autoFactCheck
         config.transcriptionBackend = backend.rawValue
+        config.glossaryPrompt = glossaryPrompt
 
         do {
             try AppConfig.save(config)
@@ -157,6 +169,8 @@ final class SettingsStore {
         return micGain != MicGainMode.of(config.micGain)
             || questionSensitivity != QuestionSensitivity.of(config.questionSensitivity)
             || backend != .of(config.transcriptionBackend)
+            || glossaryPrompt != AppConfig.glossaryPromptEnabled(
+                fileValue: config.glossaryPrompt, envValue: nil)
             || trimmed(deepSeekAPIKey) != config.deepSeekAPIKey
             || trimmed(searchAPIKey) != config.searchAPIKey
             || trimmed(cosBucket) != config.cosBucket

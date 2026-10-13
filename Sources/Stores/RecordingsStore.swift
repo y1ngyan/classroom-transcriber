@@ -549,8 +549,15 @@ final class RecordingsStore {
         let work = Task.detached(priority: .userInitiated) { () -> SegmentOutcome in
             do {
                 let loaded = try WhisperFileTranscription.loadSamples(path: path)
+                // 术语表前移：和实时链路同一条来源（磁盘上的 glossary.json）。
+                // 每个片段各算一次——术语表的开关是全局的，重转一个片段
+                // 和重转十个片段用同一份词表
                 let result = try WhisperFileTranscription.run(
-                    samples: loaded.samples, engine: whisper, onWindow: onWindow
+                    samples: loaded.samples, engine: whisper,
+                    initialPrompt: GlossaryStore.promptResolution(
+                        tokenCount: { whisper.promptTokenCount($0) }
+                    ).text,
+                    onWindow: onWindow
                 )
                 guard !result.segments.isEmpty else {
                     return .failed("第 \(partIndex + 1) 段重转没有产出内容，保留原有转录")

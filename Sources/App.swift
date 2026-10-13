@@ -749,6 +749,20 @@ struct ClassroomTranscriberApp: App {
             }
         }
 
+        // 术语表前移自检：--glossary-prompt-selftest（P12-1）
+        // （离线：纯函数 + 只读扫磁盘词表；不加载模型、不联网、不碰音频、不发声）
+        //
+        // 它守的三条只在**特定输入**下现形：空词表、超限截断、开关关掉。
+        // 真实词表有 100 多条，这三件事一个都不占——错了转录照样出结果、
+        // 什么都不报。所以构造做成纯函数，这里直接喂边界值把它跑红一次。
+        // 退出码跟着红绿走，理由同上面那条
+        if CommandLine.arguments.contains("--glossary-prompt-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = GlossaryPromptSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 说话人识别的界面自检：--diarize-ui-selftest
         // （离线：helper 打桩、不写盘、不联网、不加载模型、不碰音频、不发声）
         //
