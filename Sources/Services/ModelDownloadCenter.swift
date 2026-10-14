@@ -203,7 +203,13 @@ final class ModelDownloadCenter {
                 }
             } catch {
                 await MainActor.run {
-                    self.phase = .failed(error.localizedDescription)
+                    // 文案**只从这一个出口取**（界面上曾经出现过
+                    // 「The operation couldn't be completed. (…Failure error 0.)」
+                    // 这种天书，2026-10-13 实测到的就是它）。真正修掉它的是
+                    // `Failure` 认了 `LocalizedError`；这里调 `message(for:)` 只是
+                    // 让两个出口取的是同一句话。见 `ModelDownloader.message(for:)`
+                    // 那段注释里的对照实验
+                    self.phase = .failed(ModelDownloader.message(for: error))
                     self.retryNote = nil
                     self.refreshCache()
                 }

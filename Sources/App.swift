@@ -1033,11 +1033,22 @@ struct ClassroomTranscriberApp: App {
         }
 
         // 无头下载一个模型文件：--model-fetch <url> --to <路径> [--min-bytes N]
+        //                    [--expect-sha256 <hex> --expect-size <n>]
         //
         // 给 `tools/probes/model_resume.sh` 用的：那条探针要真的把进程
         // `kill -9` 掉，再看 `.part` 有没有接着长——那必须要有一个能被外部
         // 掐死的进程，所以这里只做「下载这一个文件」这一件事，不碰 App 状态。
         // **退出码跟着成败走**
+        //
+        // 两个可选旋钮给 `tools/probes/model_download_url.sh` 用：给了就按清单
+        // 那条路校验（`--expect-sha256` 是内容身份，`--expect-size` 是精确大小）。
+        // **不给就一个字都不变**——还是原来那条「单 URL、无 pin」的降级路径，
+        // 大小只按 `--min-bytes` 那条下界判。
+        //
+        // 404 回落（`ModelURLPlan`）在这条路上**默认开**，因为这条入口的 URL
+        // 形状和清单拼出来的完全一样（`/resolve/<40位sha>/<file>`）——而今天
+        // 镜像对这个形状一律 404。`CLASSROOM_MODEL_URL_FALLBACK=0` 关掉它，
+        // 那是探针的对照组。
         if let i = CommandLine.arguments.firstIndex(of: "--model-fetch") {
             setvbuf(stdout, nil, _IONBF, 0)
             let args = CommandLine.arguments
@@ -1046,7 +1057,8 @@ struct ClassroomTranscriberApp: App {
                 return args[j + 1]
             }
             guard i + 1 < args.count, let to = value("--to") else {
-                print("用法：--model-fetch <url> --to <路径> [--min-bytes N]")
+                print("用法：--model-fetch <url> --to <路径> [--min-bytes N]"
+                      + " [--expect-sha256 <hex> --expect-size <n>]")
                 exitReleasingGgml(2)
             }
             guard let url = URL(string: args[i + 1]) else {
@@ -1057,21 +1069,59 @@ struct ClassroomTranscriberApp: App {
             let minimum = value("--min-bytes").flatMap { Int64($0) } ?? WhisperEngine.expectedModelBytes
             let partURL = ModelDownloader.partURL(for: destination)
             let counter = ProgressLineCounter()
+
+            // 内容身份。**两个都给**才建 pin：少了 size 就只能按大小下界判，
+            // 那样「下到的内容对不对」这句话是假的——所以宁可退回无 pin 那条
+            // 明确的降级路径，也不假装在按清单校验
+            var expectedPIN: ModelPin?
+            if let sha = value("--expect-sha256")?.trimmingCharacters(in: .whitespaces).lowercased(),
+               let size = value("--expect-size").flatMap({ Int64($0) }) {
+                guard sha.count == 64, sha.allSatisfy({ $0.isHexDigit }) else {
+                    print("❌ --expect-sha256 不是 64 位十六进制：\(sha)")
+                    exitReleasingGgml(2)
+                }
+                // revision 从 URL 自己那一段取（清单那种形状里就是那个 commit）。
+                // 它同时是回落链的锚：短的那条由**它**切出来，不是另一个 ref。
+                // 没有那一段就不建 pin —— 一个 revision 是空的 pin 会在源报了
+                // `x-repo-commit` 时判成「源漂了」，那是一条和内容无关的假错
+                if let ref = ModelURLPlan.resolveRef(of: url) {
+                    expectedPIN = ModelPin(file: destination.lastPathComponent, repo: "",
+                                           revision: ref, size: size, sha256: sha,
+                                           isDefault: false, url: url)
+                } else {
+                    print("⚠️ URL 里没有 /resolve/<ref>/ 那一段（没法确定钉的是哪一版）；"
+                          + "这次按无清单的降级路径下")
+                }
+            } else if value("--expect-sha256") != nil || value("--expect-size") != nil {
+                print("⚠️ --expect-sha256 与 --expect-size 要一起给；这次按无清单的降级路径下")
+            }
+
+            let fallbackPolicy = URLFallbackPolicy.fromEnvironment()
+            print("取件形状：\(ModelURLPlan.shapeLabel(of: url))"
+                  + " · 404 回落：\(fallbackPolicy == .on ? "开" : "关（\(URLFallbackPolicy.environmentKey)=0）")"
+                  + " · 内容判据：\(expectedPIN == nil ? "大小下界 + 文件头（无清单）" : "清单式 size + sha256")")
+
             let semaphore = DispatchSemaphore(value: 0)
             Task.detached {
                 do {
                     let report = try await ModelDownloader().download(
                         from: url, to: destination, partURL: partURL, minimumBytes: minimum,
+                        pin: expectedPIN, urlFallback: fallbackPolicy,
                         onProgress: { p in counter.report(p) },
                         onRetry: { next, max, reason in
                             print("↻ 自动重试 第 \(next)/\(max) 次 · 上次失败：\(reason)")
                         })
                     print("✅ 下完 \(report.bytesWritten) 字节（从 \(report.resumedFrom) 接上）"
-                          + " · 请求 \(report.attempts) 次")
+                          + " · 请求 \(report.attempts) 次"
+                          + " · 取件形状：\(report.urlShape ?? "?") · 回落 \(report.fallbacks) 次")
                     for notice in report.notices { print("ℹ️ \(notice)") }
                     exitReleasingGgml(0)
                 } catch {
-                    print("❌ \(error.localizedDescription)")
+                    // 文案从这**一个**出口取：`--model-fetch` 与界面那两个 catch
+                    // 必须是同一句话。天书（`…(…Failure error 0.)`，2026-10-13 实测）
+                    // 是被 `Failure` 那句 `LocalizedError` conformance 修掉的，
+                    // 不是被这个函数修掉的——见 `ModelDownloader.message(for:)`
+                    print("❌ \(ModelDownloader.message(for: error))")
                     exitReleasingGgml(1)
                 }
                 semaphore.signal()

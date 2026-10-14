@@ -135,6 +135,12 @@ struct DownloadReport: Equatable, Sendable {
     var attempts: Int
     /// 必须原样显示给用户的诚实提示，例如「此源不支持续传，将从 0 开始」
     var notices: [String]
+    /// 这次取件**实际用的形状**（`ModelURLPlan.shapeLabel(of:)` 的结果）。
+    /// nil = 没走到请求那一步（文件已在位）。「静默换源」是不可接受的形状——
+    /// 用户得能读出这次是从 40 位 sha 还是从它的 12 位缩写取的件
+    var urlShape: String? = nil
+    /// 这次取件回落了几次。0 = 一直用的是清单钉的那个地址
+    var fallbacks: Int = 0
 }
 
 /// 模型下载。**只管搬字节**：要不要下、下完了拿它干什么，由调用方决定。
@@ -161,7 +167,7 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
         destination.appendingPathExtension("part")
     }
 
-    enum Failure: Error, Equatable {
+    enum Failure: Error, Equatable, LocalizedError {
         /// 试满了 `attempts` 次仍然失败。reason 是**最后一次**的原因
         case retriesExhausted(attempts: Int, reason: String)
         /// HTTP 状态码不是 200/206/416
@@ -206,6 +212,31 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
                     + "残缺的模型文件比没有更坏，这里不放行"
             }
         }
+
+        /// **真正修掉天书的就是这一句**（2026-10-15 实测确认，别把它当成装饰）：
+        /// 光有一个**同名**的 `localizedDescription` 属性不够——`localizedDescription`
+        /// 是 `Error` 协议的要求，`Failure` 里那个自定义属性只是「一个碰巧同名的
+        /// 属性」，装进 `any Error` 之后再问走的是 NSError 桥接，与它无关，于是打出
+        /// `The operation couldn't be completed. (…Failure error 0.)`（2026-10-13
+        /// 现场就是这句）。**认了 `LocalizedError` 并给出 `errorDescription`，
+        /// 桥接才会去问它**——对照实验（`/tmp/p12b_bridge.swift` 那种两行 enum）：
+        /// 无 conformance → 天书；加 conformance → 人话。
+        /// 内容**和上面那句是同一句话**，不另写一份文案（两份迟早各说各话）
+        var errorDescription: String? { localizedDescription }
+    }
+
+    /// 失败文案的**出口**：两处（`App.swift` 的 `--model-fetch` catch、
+    /// `ModelDownloadCenter` 的 catch）都从这一个函数取，免得两处各写一套。
+    ///
+    /// ⚠️ 它不是「天书的解药」——解药是上面那句 `LocalizedError` conformance。
+    /// 这里只是把「取哪个属性」收敛到一处：`error as NSError` 那条分支是留给
+    /// **别的类型**的错误（系统错误、URLError 那些，它们本来就走桥接）。
+    /// 原来这段注释说「不能直接用 `error.localizedDescription`，那会视而不见」，
+    /// 那是**错的**：加了 conformance 之后直接用它也一样是人话（2026-10-15 实测）。
+    /// 留着这个函数是收敛，不是必需。
+    static func message(for error: Error) -> String {
+        if let failure = error as? Failure { return failure.localizedDescription }
+        return (error as NSError).localizedDescription
     }
 
     /// 下载 `url` 到 `partURL`，校验通过后原子改名成 `destination`。
@@ -214,6 +245,9 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
     ///   - pin: 清单里那一版（revision + 精确大小 + sha256）。**传 nil 是
     ///     一条明确的降级路径**，不是「忘了传」：那样只剩大小下界 + 魔数
     ///     两条判据，报告里会记一条 notice 说明这次校验降级了
+    ///   - urlFallback: 404 时要不要换成同一个 commit 的 12 位前缀再试一次。
+    ///     见 `ModelURLPlan` / `URLFallbackPolicy`。**它只换取件路径**——
+    ///     内容判据（size + sha256）一次都不放松
     ///   - onRetry: 每次**即将重试**时回调（第几次、为什么）。界面靠它把
     ///     「正在自动重试」这件事显示出来——不回调就等于静默重试
     ///   - onProgress: 进度。**可能很密集**（每个网络回包一次），调用方自己节流
@@ -223,6 +257,7 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
         partURL: URL,
         minimumBytes: Int64,
         pin: ModelPin? = nil,
+        urlFallback: URLFallbackPolicy = .on,
         onProgress: @Sendable @escaping (DownloadProgress) -> Void = { _ in },
         onRetry: @Sendable @escaping (Int, Int, String) -> Void = { _, _, _ in }
     ) async throws -> DownloadReport {
@@ -248,17 +283,32 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
         if pin == nil {
             notices.append("没有清单，本次只做大小与文件头检查（没有 sha256 判据）")
         }
+
+        // ── 取件形状 ──
+        //
+        // 先按调用方给的那个 URL（清单钉的全 sha）请求，**只有 404** 才换成
+        // 同一个 commit 的 12 位前缀再试一次（理由见 `ModelURLPlan`）。
+        // `urlFallback == .off` 时只留第一种形状——那是探针要的对照组
+        let shapes = urlFallback == .on
+            ? ModelURLPlan.variants(url: url, revision: pin?.revision)
+            : [url]
+        var shapeIndex = 0
+        var fallbacks = 0
+
         var lastReason = "未知"
         var attempt = 0
 
         while attempt < Self.maxAttempts {
             attempt += 1
+            var switchedShape = false
             do {
-                let report = try await singleAttempt(
-                    from: url, destination: destination, partURL: partURL,
+                var report = try await singleAttempt(
+                    from: shapes[shapeIndex], destination: destination, partURL: partURL,
                     minimumBytes: minimumBytes, pin: pin,
                     attempt: attempt, onProgress: onProgress, notices: &notices
                 )
+                report.urlShape = ModelURLPlan.shapeLabel(of: shapes[shapeIndex])
+                report.fallbacks = fallbacks
                 return report
             } catch is CancellationError {
                 // 用户按了取消：**不是失败，不要重试**，`.part` 原样留着
@@ -277,6 +327,19 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
                 switch error {
                 case .validationFailed, .destinationOccupied, .sourceDrift, .incomplete:
                     throw error
+                case .httpStatus(let code) where urlFallback == .on
+                    && ModelURLPlan.shouldFallBack(statusCode: code)
+                    && shapeIndex + 1 < shapes.count:
+                    // 404 且还有别的形状可试 → 换形状。**这一句就是整个回落链**
+                    shapeIndex += 1
+                    fallbacks += 1
+                    lastReason = error.localizedDescription
+                    switchedShape = true
+                    notices.append(
+                        "取件路径回落到 \(ModelURLPlan.shapeLabel(of: shapes[shapeIndex]))："
+                            + "清单钉的那个全 sha 被服务器以 HTTP \(code) 拒了"
+                            + "（\(ModelURLPlan.resolveRef(of: shapes[0]) ?? "?")…）。"
+                            + "两条形状指向同一个 commit，内容仍按清单的 size + sha256 校验")
                 default:
                     lastReason = error.localizedDescription
                 }
@@ -285,12 +348,28 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
                 lastReason = (error as NSError).localizedDescription
             }
 
+            if switchedShape {
+                // 换形状**不占重试预算**：预算管的是「同一个请求试了几次」，
+                // 而这是一次新的请求（新形状照样要拿满 `maxAttempts`——
+                // 【九之七】用请求次数钉住的就是这一点）。**不会转不完**是因为
+                // 换形状的次数被 `shapes.count` 封顶（清单那种形状是 2 种：
+                // 全 sha → 12 位前缀，所以这里最多换 1 次），不是因为「今天只有一种」
+                attempt -= 1
+                continue
+            }
+
             if attempt < Self.maxAttempts {
                 onRetry(attempt + 1, Self.maxAttempts, lastReason)
             }
         }
 
-        throw Failure.retriesExhausted(attempts: attempt, reason: lastReason)
+        // 走到这里 = 重试到顶。**试过哪几种形状也要说出来**：不然用户看到的
+        // 是一句和形状无关的 404，而这次失败恰恰是形状造成的（今天镜像对
+        // 40 位 sha 一律 404，就是个现成的例子）
+        let reason = fallbacks > 0
+            ? lastReason + "（已经试过两种取件形状：清单的全 sha 与同一 commit 的 12 位缩写，都失败）"
+            : lastReason
+        throw Failure.retriesExhausted(attempts: attempt, reason: reason)
     }
 
     // MARK: - 单次尝试

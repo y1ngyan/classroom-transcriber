@@ -706,6 +706,296 @@ enum ModelDownloadSelfTest {
         }
         lines.append("")
 
+        // ═══ 九、取件形状的回落（P12-1b）═══
+        //
+        // 背景（2026-10-13 实测，记录见 `发现-模型下载URL-404-20261013.md`）：
+        // 清单把三个模型钉在同一个 40 位 commit 上，而镜像对这个 commit 的
+        // **40 位写法**一律 404（连 README.md 也 404），同一个 sha 的
+        // **12 位前缀**照样能给件。修法是一条**回落链**：只有 404 时才换成
+        // 同一个 commit 的缩写再试一次，别的一律不换。
+        //
+        // 这一节**全离线**：夹具 `/resolve/<全sha>/…` 复刻 404、
+        // `/resolve/<12位>/…` 给件、`/resolve/<全sha>/denied` 复刻 403。
+        // 真网络那条在 `tools/probes/model_download_url.sh`——这里不碰它。
+        lines.append("【九】取件形状回落：只有 404 才换形状，换了也要过 sha256")
+
+        // ── 九之一：认不认这个响应（纯函数，一行一个状态码）──
+        //
+        // 表里每一行都是一条判据，而且都是**要能拦人**的那种：403/401 是鉴权、
+        // 429 是限流、5xx 是源抖动——换一个 URL 形状不会让它们变好
+        for (code, want) in [(404, true), (200, false), (206, false), (403, false),
+                             (401, false), (429, false), (500, false), (416, false)] {
+            check(ModelURLPlan.shouldFallBack(statusCode: code) == want,
+                  "HTTP \(code) → \(want ? "回落" : "**不**回落")")
+        }
+
+        // ── 九之二：两条形状怎么生成（同一个 commit，不是换版本）──
+        let resolveFullPath = "/resolve/\(ModelFixture.fullRevisionRef)/model"
+        let resolveShortPath = "/resolve/\(ModelFixture.shortRevisionRef)/model"
+        let resolveFullURL = server.baseURL.appendingPathComponent(resolveFullPath)
+        let fullShapePin = ModelPin(file: WhisperEngine.modelFileName, repo: "fixture/model",
+                                    revision: ModelFixture.revisionA, size: Int64(body.count),
+                                    sha256: bodySHA, isDefault: true, url: resolveFullURL)
+        let shapes = ModelURLPlan.variants(for: fullShapePin)
+        check(shapes.count == 2, "清单那种形状给出 2 种取件形状（全 sha → 12 位前缀）",
+              shapes.map { $0.lastPathComponent }.joined(separator: " → "))
+        if shapes.count == 2 {
+            check(shapes[0] == fullShapePin.url, "第一种就是清单钉的那个地址（首选不变）")
+            let shortRef = ModelURLPlan.resolveRef(of: shapes[1])
+            check(shortRef == ModelFixture.shortRevisionRef,
+                  "第二种的 ref 是 12 位前缀", shortRef ?? "（读不出）")
+            check(shortRef.map { ModelFixture.revisionA.hasPrefix($0) } == true
+                    && ModelFixture.shortRevisionRef.count == ModelURLPlan.fallbackPrefixLength,
+                  "**它就是清单那个 commit 的缩写**（前缀，不是另一个 ref、更不是 main）",
+                  "\(ModelFixture.shortRevisionRef)… ⊂ \(ModelFixture.revisionA.prefix(16))…")
+            // 比「除 ref 那一段之外的部分」——`dropLast()` 只去掉文件名，
+            // 剩下的正好差在 ref 那一段上（第一版就是这么写错的）
+            func withoutRef(_ url: URL) -> [String] {
+                var parts = url.pathComponents
+                if let i = parts.firstIndex(of: "resolve"), i + 1 < parts.count {
+                    parts.remove(at: i + 1)
+                }
+                return parts
+            }
+            check(withoutRef(shapes[1]) == withoutRef(shapes[0]),
+                  "两条形状的 repo / 文件名一字不差，只有 ref 那一段不同",
+                  "/" + withoutRef(shapes[1]).dropFirst().joined(separator: "/"))
+            check(!shapes.contains { $0.absoluteString.contains("/resolve/main/") },
+                  "**没有**回落到 resolve/main（移动目标，和钉 sha 的初衷冲突）")
+        }
+        // URL 里根本没有 `resolve/<ref>` 那一段（夹具、自建源）时**不硬凑**
+        // 第二种形状——去改一个我们不认识的 URL 比不回落更坏
+        check(ModelURLPlan.variants(for: pin()).count == 1,
+              "URL 里没有 resolve 段时只有一种形状（不硬凑、也不去改别人的 URL）")
+
+        // 「没有 pin」那条路（`--model-fetch` 就是这个形状）：ref 只能从 URL
+        // 自己那段切。**这条单独钉**——2026-10-15 核验者的注入 D 抓到过缺口：
+        // 把 `?? resolveRef(of: url)` 整段删掉，121 条**全绿**、什么都不红。
+        // 而它是生产可达的（`--model-fetch` 没给 `--expect-*` 时 pin 就是 nil，
+        // 而那条入口的回落是**默认开**的）
+        let nilPinShapes = ModelURLPlan.variants(url: resolveFullURL, revision: nil)
+        check(nilPinShapes.count == 2,
+              "没有 pin 时，ref 从 URL 的 /resolve/<ref>/ 段切出来（照样给出第二种形状）",
+              "\(nilPinShapes.count) 种")
+        if nilPinShapes.count == 2 {
+            let derived = ModelURLPlan.resolveRef(of: nilPinShapes[1])
+            check(derived == String(ModelFixture.fullRevisionRef.prefix(12)),
+                  "第二种的 ref 是**该 URL 自己那个 ref** 的 12 位前缀", derived ?? "（读不出）")
+            check(ModelFixture.fullRevisionRef.hasPrefix(derived ?? "!"),
+                  "它同样是那个 ref 的前缀（说的是同一个 commit，不是另一个版本）")
+        }
+        check(ModelURLPlan.variants(url: resolveFullURL, revision: "").count == 2,
+              "revision 传空串（清单里没填）时也要退到 URL 那段，而不是没有第二种形状")
+
+        // **清单钉的 revision 优先于 URL 自己那段**。
+        //
+        // 2026-10-15 核验者的注入 G 抓到过缺口：把这两者的优先级对调，131 条
+        // 全绿——因为夹具里每个 pin 的 `url` ref 都**正好等于** `revision`，
+        // 两者根本区分不开。生产里 `pin.url` 是 repo+revision+file 拼的，所以
+        // 对调没有实际后果，但注释宣称的「清单才是权威」不能只是一句话。
+        // 这里故意让 URL 说 aaaa…、pin 说 bbbb…：缩写必须按 **pin** 切
+        let splitPin = ModelPin(file: WhisperEngine.modelFileName, repo: "fixture/model",
+                                revision: ModelFixture.revisionB, size: Int64(body.count),
+                                sha256: bodySHA, isDefault: true, url: resolveFullURL)
+        let splitShapes = ModelURLPlan.variants(for: splitPin)
+        if splitShapes.count == 2 {
+            let ref = ModelURLPlan.resolveRef(of: splitShapes[1])
+            check(ref == String(ModelFixture.revisionB.prefix(12)),
+                  "URL 与清单说的不是同一版时，缩写按**清单**那版切（清单是权威）",
+                  ref ?? "（读不出）")
+        } else {
+            check(false, "URL 与清单不同源时也应有两种形状", "\(splitShapes.count) 种")
+        }
+
+        // **回落开关的契约自己钉一条**（`CLASSROOM_MODEL_URL_FALLBACK`）。
+        //
+        // 2026-10-15 核验者的注入 F：把 `fromEnvironment` 改成无条件 `return .off`
+        // ——离线 131 条全绿、**真网络探针也 8 过 0 红**。因为全仓库只有
+        // `App.swift` 一个调用点，而 `download(…, urlFallback: .on)` 的缺省是字面量、
+        // 九之四直接传 `.off`，谁都不走 fromEnvironment。于是「默认开、环境变量能关」
+        // 这条契约零判据，而它的谎话是当场可见的：探针臂①（**没设**这个变量）
+        // 会打印「404 回落：关（CLASSROOM_MODEL_URL_FALLBACK=0）」——自己打自己的脸。
+        check(URLFallbackPolicy.fromEnvironment([:]) == .on, "没给环境变量 → 默认开")
+        for alias in ["0", "off", "false", "no", "OFF", " 0 "] {
+            check(URLFallbackPolicy.fromEnvironment([URLFallbackPolicy.environmentKey: alias]) == .off,
+                  "「\(alias.trimmingCharacters(in: .whitespaces))」= 关（大小写与空格都认）")
+        }
+        for alias in ["1", "on", "true", ""] {
+            check(URLFallbackPolicy.fromEnvironment([URLFallbackPolicy.environmentKey: alias]) == .on,
+                  "「\(alias)」不是关（只有写明的那几个才算关）")
+        }
+
+        // 「12」这个数**自己钉一条**：上面那些 check 用的是
+        // `ModelFixture.shortRevisionRef`，而它又是 `prefix(ModelURLPlan.fallbackPrefixLength)`
+        // 算出来的——同一个来源，自证。把常数改成 13，那几条照样绿（2026-10-15
+        // 核验者实测），只有显示文案里的「12 位」会红一下。所以这里写死数字
+        check(ModelURLPlan.fallbackPrefixLength == 12,
+              "缩写长度就是 12（git 默认的缩写长度；2026-10-13 镜像给的也是这个形状）",
+              "\(ModelURLPlan.fallbackPrefixLength)")
+
+        // ── 九之三：端到端回落：40 位那条 404 → 12 位那条给件 ──
+        let fbDir = root.appendingPathComponent("case-url-fallback", isDirectory: true)
+        let fbDest = fbDir.appendingPathComponent(WhisperEngine.modelFileName)
+        let fbPart = ModelDownloader.partURL(for: fbDest)
+        let fbFullBefore = server.requestCount(path: resolveFullPath)
+        let fbShortBefore = server.requestCount(path: resolveShortPath)
+        do {
+            let report = try await ModelDownloader().download(
+                from: fullShapePin.url, to: fbDest, partURL: fbPart,
+                minimumBytes: minimum, pin: fullShapePin)
+            check(report.fallbacks == 1, "回落了 1 次", "fallbacks=\(report.fallbacks)")
+            check(server.requestCount(path: resolveFullPath) - fbFullBefore == 1,
+                  "全 sha 那条真的被请求过，而且只请求了 1 次",
+                  "\(server.requestCount(path: resolveFullPath) - fbFullBefore) 次")
+            check(server.requestCount(path: resolveShortPath) - fbShortBefore == 1,
+                  "12 位前缀那条被请求了 1 次",
+                  "\(server.requestCount(path: resolveShortPath) - fbShortBefore) 次")
+            check(report.urlShape?.contains("12 位") == true,
+                  "报告里读得出**这次用了哪种形状**", report.urlShape ?? "（没有）")
+            let notice = report.notices.first { $0.contains("回落") }
+            check(notice != nil, "报告里有一句说明「回落到 12 位前缀」的话", notice ?? "（没有）")
+            check(sha256(fileAt: fbDest) == bodySHA && size(fbDest) == Int64(body.count),
+                  "**内容身份没降级**：回落取到的那份逐字节等于源",
+                  "\(size(fbDest)) 字节 · \(sha256(fileAt: fbDest)?.prefix(12) ?? "?")…")
+        } catch {
+            check(false, "回落这条路本该成功", ModelDownloader.message(for: error))
+        }
+        lines.append("")
+
+        // ── 九之四：把回落关掉 → 同一条路必须**失败** ──
+        //
+        // 「开了才成」这句话要有对照组：没有它，臂①的成功也可能只是「今天镜像
+        // 恰好又能认 40 位了」。这一条同时是失败文案的判据——最终那句话必须
+        // 说人话（2026-10-13 实测到的是 `…(Failure error 0.)` 这种天书）
+        lines.append("【九之四】回落关掉 → 必须失败，而且失败文案说人话")
+        let offDir = root.appendingPathComponent("case-url-nofallback", isDirectory: true)
+        let offDest = offDir.appendingPathComponent(WhisperEngine.modelFileName)
+        let offPart = ModelDownloader.partURL(for: offDest)
+        let offShortBefore = server.requestCount(path: resolveShortPath)
+        do {
+            _ = try await ModelDownloader().download(
+                from: fullShapePin.url, to: offDest, partURL: offPart,
+                minimumBytes: minimum, pin: fullShapePin, urlFallback: .off)
+            check(false, "关掉回落之后本该失败却成功了")
+        } catch {
+            let text = ModelDownloader.message(for: error)
+            check(!exists(offDest), "关掉回落 → 没有落盘任何正式文件")
+            check(server.requestCount(path: resolveShortPath) == offShortBefore,
+                  "关掉回落之后**一次都没**去请求 12 位那条")
+            check(text.contains("服务器返回 HTTP 404"),
+                  "失败文案说人话（是「服务器返回 HTTP 404」，不是 error 0. 那种天书）",
+                  text.prefix(40) + "…")
+            check(text.contains("自动重试已到上限"),
+                  "并且说出了「重试已到上限」", text.prefix(50) + "…")
+        }
+        lines.append("")
+
+        // ── 九之五：**别的状态码不回落** ──
+        //
+        // 403 是鉴权，不是「这个 ref 解析不了」——换了形状只会把一句明确的话
+        // 拖成三次转圈。夹具里 `/resolve/<全sha>/denied` 回 403，而
+        // `/resolve/<12位>/denied` 是**能给件**的：一个见了非 404 也回落的
+        // 实现会在这里把件取下来，于是这条判据当场变红
+        lines.append("【九之五】403 不是「解析不了这个 ref」→ 不许回落")
+        let deniedFullPath = "/resolve/\(ModelFixture.fullRevisionRef)/denied"
+        let deniedShortPath = "/resolve/\(ModelFixture.shortRevisionRef)/denied"
+        let deniedPin = ModelPin(file: WhisperEngine.modelFileName, repo: "fixture/model",
+                                 revision: ModelFixture.revisionA, size: Int64(body.count),
+                                 sha256: bodySHA, isDefault: true,
+                                 url: server.baseURL.appendingPathComponent(deniedFullPath))
+        let deniedDir = root.appendingPathComponent("case-url-denied", isDirectory: true)
+        let deniedDest = deniedDir.appendingPathComponent(WhisperEngine.modelFileName)
+        let deniedShortBefore = server.requestCount(path: deniedShortPath)
+        do {
+            _ = try await ModelDownloader().download(
+                from: deniedPin.url, to: deniedDest,
+                partURL: ModelDownloader.partURL(for: deniedDest),
+                minimumBytes: minimum, pin: deniedPin)
+            check(false, "403 那条本该失败却成功了（回落打过了头）")
+        } catch {
+            check(!exists(deniedDest), "403 → 没有落盘任何正式文件")
+            check(server.requestCount(path: deniedShortPath) == deniedShortBefore,
+                  "403 **没有**触发回落（一次都没去请求 12 位那条）")
+            check(ModelDownloader.message(for: error).contains("HTTP 403"),
+                  "报的是 403 本身", ModelDownloader.message(for: error).prefix(40) + "…")
+        }
+        lines.append("")
+
+        // ── 九之六：回落成功的那一份**也要过 sha256** ──
+        //
+        // 派单第 2 条：回落换的只是「取件路径」，不是「信任对象」。夹具那条
+        // `/resolve/<12位>/noetag` 只报 revision（不报 etag/大小），所以挡住
+        // 一份错误内容的只能是**下完之后**那道 sha256——这正是要单独验的
+        lines.append("【九之六】回落取到的那份也要过 sha256（信任对象没换）")
+        let wrongDir = root.appendingPathComponent("case-url-wrongsha", isDirectory: true)
+        let wrongDest = wrongDir.appendingPathComponent(WhisperEngine.modelFileName)
+        let wrongPin = ModelPin(file: WhisperEngine.modelFileName, repo: "fixture/model",
+                                revision: ModelFixture.revisionA, size: Int64(body.count),
+                                sha256: sha256(ModelFixture.badMagicBody), isDefault: true,
+                                url: server.baseURL.appendingPathComponent(
+                                    "/resolve/\(ModelFixture.fullRevisionRef)/noetag"))
+        do {
+            _ = try await ModelDownloader().download(
+                from: wrongPin.url, to: wrongDest,
+                partURL: ModelDownloader.partURL(for: wrongDest),
+                minimumBytes: minimum, pin: wrongPin)
+            check(false, "sha256 不符的那一份本该被拒却过了")
+        } catch let error as ModelDownloader.Failure {
+            check(error.localizedDescription.contains("内容 sha256 不对"),
+                  "回落那条路上 sha256 照样在判（没有因为换路径就降级）",
+                  error.localizedDescription.prefix(40) + "…")
+            check(!exists(wrongDest), "没有把 sha256 不符的那一份改名成正式文件")
+        } catch {
+            check(false, "抛的不是声明的错误类型", ModelDownloader.message(for: error))
+        }
+        lines.append("")
+
+        // ── 九之七：两种形状都不成 —— 最终文案与「重试预算怎么花」 ──
+        //
+        // 两条都是 2026-10-15 核验者的注入抓出来的缺口，注入前后 121 条**全绿**：
+        //   · 把 `attempt -= 1` 删掉（让换形状**占**重试预算）→ 什么都不红。
+        //     这条行为在派单里是写明的（换形状是「换一条路」而不是「又错一次」，
+        //     重试预算管的是同一条路上的重复尝试），却没有任何判据。
+        //   · 「两种都试过」那句最终文案：绿色回归里**从不被走到**（只在变异 ②
+        //     的输出里第一次露面）——一句从没被验过的用户可见文案就是一句嘴上的话。
+        //
+        // 判据用的是**请求次数**，不是文案：删掉 `attempt -= 1` 时，第二种形状
+        // 只会被请求 2 次（`maxAttempts - 1`），正确实现是 3 次。次数是结构事实，
+        // 文案可以改词。
+        lines.append("【九之七】两种形状都 404 → 新的那条拿满重试预算，且文案说清「两种都试过」")
+        let ghostFullPath = "/resolve/\(ModelFixture.fullRevisionRef)/ghost"
+        let ghostShortPath = "/resolve/\(ModelFixture.shortRevisionRef)/ghost"
+        let ghostPin = ModelPin(file: WhisperEngine.modelFileName, repo: "fixture/model",
+                                revision: ModelFixture.revisionA, size: Int64(body.count),
+                                sha256: bodySHA, isDefault: true,
+                                url: server.baseURL.appendingPathComponent(ghostFullPath))
+        let ghostDir = root.appendingPathComponent("case-url-both404", isDirectory: true)
+        let ghostDest = ghostDir.appendingPathComponent(WhisperEngine.modelFileName)
+        let ghostFullBefore = server.requestCount(path: ghostFullPath)
+        let ghostShortBefore = server.requestCount(path: ghostShortPath)
+        do {
+            _ = try await ModelDownloader().download(
+                from: ghostPin.url, to: ghostDest,
+                partURL: ModelDownloader.partURL(for: ghostDest),
+                minimumBytes: minimum, pin: ghostPin)
+            check(false, "两种形状都 404，本该失败却成功了")
+        } catch let error as ModelDownloader.Failure {
+            let fullTries = server.requestCount(path: ghostFullPath) - ghostFullBefore
+            let shortTries = server.requestCount(path: ghostShortPath) - ghostShortBefore
+            check(fullTries == 1, "第一种形状只试 1 次（404 之后就该换形状）", "\(fullTries) 次")
+            check(shortTries == ModelDownloader.maxAttempts,
+                  "第二种形状拿满重试预算（换形状**不**占预算）",
+                  "\(shortTries) 次 / 上限 \(ModelDownloader.maxAttempts)")
+            let text = ModelDownloader.message(for: error)
+            check(text.contains("已经试过两种取件形状"),
+                  "失败文案说清「两种都试过了」——用户不会以为还有一条没试", text.prefix(60) + "…")
+            check(text.contains("HTTP 404"), "并且报的是 404 本身", text.prefix(40) + "…")
+            check(!exists(ghostDest), "失败后没有落盘任何正式文件")
+        } catch {
+            check(false, "抛的不是声明的错误类型", ModelDownloader.message(for: error))
+        }
+        lines.append("")
+
         // ── 收尾：把自己造的东西清掉 ──
         // 只删自己造的临时根（它由 CLASSROOM_MODELS_DIR 指定）；用户目录
         // 里那 1.5GB 一根手指都不碰

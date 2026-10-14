@@ -59,6 +59,16 @@
 # 退出码 0 = 跑到的入口全部 exit=0、且二十五条断言都命中（20 条 `run_assert` +
 # 3 条「必须拒绝」+ 1 条「被拦住时不落盘」+ 1 条「超时的退出码必须是 124」——
 # 后五条期望的本来就不是 0）。逐条计数见文件开头那段。
+#
+# ⚠️ **必须带 `CLASSROOM_BIN=<你那份构建>`**：
+#   CLASSROOM_BIN=build-verify/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber \
+#     ./tools/probes/exit_codes.sh
+#   不给就走默认的 `build/`——**那是用户那份（可能是旧的）二进制**。2026-10-14
+#   实测过：拿那份旧二进制跑一个**它不认识的参数**（当时是 `--audio-devices`），
+#   它会当成「没给参数」**直接起 GUI、永远等事件**，整轮套件挂死 **9 小时 28 分**，
+#   日志停在「已完成 1 条」。现在每条入口都有墙钟上限（`ENTRY_TIMEOUT`，见
+#   `with_limit`），超时记「挂死」并继续下一条——但别拿这条兜底当许可：
+#   看不出「这次跑的是谁」就等于白跑，所以**输出第一行永远是实际用的 BIN**。
 
 set -uo pipefail
 cd "$(dirname "$0")/../.."
@@ -76,6 +86,62 @@ BIN="${CLASSROOM_BIN:-build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTra
 REC="$HOME/Library/Application Support/ClassroomTranscriber/recordings"
 [ -x "$BIN" ] || { echo "❌ 没有 ${BIN}，先跑 ./build.sh"; exit 1; }
 
+# 每条入口的墙钟上限（秒）。`ENTRY_TIMEOUT=5 ./tools/probes/exit_codes.sh` 可以压小
+# ——验「挂死真的会被自己走出来」时用得上（见文件末尾那段注释）
+ENTRY_TIMEOUT="${ENTRY_TIMEOUT:-300}"
+
+# macOS 没有 `timeout(1)`。这里用 perl 给每条入口套墙钟上限，超时**返回 142**
+# （= 128 + SIGALRM(14)，下面三条函数各自只认这一个码）。
+#
+# 为什么不是一行 `perl -e 'alarm shift; exec @ARGV'`：那一版验不过下面那条判据。
+# 它在**最近的**那个进程上生效，而入口 fork 出来的**孙子**不在覆盖范围内——孙子
+# 继承着命令替换的那根管子不放手，`$( )` 就永远等不到 EOF，套件照样挂死。
+# 2026-10-14 用假「必挂」入口实测：条目本身确实被 3 秒掐掉、打印了「挂死」，
+# 但**套件停在第一条不动了**（`sleep` 孙子吊着管子，父进程死了也没用）。
+# 所以这里 fork 一份、让子进程 `setpgrp` 自成**进程组**，超时就 `kill -TERM -$pid`
+# 打整组（1 秒后补 `-KILL`）。实测：`bash -c 'sleep 600'` 加 2 秒上限 → 3.0 秒
+# 退出、码 142、**零残留**；正常退出时码（如 7）和 stdout/stderr 原样穿过。
+#
+# 为什么每条都得套一个上限：一个**不认识参数的入口**会当成「没给参数」起 GUI
+# 并永远等事件——2026-10-14 拿用户那份旧 `build/` 跑 `--audio-devices` 就是这个
+# 形状，整轮套件挂死 9 小时 28 分（见文件头的警告）
+#
+# 这条兜底自己也是**验过会红**的（注入一条只会 `sleep 600` 的假 BIN）：
+# `ENTRY_TIMEOUT=3` 下整轮 **138 秒**走完 44 条、每条记「挂死」、`ps` 零残留
+# （理论下界 44×3=132 秒）。别把 138 秒当成「快」——它随入口条数和上限线性走，
+# 真要跑得快就把 `ENTRY_TIMEOUT` 压小，**不是**把这条兜底拿掉
+with_limit() { # with_limit <命令…>
+  perl -e '
+    my $t = shift;
+    my $pid = fork();
+    die "fork 失败" unless defined $pid;
+    if ($pid == 0) { setpgrp(0, 0); exec @ARGV or exit 127; }
+    $SIG{ALRM} = sub {
+      kill "-TERM", $pid;
+      # 等它自己收尾，**不再无条件睡满 1 秒**：44 条挂死 × 1 秒 = 44 秒白等。
+      # 2026-10-15 核验者量到假入口整轮 178 秒，而理论最小是 44×3=132 秒。
+      # 改成一探 0.1 秒、最多 1 秒（收到 TERM 就死的进程通常第一探就走了）
+      my $waited = 0;
+      while ($waited < 10) { last if waitpid($pid, 1) == $pid; select(undef, undef, undef, 0.1); $waited++; }
+      kill "-KILL", $pid;   # 组长收掉了也要补一刀：孙子可能还赖在这一组里
+      waitpid($pid, 0);
+      exit 142;
+    };
+    alarm $t;
+    waitpid($pid, 0);
+    my $st = $?;
+    alarm 0;
+    exit($st >> 8) if ($st & 127) == 0;
+    exit(128 + ($st & 127));
+  ' -- "$ENTRY_TIMEOUT" "$@"
+}
+
+# 挂死那一条的统一说法，`run` / `run_assert` / `refuse` 共用，免得三处各说各话
+hung_note() {
+  printf '       ↑ 挂死：%s 秒没退出，已强杀。多半是这个入口不认识这个参数、当成没给参数起了 GUI（别拿旧 build/ 跑）\n' \
+    "$ENTRY_TIMEOUT"
+}
+
 # 挑一条真实录音给 --whisper-window-file 用（它需要 wav）
 SAMPLE="$(ls "$REC"/*.wav 2>/dev/null | head -1)"
 
@@ -84,13 +150,16 @@ PASS=0
 run() { # run <名字> <参数…>
   local name="$1"; shift
   local out
-  out="$("$BIN" "$@" 2>&1)"
+  out="$(with_limit "$BIN" "$@" 2>&1)"
   local code=$?
   if [ "$code" = "0" ]; then
     printf '  ✅ %-34s exit=0\n' "$name"
     PASS=$((PASS + 1))
   else
     printf '  ❌ %-34s exit=%s\n' "$name" "$code"
+    # 142 = 128 + SIGALRM：**只有** `with_limit` 掐超时时才回这个码（它自己
+    # 造的，不是被掐进程的退出码）。先认它，免得把「挂死」误读成「入口返回了 142」
+    [ "$code" = "142" ] && hung_note
     # 134 = SIGABRT（ggml 静态析构断言），单独点出来
     [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
     # 133 = SIGTRAP。**这不是「另一个 134」**，成因已经查到根，别再猜：
@@ -157,10 +226,11 @@ run_assert() { # run_assert <名字> <输出里必须出现的行> <参数…>
   local name="$1"; shift
   local want="$1"; shift
   local out code
-  out="$("$BIN" "$@" 2>&1)"
+  out="$(with_limit "$BIN" "$@" 2>&1)"
   code=$?
   if [ "$code" != "0" ]; then
     printf '  ❌ %-34s exit=%s\n' "$name" "$code"
+    [ "$code" = "142" ] && hung_note
     [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
     [ "$code" = "133" ] && printf '       ↑ SIGTRAP：见上面 133 分支的读法（先看 context 计数）\n'
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
@@ -187,9 +257,9 @@ refuse() { # refuse <名字> <输出里必须出现的行> <env 赋值|-> <参�
   local envspec="$1"; shift
   local out code
   if [ "$envspec" = "-" ]; then
-    out="$("$BIN" "$@" 2>&1)"
+    out="$(with_limit "$BIN" "$@" 2>&1)"
   else
-    out="$(env "$envspec" "$BIN" "$@" 2>&1)"
+    out="$(with_limit env "$envspec" "$BIN" "$@" 2>&1)"
   fi
   code=$?
   if [ "$code" != "0" ] && printf '%s' "$out" | grep -qF "$want"; then
@@ -197,11 +267,20 @@ refuse() { # refuse <名字> <输出里必须出现的行> <env 赋值|-> <参�
     PASS=$((PASS + 1))
   else
     printf '  ❌ %-34s exit=%s（期望非 0 **且**说出理由）\n' "$name" "$code"
+    [ "$code" = "142" ] && hung_note
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
   fi
 }
 
+# **整个套件的第一行输出就是实际用的那个二进制**。挂死现场（9 小时 28 分那次）
+# 里日志可能只剩开头几行，所以这一行必须在**任何小节标题之前**：拿错二进制
+# 正是那次挂死的成因，「这次跑的到底是谁」得比「跑到哪一节了」先看见。
+#
+# 变量一律写 `${X}`：紧跟全角括号时 `$X（` 会被 bash 当变量名的一部分
+# （UTF-8 locale 下多字节字符算标识符字符），表现是 `set -u` 下的
+# 「BIN（…: unbound variable」——提示信息本身没了，只剩退出码非 0（实测踩过）
+echo "BIN=${BIN}（每条入口上限 ${ENTRY_TIMEOUT}s，超时记「挂死」并继续）"
 echo "════ 纯本地入口（不需要模型 / 网络 / 麦克风）════"
 run "--selftest"                    --selftest
 # 输入设备清单（P0-1）。**只读**：走 CoreAudio 的 HAL 属性读取，一次都不碰
@@ -284,7 +363,11 @@ if [ -f "$RTRMED" ]; then
   refuse "--retranscribe 缺 large 必须响亮拒绝" "不会静默回落到 medium" \
     "CLASSROOM_MODELS_DIR=$RTRFIX" \
     --retranscribe "$RTRIN/fixture.json" --out "$RTROUT" --engine large
-  # 被拦住了却往 --out 里写了半份 = 把拦截变成一个更隐蔽的假绿
+  # 被拦住了却往 --out 里写了半份 = 把拦截变成一个更隐蔽的假绿。
+  #
+  # ⚠️ 它是**否定式**的，所以一头什么都不写的假二进制也会让它假绿——测超时那次
+  # （BIN 指向一个只会 sleep 的脚本）它就是这么过的：44 条挂死里它一条绿。
+  # 它必须和上面那条 `refuse` 成对读（那条才证明「拦是拦了」），单独看没有意义
   if [ -z "$(ls -A "$RTROUT" 2>/dev/null)" ]; then
     printf '  ✅ %-34s %s\n' "--retranscribe 被拦住时不落盘" "输出目录是空的"
     PASS=$((PASS + 1))
@@ -420,10 +503,21 @@ run_assert "--recovery-selftest" "✅ 崩溃恢复自检通过（55 条）" --re
 # 写盘、改名、删 `.part`，不重定向的话动的就是用户真实的 `models/`（约 1.5GB）。
 # 没设这个变量时它**直接拒绝运行**（红），这本身就是一条硬闸。
 #
+# P12-1b 又加了 30 条（【九】取件形状回落）：镜像对清单那个 commit 的 40 位 sha
+# 一律 404，所以 404 时要换同一个 commit 的 12 位前缀再试一次，别的一律不换。
+# 那些判据**离线**——夹具 `/resolve/<全sha>/…` 复刻 404、`/resolve/<12位>/…` 给件、
+# `/resolve/<全sha>/denied` 复刻 403。真网络那条不在这里：它要联网，单独在
+# `tools/probes/model_download_url.sh`（**故意不进这个文件**——这条要快、要确定性）。
+#
 # ⚠️ 用完立刻 `unset`，**不能让它漏到后面**：`--whisper-prewarm` 要加载真模型，
 # 一个漏出去的重定向会让它去空目录里找模型，然后以一种和本条完全无关的方式红掉
 export CLASSROOM_MODELS_DIR="$(mktemp -d)"
-run_assert "--model-download-selftest" "✅ 模型下载自检通过（91 条）" --model-download-selftest
+# 条数从 121 → 131 → 143，每一步都是**独立核验者抓出来的假绿**换来的：
+#   121：删 `attempt -= 1`、删 `?? resolveRef(of: url)` 当时全绿 → 补【九之七】等
+#   131：把 `fromEnvironment` 改成无条件 `.off` 当时全绿（探针也绿），而它的谎话
+#        是当场可见的——探针没设变量却打印「回落：关」 → 补开关契约 + 对调优先级
+# **这个数字是判据的总数**：它掉下来就说明有人删判据，比任何一条具体断言都先报警
+run_assert "--model-download-selftest" "✅ 模型下载自检通过（143 条）" --model-download-selftest
 unset CLASSROOM_MODELS_DIR
 #
 # 模型目录占用/清理（P7-1 补充要求 4）。**假目录里放一份伪造的 `.part`**——
@@ -489,7 +583,7 @@ if [ -n "$SAMPLE" ]; then
   # 落地信号不止 134——139 是 SIGSEGV，后端起指针在断言之前就被解了。判据因此
   # 写成「退出码必须**等于 124**」（不是「不等于 0」）：既挡住 134，也挡住 139，
   # 还挡住将来某种「0 但没跑到」的假绿。
-  local_out="$("$BIN" --whisper-window-file "$SAMPLE" --repeat 20 --window-timeout 15 2>&1)"
+  local_out="$(with_limit "$BIN" --whisper-window-file "$SAMPLE" --repeat 20 --window-timeout 15 2>&1)"
   local_code=$?
   if [ "$local_code" = "124" ] && printf '%s' "$local_out" | grep -qF "离线跑超时"; then
     printf '  ✅ %-34s exit=124 · 断言命中\n' "--whisper-window-file 超时不 abort"

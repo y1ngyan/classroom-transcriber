@@ -25,6 +25,14 @@ enum ModelFixture {
     static let revisionA = "aaaa0000aaaa0000aaaa0000aaaa0000aaaa0000"
     static let revisionB = "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111"
 
+    /// 复刻镜像 2026-10-13 的症状（见 `ModelURLPlan` 与
+    /// `发现-模型下载URL-404-20261013.md`）：同一个 commit，**40 位写法一律
+    /// 404**（连非模型文件也 404），而它的 **12 位前缀**照样给件。
+    /// 回落链要验的正是这个差别，而真实网络验不了「四种状态码各是什么行为」
+    /// ——夹具可以，而且确定性。
+    static let fullRevisionRef = revisionA
+    static let shortRevisionRef = String(revisionA.prefix(ModelURLPlan.fallbackPrefixLength))
+
     /// `/truncated` 只发这么多字节，却宣告整份的长度
     static let truncatedBytes = 250_000
 
@@ -39,6 +47,50 @@ enum ModelFixture {
     }
 
     static let handler: @Sendable (LocalHTTPServer.Request) -> LocalHTTPServer.Response = { request in
+        // ── `/resolve/<ref>/<file>`：清单拼出来的那种形状（P12-1b）──
+        //
+        // 40 位 ref 一律 404、12 位前缀给件；`denied` 那个文件名在 40 位形状上
+        // 回 **403**（鉴权，不是「这个 ref 解析不了」）——「只有 404 才回落」
+        // 那条判据靠它：一个见了非 404 也回落的实现会在这里把件取下来
+        if request.path.hasPrefix("/resolve/") {
+            let rest = request.path.dropFirst("/resolve/".count)
+            let parts = rest.split(separator: "/", maxSplits: 1).map(String.init)
+            guard parts.count == 2 else {
+                return LocalHTTPServer.Response(status: 404, body: Data())
+            }
+            let (ref, file) = (parts[0], parts[1])
+            if ref == fullRevisionRef {
+                return file == "denied"
+                    ? LocalHTTPServer.Response(status: 403, body: Data())
+                    : LocalHTTPServer.Response(status: 404, body: Data())
+            }
+            guard ref == shortRevisionRef else {
+                return LocalHTTPServer.Response(status: 404, body: Data())
+            }
+            switch file {
+            case "model":
+                return LocalHTTPServer.Response(
+                    body: body, extraHeaders: identityHeaders(revision: revisionA, body: body))
+            case "denied":
+                // 同一个文件在**短形状**上是能给件的，在长形状上回 403。
+                //
+                // 这正是九之五要的形状：一个「见了非 404 也回落」的实现会顺着
+                // 403 退到这儿、**把件取下来**，于是它栽在「403 那条本该失败却
+                // 成功了」上，而不是栽在文案里少了个 403（后者只是症状，不是
+                // 「它多取了一次件」这个事实）
+                return LocalHTTPServer.Response(
+                    body: body, extraHeaders: identityHeaders(revision: revisionA, body: body))
+            case "noetag":
+                // 只报 revision，不报 etag/大小——和上面那条 `/noetag` 同一个
+                // 用途：把「下完之后按 sha256 判」那一条单独隔出来验
+                // （回落成功的那一份**也必须过 sha256**，见派单第 2 条）
+                return LocalHTTPServer.Response(
+                    body: body, extraHeaders: ["x-repo-commit": revisionA])
+            default:
+                return LocalHTTPServer.Response(status: 404, body: Data())
+            }
+        }
+
         switch request.path {
         case "/model":
             return LocalHTTPServer.Response(
