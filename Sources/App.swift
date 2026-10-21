@@ -225,9 +225,13 @@ struct ClassroomTranscriberApp: App {
             // agent** 2026-09-28 指出，作者复核 `427.5 < 1800` 成立。
             // 记录见 `tools/probes/longrun-verification.md`。注意「核验者」在这个
             // 项目里专指 Hermes，作者侧派出的子 agent 不能写成「核验者」。）
-            // 慢到这个地步的原因：3 秒步长 / 10 秒窗 = 每秒音频被转 3.3 次，
-            // 2452 个窗 × 10 秒 = 6.8 小时窗内音频压进 2 小时 = 窗内音频
-            // 3.4 倍实时。原注释假设的「4.5 倍速算余量」在这台机器上不成立。
+            // 慢到这个地步的原因（**那次实测发生在 P12-2 之前**）：当时是
+            // 3 秒步长 / 10 秒窗 = 每秒音频被转 3.3 次，2452 个窗 × 10 秒 =
+            // 6.8 小时窗内音频压进 2 小时 = 窗内音频 3.4 倍实时。原注释假设的
+            // 「4.5 倍速算余量」在这台机器上不成立。**P12-2 试过把步长压到
+            // 9.6 秒（窗数降到 1/3.2），但那一版没上生产**——生产仍是 3 秒
+            // 步长，所以 7210 秒这个量级照旧成立；结论（课堂量级必须能抬
+            // 上限）也不变。别把它当成精确预算，它是一次实测的现场数。
             let timeoutSeconds: Double = {
                 guard let j = CommandLine.arguments.firstIndex(of: "--window-timeout"),
                       j + 1 < CommandLine.arguments.count,
@@ -506,16 +510,20 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
-        // 配置存取往返：--config-selftest（会临时改写 config.json，结束还原）
+        // 配置存取往返：--config-selftest。
+        //
+        // **不再动 config.json**：往返全程落在一个临时目录里（见
+        // `AppConfig.selfTest()`），真实配置这一节一个字节都不碰，
+        // 自检最后一条判据就是钉这一点
         if CommandLine.arguments.contains("--config-selftest") {
-            print("配置读写往返自检（结束会还原原文件）")
-            print("  路径: \(AppConfig.configFilePath)")
+            print("配置读写往返自检（在临时目录里做，不动你的配置文件）")
+            print("  真实配置: \(AppConfig.configFilePath)（本节不参与，末尾有判据）")
             print("")
             for line in AppConfig.selfTest() {
                 print(line)
             }
             print("")
-            print("还原后现状:")
+            print("现状:")
             for line in AppConfig.statusLines {
                 print("  \(line)")
             }
@@ -629,6 +637,14 @@ struct ClassroomTranscriberApp: App {
         // 无头重复段去重自检：--dedup-selftest（纯内存驱动 upsert，不依赖设备）
         if CommandLine.arguments.contains("--dedup-selftest") {
             for line in TranscriptionEngine.dedupSelfTest() {
+                print(line)
+            }
+            exitReleasingGgml()
+        }
+
+        // 静音门控自检：--speech-gate-selftest（纯函数／合成波形；不依赖模型与麦克风）
+        if CommandLine.arguments.contains("--speech-gate-selftest") {
+            for line in SpeechGate.selfTest() {
                 print(line)
             }
             exitReleasingGgml()

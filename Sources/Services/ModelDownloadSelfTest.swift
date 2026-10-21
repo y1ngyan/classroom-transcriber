@@ -719,6 +719,39 @@ enum ModelDownloadSelfTest {
         // 真网络那条在 `tools/probes/model_download_url.sh`——这里不碰它。
         lines.append("【九】取件形状回落：只有 404 才换形状，换了也要过 sha256")
 
+        // 下面几处提到的注入（D / F / G / 九之七那两条）是**本包的核验子 agent**
+        // 干的——交付方自己请的、独立跑一遍的那个。本项目里「核验者」**专指核验侧
+        // （Hermes）**（P9-2b 立的规矩），作者侧的自查不能写成「核验者」：
+        // 同一个词指两个来源时，「这条判据是谁验的」就没人答得上来
+
+        // ── 九之零：天书的成因是「没认 LocalizedError」，不是「文案写得不好」──
+        //
+        // 把两个**只差一个 conformance** 的类型摆在一起问同一句。这条判据存在的
+        // 理由：P12-1b 的结论（「认了 conformance 才会说人话」）当时是用一个
+        // 会话内的两行 enum 对照出来的，那个文件重启即无、别人查不到。
+        // 结论本身是对的，落成这里的判据之后它才可复核——而且它是**行为**判据：
+        // 谁哪天把 conformance 删掉（只留一个同名的 `localizedDescription` 属性），
+        // 这一条当场变红
+        struct NoConformance: Error {
+            var localizedDescription: String { "人话" }
+        }
+        struct WithConformance: Error, LocalizedError {
+            var errorDescription: String? { "人话（errorDescription）" }
+        }
+        let bridgedWithout = (NoConformance() as any Error as NSError).localizedDescription
+        check(NoConformance().localizedDescription == "人话",
+              "只有同名属性时，**直接问具体类型**读得到它")
+        check(bridgedWithout != "人话",
+              "但装进 any Error 再问（`as NSError` 那条路）读不到它 → 天书",
+              bridgedWithout)
+        check((WithConformance() as any Error as NSError).localizedDescription == "人话（errorDescription）",
+              "认了 LocalizedError → 桥接问的是 errorDescription → 人话")
+        // 生产类型走的就是桥接那条路：同一个 `Failure`，两处出口都必须是这句话
+        let fieldText = ModelDownloader.message(for: ModelDownloader.Failure.httpStatus(404))
+        check(!fieldText.contains("error 0."),
+              "`Failure` 走出口函数也是人话（2026-10-13 现场是 `…(Failure error 0.)`）",
+              fieldText)
+
         // ── 九之一：认不认这个响应（纯函数，一行一个状态码）──
         //
         // 表里每一行都是一条判据，而且都是**要能拦人**的那种：403/401 是鉴权、
@@ -769,7 +802,7 @@ enum ModelDownloadSelfTest {
               "URL 里没有 resolve 段时只有一种形状（不硬凑、也不去改别人的 URL）")
 
         // 「没有 pin」那条路（`--model-fetch` 就是这个形状）：ref 只能从 URL
-        // 自己那段切。**这条单独钉**——2026-10-15 核验者的注入 D 抓到过缺口：
+        // 自己那段切。**这条单独钉**——2026-10-15 本包的核验子 agent 的注入 D 抓到过缺口：
         // 把 `?? resolveRef(of: url)` 整段删掉，121 条**全绿**、什么都不红。
         // 而它是生产可达的（`--model-fetch` 没给 `--expect-*` 时 pin 就是 nil，
         // 而那条入口的回落是**默认开**的）
@@ -789,7 +822,7 @@ enum ModelDownloadSelfTest {
 
         // **清单钉的 revision 优先于 URL 自己那段**。
         //
-        // 2026-10-15 核验者的注入 G 抓到过缺口：把这两者的优先级对调，131 条
+        // 2026-10-15 本包的核验子 agent 的注入 G 抓到过缺口：把这两者的优先级对调，131 条
         // 全绿——因为夹具里每个 pin 的 `url` ref 都**正好等于** `revision`，
         // 两者根本区分不开。生产里 `pin.url` 是 repo+revision+file 拼的，所以
         // 对调没有实际后果，但注释宣称的「清单才是权威」不能只是一句话。
@@ -809,7 +842,7 @@ enum ModelDownloadSelfTest {
 
         // **回落开关的契约自己钉一条**（`CLASSROOM_MODEL_URL_FALLBACK`）。
         //
-        // 2026-10-15 核验者的注入 F：把 `fromEnvironment` 改成无条件 `return .off`
+        // 2026-10-15 本包的核验子 agent 的注入 F：把 `fromEnvironment` 改成无条件 `return .off`
         // ——离线 131 条全绿、**真网络探针也 8 过 0 红**。因为全仓库只有
         // `App.swift` 一个调用点，而 `download(…, urlFallback: .on)` 的缺省是字面量、
         // 九之四直接传 `.off`，谁都不走 fromEnvironment。于是「默认开、环境变量能关」
@@ -828,7 +861,7 @@ enum ModelDownloadSelfTest {
         // 「12」这个数**自己钉一条**：上面那些 check 用的是
         // `ModelFixture.shortRevisionRef`，而它又是 `prefix(ModelURLPlan.fallbackPrefixLength)`
         // 算出来的——同一个来源，自证。把常数改成 13，那几条照样绿（2026-10-15
-        // 核验者实测），只有显示文案里的「12 位」会红一下。所以这里写死数字
+        // 本包的核验子 agent 实测），只有显示文案里的「12 位」会红一下。所以这里写死数字
         check(ModelURLPlan.fallbackPrefixLength == 12,
               "缩写长度就是 12（git 默认的缩写长度；2026-10-13 镜像给的也是这个形状）",
               "\(ModelURLPlan.fallbackPrefixLength)")
@@ -952,7 +985,7 @@ enum ModelDownloadSelfTest {
 
         // ── 九之七：两种形状都不成 —— 最终文案与「重试预算怎么花」 ──
         //
-        // 两条都是 2026-10-15 核验者的注入抓出来的缺口，注入前后 121 条**全绿**：
+        // 两条都是 2026-10-15 本包的核验子 agent 的注入抓出来的缺口，注入前后 121 条**全绿**：
         //   · 把 `attempt -= 1` 删掉（让换形状**占**重试预算）→ 什么都不红。
         //     这条行为在派单里是写明的（换形状是「换一条路」而不是「又错一次」，
         //     重试预算管的是同一条路上的重复尝试），却没有任何判据。

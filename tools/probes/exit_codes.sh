@@ -24,8 +24,19 @@
 # 以及「被拦住时不落盘」（普通断言，不是 `run_assert`——它查的是输出目录为空，
 # 没有「输出里的一行」可断言）。所以现在是 **19 条 `run_assert` + 3 条期望
 # 非 0 的 refuse + 1 条不落盘 + 1 条「超时必须是 124」= 24 条**。
-# P12-1 又加了 **1 条**：`--glossary-prompt-selftest`（术语表前移的离线边界判据），
-# 所以现在是 **20 条 `run_assert` + 3 条 refuse + 1 条不落盘 + 1 条超时 = 25 条**。
+# P12-1 又加了 **1 条**：`--glossary-prompt-selftest`（术语表前移的离线边界判据）。
+# P12-2 又加了 **2 条**：`--speech-gate-selftest`，以及「静音窗不进模型」
+# （合成夹具，跑真管线；同时判开门跳得动、关门一窗不跳）。
+# P12-2 收尾又把 `--config-selftest` 从 `run` 升成 `run_assert_env`（**第 3 条**）：
+# 那一节唯一的底线判据「真实配置全程未被触碰」红了进程也是 exit=0，
+# 原先只看退出码等于没测；现在断言在字样上，并单独套隔离 HOME。
+# 所以现在是 **23 条 `run_assert` + 3 条 refuse + 1 条不落盘 + 1 条超时 = 28 条**。
+#
+# P12-2 那两条**为什么必须在这里**：门控的判据（跳过率 / 不许丢真人说话）
+# 在真实录音上验，量级是十几分钟，归 `tools/probes/p12_2_speech_gate.sh`；
+# 但「这道门接上了没有」本身是**分钟的、确定性的**（一段 24 秒的合成音频，
+# 3 个窗里该跳几个是算得出来的），那就该进这条快扫描——否则门控哪天掉了线，
+# 要等有人想起来跑那条重探针才发现。
 # 真实模型那一段的 A/B（large 与 medium 各跑一遍）**不在这个文件里**，
 # 见 `tools/probes/retranscribe.sh`：六七分钟的量级不该进这条快扫描。
 
@@ -56,7 +67,7 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且二十五条断言都命中（20 条 `run_assert` +
+# 退出码 0 = 跑到的入口全部 exit=0、且二十八条断言都命中（23 条 `run_assert`/`run_assert_env` +
 # 3 条「必须拒绝」+ 1 条「被拦住时不落盘」+ 1 条「超时的退出码必须是 124」——
 # 后五条期望的本来就不是 0）。逐条计数见文件开头那段。
 #
@@ -147,6 +158,9 @@ SAMPLE="$(ls "$REC"/*.wav 2>/dev/null | head -1)"
 
 FAIL=0
 PASS=0
+# 「输出断言」的条数**数出来**，不写死：写死的那句汇总在 P12-2 已经和实际
+# 差了两轮（先是二十五条，后来文件头改成 28 条），而它恰恰是给人看总数的
+ASSERTS=0
 run() { # run <名字> <参数…>
   local name="$1"; shift
   local out
@@ -223,6 +237,7 @@ run() { # run <名字> <参数…>
 # 也**不**断言，理由同上一段：它抓不到「顺序发生两个来源」那种形状（那时峰值是 1）。
 # 打出来是给「次数是 1 却仍然 133」那种现场用的，见上面 133 分支的读法
 run_assert() { # run_assert <名字> <输出里必须出现的行> <参数…>
+  ASSERTS=$((ASSERTS + 1))
   local name="$1"; shift
   local want="$1"; shift
   local out code
@@ -233,6 +248,40 @@ run_assert() { # run_assert <名字> <输出里必须出现的行> <参数…>
     [ "$code" = "142" ] && hung_note
     [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
     [ "$code" = "133" ] && printf '       ↑ SIGTRAP：见上面 133 分支的读法（先看 context 计数）\n'
+    printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+    return
+  fi
+  if printf '%s' "$out" | grep -qF "$want"; then
+    printf '  ✅ %-34s exit=0 · 断言命中\n' "$name"
+    PASS=$((PASS + 1))
+  else
+    printf '  ❌ %-34s exit=0，但输出里没有「%s」\n' "$name" "$want"
+    printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# 同 `run_assert`，但**给这一条单独套一组环境变量**。
+#
+# 给「这条入口本身碰不得真东西」那一类用：`--config-selftest` 要验的是
+# 「真实配置文件全程未被触碰」,可是它验的那份「真文件」是 `configURL`——
+# 万一哪天有人把往返改回直接动真文件，跑这条断言就等于拿用户的真钥匙去陪跑。
+# 套上 `CFFIXED_USER_HOME=<临时目录>` 之后，同一份代码解析到的「真文件」落在
+# 临时目录里：**判据照样能红**（指纹仍会从不存在的变成存在），
+# 但真文件连被误伤的机会都没有。
+run_assert_env() { # run_assert_env <名字> <输出里必须出现的行> <env 赋值> <参数…>
+  ASSERTS=$((ASSERTS + 1))
+  local name="$1"; shift
+  local want="$1"; shift
+  local envspec="$1"; shift
+  local out code
+  out="$(with_limit env "$envspec" "$BIN" "$@" 2>&1)"
+  code=$?
+  if [ "$code" != "0" ]; then
+    printf '  ❌ %-34s exit=%s\n' "$name" "$code"
+    [ "$code" = "142" ] && hung_note
+    [ "$code" = "134" ] && printf '       ↑ abort：几乎一定是 ggml/whisper context 没释放\n'
     printf '       %s\n' "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
     FAIL=$((FAIL + 1))
     return
@@ -517,7 +566,11 @@ export CLASSROOM_MODELS_DIR="$(mktemp -d)"
 #   131：把 `fromEnvironment` 改成无条件 `.off` 当时全绿（探针也绿），而它的谎话
 #        是当场可见的——探针没设变量却打印「回落：关」 → 补开关契约 + 对调优先级
 # **这个数字是判据的总数**：它掉下来就说明有人删判据，比任何一条具体断言都先报警
-run_assert "--model-download-selftest" "✅ 模型下载自检通过（143 条）" --model-download-selftest
+#
+# P12-2 清理时加了【九之零】4 条（「没认 LocalizedError 才说天书」落成行为判据：
+# 两个只差一个 conformance 的类型对同一句），所以总数 143 → **147**。
+# 数字是当场跑出来的，不是照旧抄的
+run_assert "--model-download-selftest" "✅ 模型下载自检通过（147 条）" --model-download-selftest
 unset CLASSROOM_MODELS_DIR
 #
 # 模型目录占用/清理（P7-1 补充要求 4）。**假目录里放一份伪造的 `.part`**——
@@ -541,7 +594,24 @@ run_assert "--model-cache（夹具·只报不改）" "Found 1 incomplete downloa
 unset CLASSROOM_MODELS_DIR
 rm -rf "$CACHEFIX"
 run "--manual-check-selftest"       --manual-check-selftest
-run "--config-selftest"             --config-selftest
+# 配置读写往返（P12-2 收尾）。原先只是 `run`（只看退出码），而这一节**唯一
+# 的底线判据**是末条「真实配置全程未被触碰」——它红了**进程照样 exit=0**
+# （自检是打印式的）。所以那条判据必须断言在字样上，否则等于没测。
+#
+# 断言抓 ✅ 那一版：注入实验（把 `Store(url: tmpDir…)` 改回 `Store(url: configURL)`，
+# 让这一节重新去动真文件）实测末条变成「❌ 真实配置全程未被触碰（指纹变了：
+# 不存在，现在 存在 · 432 字节 · mtime …）」——同一个字样位，换成 ❌ 这条就红。
+#
+# 套 `CFFIXED_USER_HOME`（**不是 `HOME=`**，见 `AppConfig.selfTest` 里那段：
+# macOS 上 Foundation 的 `.applicationSupportDirectory` 根本不看 `$HOME`）。
+# 注入那次真文件没被碰：实测 `config.json` 的 sha256 前后一致。
+#
+# ⚠️ 临时目录**用完就删**：`CFFIXED_USER_HOME` 一漏到后面各条入口，
+# 那些要读模型/录音的会去空目录里找、以和本条无关的方式红掉
+CFGFIX="$(mktemp -d)"
+run_assert_env "--config-selftest" "✅ 真实配置全程未被触碰（指纹一致" \
+  "CFFIXED_USER_HOME=$CFGFIX" --config-selftest
+rm -rf "$CFGFIX"
 run "--conv-probe"                  --conv-probe
 run "--wav-selftest"                --wav-selftest
 run "--terms-parser"                --terms-parser
@@ -554,10 +624,66 @@ run "--hp-selftest"                 --hp-selftest
 run_assert "--whisper-selftest" "✅ Whisper 引擎自检通过" --whisper-selftest
 run "--whisper-window-selftest"     --whisper-window-selftest
 run "--whisper-buffer-selftest"     --whisper-buffer-selftest
+# 门控的**判据本体**（纯函数／合成波形）：阈值上下、同一段音频的窗口边界、
+# 以及那条已知误判（连续 0.006 平音被当成静音）。不加载模型、不碰麦克风，
+# 所以放在这一段。断言抓「N 条」——用例掉到 0 也照样 exit=0
+run_assert "--speech-gate-selftest" "✅ 静音门控自检通过（27 条）" --speech-gate-selftest
 
 echo
 echo "════ 要真模型的入口（会加载 539MB 模型）════"
 run_assert "--whisper-prewarm" "构造 ggml context 次数: 1（" --whisper-prewarm
+
+# ── P12-2：静音窗不进模型（合成夹具，走真管线）──
+#
+# **为什么这里自己造一段**（而真实录音那条留给了另一支探针）：这一段要判的是
+# 「门控接上了没有」——该跳的窗跳了、关掉开关一窗不跳。这件事必须**确定性**：
+# 真实录音上「哪一窗算静音」会随着阈值调参而变，把它钉进这条快扫描，
+# 等于把一处调参变成两处维护。真实录音上的跳过率与「不许丢真人说话」
+# 在 `tools/probes/p12_2_speech_gate.sh`（十几分钟那一档）。
+#
+# 夹具 = 8 秒 300Hz 正弦（0.05 幅度，判据认它「有声」）+ 16 秒**数字零**，
+# 共 24 秒。生产步长 3 秒，取窗必然是 6 个，每个都是算得出来的：
+#   fed 3.0  → [0, 3)   全正弦                → 有声
+#   fed 6.0  → [0, 6)   起点与上一窗相同      → 被「同一窗不重转」挡掉
+#   fed 9.0  → [0, 9)   同上                  → 挡掉
+#   fed 12.0 → [2, 12)  2–8 秒正弦（6/10）    → 有声（占比 0.6）
+#   fed 15.0 → [5, 15)  5–8 秒正弦（3/10）    → 有声（占比 0.3）
+#   fed 18.0 → [8, 18)  全零                  → 静音·跳
+#   fed 21.0 → [11, 21) 全零                  → 静音·跳
+#   fed 24.0 → [14, 24) 全零                  → 静音·跳
+#   （收尾窗起点也是 14.0，与最后一窗相同 → 同样被挡掉）
+# 所以四个数都不是「跑出来多少算多少」：取窗 6 / 跳过 3 / 真的解了 3。
+#
+# ⚠️ 取窗起点是「喂入时刻往回 10 秒」，不是「按步长累加的游标」：游标只决定
+# **什么时候**取，起点永远是 `fed - 10 秒`（缓冲不够长时从 0 开始）。这就是
+# 前三次取窗起点全是 0 的原因——和真实录音上量到的起点序列（0 / 0 / 0 /
+# 2 / 5 / 8 …/ 110）是同一个道理。判据只数个数，写实际值是为了让人拿这条
+# 去核 `--gate-scan` 时不会以为自己看错了。
+# 「跳过音频」是**按窗长累加**的（三个 10 秒的窗互相重叠），所以是 30.0 秒
+# 而不是「24 秒里静音的 16 秒」——这条断言顺带钉住了那个口径。
+GATEFIX="$(mktemp -d)"
+python3 - "$GATEFIX/gate.wav" <<'PY'
+import math, struct, sys, wave
+rate, tone_seconds, silent_seconds = 16000, 8, 16
+tone = [int(0.05 * 32767 * math.sin(2 * math.pi * 300 * i / rate))
+        for i in range(rate * tone_seconds)]
+with wave.open(sys.argv[1], "wb") as out:
+    out.setnchannels(1)
+    out.setsampwidth(2)
+    out.setframerate(rate)
+    out.writeframes(b"".join(struct.pack("<h", value) for value in tone + [0] * (rate * silent_seconds)))
+PY
+run_assert "--whisper-window-file 静音窗不进模型" \
+  "取窗 6 · 跳过 3（50.0%）· 跳过音频 30.0 秒 · 真的解了 3 窗" \
+  --whisper-window-file "$GATEFIX/gate.wav" --head 24
+# 同一条入口、同一条取窗路径，只把开关关掉 → 一窗都不许跳
+export CLASSROOM_SPEECH_GATE=off
+run_assert "--whisper-window-file 门控关掉一窗不跳" \
+  "取窗 6 · 跳过 0（0.0%）· 跳过音频 0.0 秒 · 真的解了 6 窗" \
+  --whisper-window-file "$GATEFIX/gate.wav" --head 24
+unset CLASSROOM_SPEECH_GATE
+rm -rf "$GATEFIX"
+
 if [ -n "$SAMPLE" ]; then
   run "--whisper-window-file --head 20" --whisper-window-file "$SAMPLE" --head 20
 
@@ -583,8 +709,16 @@ if [ -n "$SAMPLE" ]; then
   # 落地信号不止 134——139 是 SIGSEGV，后端起指针在断言之前就被解了。判据因此
   # 写成「退出码必须**等于 124**」（不是「不等于 0」）：既挡住 134，也挡住 139，
   # 还挡住将来某种「0 但没跑到」的假绿。
+  #
+  # P12-2 补：这一条**必须把门控关掉**。它要的是「超时落在 `whisper_full` 里」，
+  # 而门控开着时那 3 秒样本可能整窗被判静音 → 一个 `whisper_full` 都不跑，
+  # 20 遍也就几毫秒，15 秒上限永远落不到转写中——判据变成空转（照样 124 吗？
+  # 不会：那样进程会正常 exit=0，这条会红得很响，但红的原因与它要测的东西无关）。
+  # 关掉门控 = 回到这一条写下时的行为，它测的还是「超时那一刻不许 abort」。
+  export CLASSROOM_SPEECH_GATE=off
   local_out="$(with_limit "$BIN" --whisper-window-file "$SAMPLE" --repeat 20 --window-timeout 15 2>&1)"
   local_code=$?
+  unset CLASSROOM_SPEECH_GATE
   if [ "$local_code" = "124" ] && printf '%s' "$local_out" | grep -qF "离线跑超时"; then
     printf '  ✅ %-34s exit=124 · 断言命中\n' "--whisper-window-file 超时不 abort"
     PASS=$((PASS + 1))
@@ -629,6 +763,6 @@ echo
 echo "──── 合计：过的有 $PASS 个，没过 $FAIL 个 ────"
 # 这句要说全两种失败，不能只说退出码：加了 `run_assert` 之后，**exit=0 但断言没命中**
 # 也是一条不过（核验者 2026-09-24 指出：那种情况下原话「退出码不为 0」是错的）
-[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含二十五条断言：20 条 run_assert + 3 条必须拒绝 + 被拦住不落盘 + 超时退出码 124）" \
+[ "$FAIL" = "0" ] && echo "✅ 退出码判据全过（含 ${ASSERTS} 条输出断言 + 必须拒绝 / 被拦住不落盘 / 超时退出码 124 等退出码断言；逐条 $((PASS + FAIL)) 个）" \
                   || echo "❌ 有入口没过：要么退出码非 0（134 就是 ggml 静态析构 abort），要么 exit=0 但断言没命中——看上面逐条"
 exit "$([ "$FAIL" = "0" ] && echo 0 || echo 1)"

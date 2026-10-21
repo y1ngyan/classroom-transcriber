@@ -18,9 +18,24 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 改一个就要重新量一遍占用率。
     ///
     /// 10 秒窗口：探针基线用的就是它（10 秒窗单次 2.07–2.10 秒、中位 2.19，
-    /// 且在 App 同时录音时量的）。
-    /// 3 秒步长：中位 2.19 秒 < 3 秒，留约 0.8 秒余量。再小就必然跟不上，
-    /// 跟不上要跳轮——不丢音频（下一窗整段覆盖），但界面上出句子的间隔会变长。
+    /// 且在 App 同时录音时量的）。**解码单元不变**是压重叠时的硬约束：
+    /// 精度数字全部是在「一次喂 10 秒音频」上量的，把窗改短会让文本没法与
+    /// 历史数字对账（见 P12-2 交付报告里两种压法的对照）。
+    ///
+    /// 步长 3 秒 = **重叠 7 秒**（70%）。同一句话平均被解 3.3 次，代价是
+    /// 占用率 74%；收益是「合并器在重叠区做二次确认」（`WhisperWindowMerger`
+    /// 策略第 4 条），以及**边界被覆盖多次**——某一窗空转时它的邻居还能
+    /// 认出这段音频。
+    ///
+    /// **P12-2 试过把它压到 9.6 秒（重叠 0.4 秒），量完没上。** 在同一段
+    /// 120 秒真实课堂录音上，9.6 秒步长让第 9 窗 [76.5,86.5) 一个字都没出，
+    /// 而那一窗的语音帧占比是 0.598（该录音第三高），另外两条独立链路
+    /// （3 秒步长的参照臂、把该段单独切出来跑的两窗链）都在那里认出了
+    /// 真人说话。灵敏度表（步长 3.0/5.0/7.0/9.6）见 P12-2 交付报告。
+    /// 所以这里留着 3 秒，**不是忘了压，是压了会丢内容**。
+    ///
+    /// `--step` 能把步长覆盖成别的值（探针复现老/demo 取窗用），
+    /// 但生产恒走这个常量。
     static let windowSeconds = 10.0
     static let stepSeconds = 3.0
     static let stepMillis = 3_000
@@ -33,7 +48,26 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     struct Update {
         let segments: [TranscriptSegment]
         let changes: [String]
+        /// 这一轮是「判为静音、**跳过解码**」：`segments` 原样返回，没动过。
+        /// 单独标出来是因为下游要能分辨「这一窗什么都没认出来」和「这一窗
+        /// 根本没送进模型」——后者是省下来的时间，前者是模型空转
+        var skippedSilence = false
     }
+
+    /// 静音门控的开关（见 `SpeechGatePolicy`）。缺省从环境变量读（缺省开）
+    let gatePolicy: SpeechGatePolicy
+
+    /// 交给**合并器**的步长（`WhisperMergeInput.stepMillis`）。
+    ///
+    /// 生产上它恒等于 `Self.stepMillis`；只有「探针用 `--step` 复现老取窗」
+    /// 那一趟会不一样。**必须跟着取窗步长一起走**：合并器拿这个数当
+    /// 「下一窗的起点」——`coverageEndMillis = startMillis + stepMillis`、
+    /// `pendingTail` 的过滤、`maxIntervalGapMillis` 全是它。取窗按 `--step 3.0`
+    /// 推进而这里还填 9.6 秒（当时的生产值）的话，合并器会以为每窗前进
+    /// 9.6 秒，于是提前定稿、提前丢掉 pending tail ——实测（P12-2 参照臂
+    /// 第一次跑）段数 24 → 44、总字数 218 → 552，看上去像「多认出一倍的内容」，
+    /// 其实是**参照臂根本没能复现改造前的合并**
+    let mergeStepMillis: Int
 
     let buffer: WhisperWindowBuffer
 
@@ -58,8 +92,10 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 在这里顺手收是因为**只有这里拿得到**：合并之后 `WhisperSegment` 就没了。
     /// 代价是几十 KB 内存，换来不用为标定再跑一遍真实录音。
     ///
-    /// ⚠️ 含窗口重叠导致的**重复计入**（10 秒窗 / 3 秒步长，同一句平均被转 3 次
-    /// 左右），所以它是分布参考，不是逐句的精确统计。
+    /// ⚠️ 含窗口重叠导致的**重复计入**：同一句话会被它所在的每一个窗口各记一遍，
+    /// 重复次数 = 窗长 / 步长，**3 秒步长时是 3.3 倍**。P12-2 试过 9.6 秒步长
+    /// （≈1.04 倍）但没上生产，所以别拿那一包的读数当基准比「置信度样本个数」。
+    /// 它是分布参考，不是逐句的精确统计。
     private(set) var recognizedConfidences: [Double] = []
 
     /// 本次录音的 `initial_prompt`（P12-1）。
@@ -75,10 +111,14 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     init(
         segments: [TranscriptSegment] = [],
         capacitySeconds: Double = 15,
-        initialPrompt: String? = nil
+        initialPrompt: String? = nil,
+        gatePolicy: SpeechGatePolicy = .fromEnvironment(),
+        mergeStepMillis: Int = WhisperWindowPipeline.stepMillis
     ) {
         self.segments = segments
         self.initialPrompt = initialPrompt
+        self.gatePolicy = gatePolicy
+        self.mergeStepMillis = mergeStepMillis
         self.buffer = WhisperWindowBuffer(capacitySeconds: capacitySeconds, sampleRate: Self.sampleRate)
     }
 
@@ -89,15 +129,70 @@ final class WhisperWindowPipeline: @unchecked Sendable {
 
     /// 取最近一窗转写并合并。
     ///
+    /// 门控在**这里**、不在 `merge()` 里：这一层是「音频 → 模型」的门口，
+    /// 判为静音的窗**根本不进 `merge`**，也就不会调 `engine.transcribe`
+    /// ——「跳过解码」和「解完再丢」的区别就在这一行上。
+    ///
     /// - Returns: `nil` = 缓冲还不够一窗，或者自上次取窗以来没有新音频。
+    ///   被跳过的静音窗**不是 nil**：它是一次真的取窗（时间在往前走），
+    ///   只是没送进模型
     func advance(engine: WhisperEngine) throws -> Update? {
-        guard let window = buffer.windowWithOrigin(
-            durationSeconds: Self.windowSeconds,
-            sampleRate: Self.sampleRate
-        ) else { return nil }
+        guard let window = peekWindow() else { return nil }
         guard window.startMillis != lastWindowStartMillis else { return nil }
+        if let update = skipIfSilent(window) { return update }
         return try merge(windowSamples: window.samples, windowStartMillis: window.startMillis, engine: engine)
     }
+
+    /// 取窗（**不解码、不判定、不动任何状态**）。
+    ///
+    /// `advance` / `finish` / 分布扫描（`--whisper-window-file … --gate-scan`，
+    /// 见 `WhisperWindowFileRun.gateScan`）都从它拿窗，
+    /// 所以三处看到的是同一批窗——扫描另写一遍取窗口径的话，扫出来的分布
+    /// 就不描述生产实际取的窗（这个坑 `WhisperWindowBuffer.windowWithOrigin`
+    /// 的注释里已经踩过一次）
+    func peekWindow(minimumSeconds: Double = 0) -> (samples: [Float], startMillis: Int)? {
+        guard let window = buffer.windowWithOrigin(
+            durationSeconds: Self.windowSeconds,
+            sampleRate: Self.sampleRate,
+            minimumSeconds: minimumSeconds
+        ) else { return nil }
+        return (window.samples, window.startMillis)
+    }
+
+    // MARK: - 静音门控
+
+    /// 这一层判定为静音就返回一个「没转写」的 Update，否则返回 nil（继续走解码）。
+    ///
+    /// 关掉开关时**一个字节的判定都不做**（连电平都不算）——「关掉后与改造前
+    /// 一致」这句话才不是「大概一致」，而是同一段代码路径
+    private func skipIfSilent(_ window: (samples: [Float], startMillis: Int)) -> Update? {
+        windowsTaken += 1
+        guard gatePolicy == .on else { return nil }
+        let (verdict, reading) = SpeechGate.evaluate(samples: window.samples, sampleRate: Self.sampleRate)
+        guard case .silence(let reason) = verdict else { return nil }
+
+        windowsSkipped += 1
+        skippedAudioSeconds += reading.windowSeconds
+        lastWindowStartMillis = window.startMillis
+        let line = String(
+            format: "跳过静音窗 @%dms（%s）— %@",
+            window.startMillis, reason, reading.summaryLine
+        )
+        if gateLog.count < Self.gateLogLimit { gateLog.append(line) }
+        return Update(segments: segments, changes: [line], skippedSilence: true)
+    }
+
+    /// 这一趟取了多少窗、其中多少窗因为静音没进模型。**主判据就是这两个数**
+    /// （跳过率），所以它们由管线自己记，不从日志文本里数
+    private(set) var windowsTaken = 0
+    private(set) var windowsSkipped = 0
+    /// 被跳过的音频总秒数（按窗时长算，含重叠）
+    private(set) var skippedAudioSeconds = 0.0
+    /// 被跳过的那些窗，按时间顺序（给排障看「跳的是哪些窗、读数是多少」）。
+    /// 只留前 `gateLogLimit` 条：一节课可能跳几百窗，全留着会撑内存，
+    /// 而排障要看的是开头那几窗判得对不对
+    private(set) var gateLog: [String] = []
+    private static let gateLogLimit = 40
 
     /// 录音结束时的收尾：把缓冲里最后一段音频也转一遍，然后把所有还没定稿的
     /// 段强制定稿。
@@ -112,20 +207,30 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 挂在定稿上。表现是「最后几分钟的段落永远显示成临时的」。
     func finish(engine: WhisperEngine) throws -> Update {
         var changes: [String] = []
-        if let window = buffer.windowWithOrigin(
-            durationSeconds: Self.windowSeconds,
-            sampleRate: Self.sampleRate,
-            minimumSeconds: Self.minimumFlushSeconds
-        ), window.startMillis != lastWindowStartMillis {
-            let update = try merge(
-                windowSamples: window.samples,
-                windowStartMillis: window.startMillis,
-                engine: engine
-            )
-            changes += update.changes
+        var skippedSilence = false
+        if let window = peekWindow(minimumSeconds: Self.minimumFlushSeconds),
+           window.startMillis != lastWindowStartMillis {
+            // 收尾窗也过门控：整段录音最后那一窗常常正是「静下来之后没人说话」
+            // （P12-2 实测：被判静音的那条录音，尾巴整段是静音），补转它
+            // 就是给模型一次编句子的机会——而那正是这一包要挡的东西
+            if let skipped = skipIfSilent(window) {
+                changes += skipped.changes
+                skippedSilence = true
+            } else {
+                let update = try merge(
+                    windowSamples: window.samples,
+                    windowStartMillis: window.startMillis,
+                    engine: engine
+                )
+                changes += update.changes
+            }
         }
         let final = finalizeWithoutTranscribing()
-        return Update(segments: final.segments, changes: changes + final.changes)
+        return Update(
+            segments: final.segments,
+            changes: changes + final.changes,
+            skippedSilence: skippedSilence
+        )
     }
 
     /// 丢掉本窗的幻觉段。判据在 `WhisperHallucination`，这里只负责
@@ -216,7 +321,7 @@ final class WhisperWindowPipeline: @unchecked Sendable {
                 ),
                 previousTail: tail,
                 previousWindowStartMillis: tailWindowStartMillis,
-                stepMillis: Self.stepMillis
+                stepMillis: mergeStepMillis
             )
         )
         segments = result.segments
@@ -233,6 +338,11 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 占用率 = 单次转写耗时 / 步长。它 > 100% 就意味着「跟不上」——那时
     /// 驱动循环会跳轮，界面上出句子的间隔从 3 秒变成 6 秒、9 秒……
     /// 所以这个数不是性能指标，是**能不能按设计的节奏出句子**的判据。
+    // 门控那一行由 `WhisperWindowFileRun.gateSection` 打（含「真的解了 N 窗」
+    // 与逐窗明细）。这里原本还有一个 `gateStatsLine`，全仓库没人调用——
+    // 两处各写一份「跳过率」的格式串，改一处忘一处就会打出互相矛盾的两个数，
+    // 所以删掉，只留一处。
+
     var statsLine: String {
         guard !transcriptionSeconds.isEmpty else { return "Whisper 滑窗：还没转过一窗" }
         let sorted = transcriptionSeconds.sorted()

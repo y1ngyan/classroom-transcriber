@@ -127,6 +127,9 @@ enum WhisperFileTranscription {
         let charsRecognized: Int
         /// 这一窗之后的段快照（合并结果）。空数组 = 空转/收尾无变化
         let segments: [TranscriptSegment]
+        /// 这一窗被判为静音、**没送进模型**（P12-2 门控）。`elapsedSeconds`
+        /// 这时是 0，而且它不代表「模型很快」——它代表模型根本没被调用
+        var skippedSilence = false
     }
 
     struct Result {
@@ -144,6 +147,23 @@ enum WhisperFileTranscription {
         /// 回显入参证明不了（入参可能是 nil，也可能中途被谁改了）。
         /// nil = 没送
         let initialPrompt: String?
+        /// 门控这一趟的数（P12-2）：取窗总数 / 跳过数 / 跳过秒数 / 开关态。
+        /// **同 `initialPrompt` 的道理，从管线回读**：探针的「跳过率」不能
+        /// 自己按选项算一遍，那样报的是「我以为它该跳多少」
+        let gate: GateSummary
+        /// 被跳过的窗（前若干条，带读数），给排障看判得对不对
+        let gateLog: [String]
+    }
+
+    struct GateSummary {
+        let policy: SpeechGatePolicy
+        let windowsTaken: Int
+        let windowsSkipped: Int
+        let skippedAudioSeconds: Double
+
+        var skipRate: Double {
+            windowsTaken > 0 ? Double(windowsSkipped) / Double(windowsTaken) : 0
+        }
     }
 
     /// 把样本喂完、定稿，返回最终段。
@@ -152,15 +172,32 @@ enum WhisperFileTranscription {
     /// 中途插不进去。所以取消的粒度就是「这一窗转完之后」——
     /// 对用户来说这最多等几秒，而且**不许留下半个转录**这件事由调用方保证
     /// （结果只在跑完之后才交给调用方，取消时抛 `cancelled`、什么都不返回）
+    ///
+    /// `stepSeconds` 是**探针专用的旋钮**，缺省就是生产步长：
+    ///
+    /// 它存在的理由：P12-2 要跑「另一种取窗节奏」做对照（灵敏度 5.0 / 7.0 /
+    /// 9.6，以及用 3.0 复现基线的取窗）。基线二进制的 `--dump-all` 只打到秒
+    /// （`[00:00:00] (存疑) 文本`，没有毫秒列、也没有定稿标记），承载不了
+    /// 「起止偏差按毫秒对账」；同一份代码换个步长跑出来的参照臂格式完全相同，
+    /// 逐段对账才成立。
+    ///
+    /// 取窗节奏与基线逐字相同（基线的源码里就是这两行：按 0.5 秒分块喂入、
+    /// `nextWindowAt += stepMillis`），所以 `stepSeconds = 3.0` 复现的就是
+    /// 基线那条取窗路径，不是「另一套东西」
     static func run(
         samples: [Float],
         engine: WhisperEngine,
         firstWindowSeconds: Double = WhisperWindowPipeline.stepSeconds,
+        stepSeconds: Double = WhisperWindowPipeline.stepSeconds,
         initialPrompt: String? = nil,
         onWindow: ((WindowFacts) -> Void)? = nil
     ) throws -> Result {
         let started = ContinuousClock.now
-        let pipeline = WhisperWindowPipeline(initialPrompt: initialPrompt)
+        let stepMillis = Int(stepSeconds * 1000)
+        // 步长要**一起**交给合并器（`mergeStepMillis`）：取窗按 3 秒推进而
+        // 合并器按 9.6 秒算「下一窗在哪」的话，参照臂复现不出改造前的合并
+        // （实测段数 24 → 44）。生产两者都等于 `WhisperWindowPipeline.stepMillis`
+        let pipeline = WhisperWindowPipeline(initialPrompt: initialPrompt, mergeStepMillis: stepMillis)
         let chunk = max(1, Int(chunkSeconds * WhisperWindowPipeline.sampleRate))
         let windowFrames = Int(WhisperWindowPipeline.windowSeconds * WhisperWindowPipeline.sampleRate)
         var fed = 0
@@ -187,7 +224,7 @@ enum WhisperFileTranscription {
 
             let fedMillis = Int(Double(fed) / WhisperWindowPipeline.sampleRate * 1000)
             guard fedMillis >= nextWindowAt else { continue }
-            nextWindowAt += WhisperWindowPipeline.stepMillis
+            nextWindowAt += stepMillis
             attempts += 1
 
             let callStarted = ContinuousClock.now
@@ -207,7 +244,8 @@ enum WhisperFileTranscription {
                 audioSeconds: bounds.seconds,
                 windowEndMillis: (startMillis ?? 0) + Int(bounds.seconds * 1000),
                 charsRecognized: charsRecognized,
-                segments: update?.segments ?? []
+                segments: update?.segments ?? [],
+                skippedSilence: update?.skippedSilence ?? false
             ))
         }
 
@@ -215,21 +253,26 @@ enum WhisperFileTranscription {
 
         // 收尾：缓冲里最后那段补转 + 强制定稿（接线后的路径就是这么收的）。
         // 少了它会丢掉「最后一个窗口之后」的那段音频（最多一个步长）
-        let transcriptionsBeforeFinish = pipeline.transcriptionSeconds.count
+        let windowsBeforeFinish = pipeline.windowsTaken
         let charsBeforeFinish = pipeline.recognizedConfidences.count
         let final = try pipeline.finish(engine: engine)
-        if pipeline.transcriptionSeconds.count > transcriptionsBeforeFinish {
+        // 判据是「收尾窗**取到了**」，不是「转写计数涨了」：门控把收尾窗判成
+        // 静音时后者不涨，而那一窗确实取过、也确实该在逐窗表上留一行（否则
+        // 「跳过率」的分母和收尾窗对不上）
+        if pipeline.windowsTaken > windowsBeforeFinish {
             let startMillis = pipeline.lastWindowStartMillis
             let bounds = windowBounds(startMillis)
+            let skipped = final.skippedSilence
             onWindow?(WindowFacts(
                 index: attempts + 1,
                 isFinishWindow: true,
                 startMillis: startMillis,
-                elapsedSeconds: pipeline.transcriptionSeconds.last ?? 0,
+                elapsedSeconds: skipped ? 0 : (pipeline.transcriptionSeconds.last ?? 0),
                 audioSeconds: bounds.seconds,
                 windowEndMillis: (startMillis ?? 0) + Int(bounds.seconds * 1000),
                 charsRecognized: pipeline.recognizedConfidences.count - charsBeforeFinish,
-                segments: final.segments
+                segments: final.segments,
+                skippedSilence: skipped
             ))
         }
 
@@ -242,7 +285,14 @@ enum WhisperFileTranscription {
             hallucinations: pipeline.hallucinationLog,
             guardTrips: pipeline.guardTrips,
             confidences: pipeline.recognizedConfidences,
-            initialPrompt: pipeline.initialPrompt
+            initialPrompt: pipeline.initialPrompt,
+            gate: GateSummary(
+                policy: pipeline.gatePolicy,
+                windowsTaken: pipeline.windowsTaken,
+                windowsSkipped: pipeline.windowsSkipped,
+                skippedAudioSeconds: pipeline.skippedAudioSeconds
+            ),
+            gateLog: pipeline.gateLog
         )
     }
 

@@ -50,6 +50,12 @@ enum RetranscribeEngine: String, CaseIterable, Identifiable, Sendable {
     /// 推出来的，课堂量级上会偏乐观（首窗 Metal 编译、内存压力都没进去），
     /// 所以界面上的措辞是「预计约」而不是「将耗时」。同一份记录里还有一条更硬的
     /// 实测：122.7 分钟拼接输入跑出了 1.02 倍实时（≈0.98×），和这里的 0.89× 同量级。
+    ///
+    /// ⚠️ 这两个数是**按 3 秒步长量的**（倍率的定义是「单窗耗时 ÷ 步长」）。
+    /// P12-2 试过把步长压到 9.6 秒，那一版里它们会偏悲观约 3.2 倍；但那一版
+    /// **没上生产**（压重叠会丢内容，见 `WhisperWindowPipeline.stepSeconds`），
+    /// 所以生产仍是 3 秒步长，这两个数照旧描述当前管线。真要改步长，这两行
+    /// 和那条钉住倍率的自检要一起重测
     var realtimeRate: Double {
         switch self {
         case .large: return 0.49

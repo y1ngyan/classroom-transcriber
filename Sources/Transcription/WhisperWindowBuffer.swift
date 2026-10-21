@@ -3,7 +3,8 @@ import Foundation
 /// 为 Whisper 滑窗准实时转录攒音频的 ring buffer。
 ///
 /// 采集线程把 16kHz 单声道 Float32 样本 append 进来；后台推理 Task
-/// 每 3 秒取一次最近 10 秒的窗口。容量比最大窗口稍长，给合并策略留余量。
+/// 每「一个步长」（`WhisperWindowPipeline.stepMillis`，3 秒）
+/// 取一次最近 10 秒的窗口。容量比最大窗口稍长，给合并策略留余量。
 ///
 /// 线程安全：采集线程和推理 Task 不是同一个队列，用 NSLock 保护内部
 /// 状态。`@unchecked Sendable` 是因为 `[Float]` 本身不是 Sendable，
@@ -16,8 +17,13 @@ final class WhisperWindowBuffer: @unchecked Sendable {
     private let capacity: Int
 
     /// - Parameters:
-    ///   - capacitySeconds: ring buffer 最大保留时长。默认 15 秒，
-    ///     大于 10 秒窗口 + 3 秒步长，防止边界处需要多读一点时拿不到。
+    ///   - capacitySeconds: ring buffer 最大保留时长。默认 15 秒。
+    ///     要够长：窗口是「当前时刻往回 10 秒」（`windowWithOrigin` 取的是
+    ///     后缀），而取窗时刻比窗口末尾晚——留出的余量就是「取窗前还能再晚
+    ///     多少」。15 秒 = 10 秒窗口 + 5 秒余量。
+    ///     **不要按「窗口 + 步长」算这个数**：步长能被探针覆盖成更大的值
+    ///     （P12-2 试过 9.6 秒），照那个式子推会觉得 15 秒不够，但窗口是
+    ///     从当前时刻往回取的，与步长无关（步长只决定取多勤）
     ///   - sampleRate: 固定 16kHz（Whisper 的输入格式）。
     init(capacitySeconds: Double = 15, sampleRate: Double = 16_000) {
         self.capacity = Int(capacitySeconds * sampleRate)

@@ -50,72 +50,94 @@ enum AppConfig {
             .appendingPathComponent("config.json")
     }()
 
-    /// 配置的内存副本。
+    /// 一份配置的落身之处：**哪个文件** + 它的内存副本。
     ///
-    /// 装在一个带锁的盒子里而不是直接用 `static var`：设置界面要在主线程
-    /// 写它，而签名、上传那些路径是从后台线程读的，Swift 6 会（正确地）
+    /// 内存副本装在一个带锁的盒子里而不是直接用 `static var`：设置界面要在
+    /// 主线程写它，而签名、上传那些路径是从后台线程读的，Swift 6 会（正确地）
     /// 拒绝一个裸的可变全局量。用 `static let` 持有盒子本身——不可变的
     /// 全局量是安全的，变化的部分关在锁里。
-    private final class Box: @unchecked Sendable {
+    ///
+    /// **为什么文件地址是构造参数，而不是写死那一条路径**：`selfTest()` 要做
+    /// 落盘往返，而往返必须发生在**临时目录**里。之前的写法是直接动用户真实的
+    /// `config.json`——先备份成 `.selftest-backup`、写完测试值再搬回来。那条路上
+    /// 任何一次中途退出（崩溃、被 kill、断电）都会让用户的密钥停在「真文件已删、
+    /// 备份还在旁边」的状态，而那份文件里是 COS / DeepSeek / Tavily 的真钥匙，
+    /// 没有第二份。所以「读写哪个文件」变成了参数：自检拿一个临时路径走
+    /// **同一条**编解码 + chmod 路径，真文件一个字节都不碰。
+    final class Store: @unchecked Sendable {
+        let url: URL
         private let lock = NSLock()
         private var value: Config
 
-        init(_ value: Config) { self.value = value }
+        init(url: URL) {
+            self.url = url
+            self.value = Store.read(url)
+        }
+
+        /// 读不出 / 解不开 → 空配置。**不抛**：没有配置文件是正常状态
+        /// （第一次启动就是这个），把它变成一个要调用方处理的错误，
+        /// 只会让每个读取点都多一段「读不到就当作空」的样板
+        static func read(_ url: URL) -> Config {
+            guard let data = try? Data(contentsOf: url),
+                  let config = try? JSONDecoder().decode(Config.self, from: data)
+            else {
+                return Config()
+            }
+            return config
+        }
 
         var current: Config {
             get { lock.lock(); defer { lock.unlock() }; return value }
             set { lock.lock(); defer { lock.unlock() }; value = newValue }
         }
-    }
 
-    private static let box = Box(loadFromDisk())
+        /// 从磁盘重读一份，并让后续读取看到它
+        /// 写要走 `current` 的 setter，**不能直接给 `value` 赋值**：读取方
+        /// （`COSService.fetchCredentials` 在通用执行器上）与主线程的
+        /// `save()` 可以并发，绕过锁就是一个 `Config` 结构体的无锁读写。
+        /// 独立核验者在 P12-2 抓到过这一处——重构搬字段时把带锁的 setter 漏了
+        func reload() { current = Store.read(url) }
 
-    private static func loadFromDisk() -> Config {
-        guard let data = try? Data(contentsOf: configURL),
-              let config = try? JSONDecoder().decode(Config.self, from: data)
-        else {
-            return Config()
+        /// 落盘并让后续读取立刻看到新值
+        func save(_ config: Config) throws {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+
+            let encoder = JSONEncoder()
+            // 不转义斜杠：URL 里全是 /，转义了就没法读也没法手工核对
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            try encoder.encode(config).write(to: url, options: .atomic)
+
+            // 这文件里躺着 COS 密钥和 API key，同机器上的其他账户不该读得到。
+            // 先建再 chmod：写的时候是原子替换，权限得在文件存在之后设
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
+
+            current = config
         }
-        return config
     }
+
+    private static let store = Store(url: configURL)
 
     /// 文件里现在写的是什么。
     ///
     /// 刻意**不含**环境变量的覆盖：环境变量是只读的一层，用户在界面上
     /// 改不了，把它显示出来只会让人对着一个改不动的值发懵。
-    static var current: Config { box.current }
+    static var current: Config { store.current }
 
     /// 从磁盘重读一份。
     ///
     /// 只有 `save()` 会更新内存副本，所以文件被**这个进程之外**的东西改过
-    /// 之后（用户自己拿编辑器改、自检把文件还原回去），内存里那份就是过期的
-    /// ——不重新读，界面会拿着旧值当真。自检的还原步骤就踩过这个：文件已经
-    /// 还原了，最后打印出来却还是测试用的值。
-    static func reload() {
-        box.current = loadFromDisk()
-    }
+    /// 之后（用户自己拿编辑器改），内存里那份就是过期的——不重新读，界面
+    /// 会拿着旧值当真。
+    static func reload() { store.reload() }
 
     /// 落盘并让后续读取立刻看到新值
-    static func save(_ config: Config) throws {
-        try FileManager.default.createDirectory(
-            at: configURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        let encoder = JSONEncoder()
-        // 不转义斜杠：URL 里全是 /，转义了就没法读也没法手工核对
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        try encoder.encode(config).write(to: configURL, options: .atomic)
-
-        // 这文件里躺着 COS 密钥和 API key，同机器上的其他账户不该读得到。
-        // 先建再 chmod：写的时候是原子替换，权限得在文件存在之后设
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: configURL.path
-        )
-
-        box.current = config
-    }
+    static func save(_ config: Config) throws { try store.save(config) }
 
     private static func value(env: String, file: String?) -> String? {
         if let raw = ProcessInfo.processInfo.environment[env],
@@ -129,43 +151,61 @@ enum AppConfig {
     }
 
     static var deepSeekAPIKey: String? {
-        value(env: "DEEPSEEK_API_KEY", file: box.current.deepSeekAPIKey)
+        value(env: "DEEPSEEK_API_KEY", file: store.current.deepSeekAPIKey)
     }
 
     static var searchProvider: String {
-        value(env: "SEARCH_PROVIDER", file: box.current.searchProvider)?
+        value(env: "SEARCH_PROVIDER", file: store.current.searchProvider)?
             .lowercased() ?? "tavily"
     }
 
     static var searchAPIKey: String? {
-        value(env: "SEARCH_API_KEY", file: box.current.searchAPIKey)
+        value(env: "SEARCH_API_KEY", file: store.current.searchAPIKey)
     }
 
     // MARK: - 腾讯云 COS
 
     static var cosBucket: String? {
-        value(env: "COS_BUCKET", file: box.current.cosBucket)
+        value(env: "COS_BUCKET", file: store.current.cosBucket)
     }
 
     static var cosRegion: String? {
-        value(env: "COS_REGION", file: box.current.cosRegion)
+        value(env: "COS_REGION", file: store.current.cosRegion)
     }
 
     static var cosSTSURL: String? {
-        value(env: "COS_STS_URL", file: box.current.cosSTSURL)
+        value(env: "COS_STS_URL", file: store.current.cosSTSURL)
     }
 
     /// COS 端点。没显式配就用 `https://{bucket}.cos.{region}.myqcloud.com` 推导。
     static var cosEndpoint: String? {
-        if let explicit = value(env: "COS_ENDPOINT", file: box.current.cosEndpoint) {
+        endpoint(
+            explicit: value(env: "COS_ENDPOINT", file: store.current.cosEndpoint),
+            bucket: cosBucket,
+            region: cosRegion
+        )
+    }
+
+    /// 端点的推导规则，抽成一个**纯函数**。
+    ///
+    /// 抽出来的理由只有一个：推导规则要能被断言，而全局那个
+    /// `cosEndpoint` 读的是全局 store——想在自检里喂它一组值，就得先把
+    /// 那组值写进**用户真实的 config.json**（上一版的 `--config-selftest`
+    /// 正是这么干的）。规则本身与「值从哪来」无关，分开之后自检就能在
+    /// 临时目录里把它验干净（见 `selfTest()`）
+    static func endpoint(explicit: String?, bucket: String?, region: String?) -> String? {
+        if let explicit, !explicit.trimmingCharacters(in: .whitespaces).isEmpty {
             return explicit
         }
-        guard let bucket = cosBucket, let region = cosRegion else { return nil }
+        guard let bucket, let region,
+              !bucket.trimmingCharacters(in: .whitespaces).isEmpty,
+              !region.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return nil }
         return "https://\(bucket).cos.\(region).myqcloud.com"
     }
 
     static var cosKeyPrefix: String {
-        value(env: "COS_KEY_PREFIX", file: box.current.cosKeyPrefix) ?? "recordings"
+        value(env: "COS_KEY_PREFIX", file: store.current.cosKeyPrefix) ?? "recordings"
     }
 
     /// 永久密钥。填了这两个就不必再配 `cosSTSURL`。
@@ -178,11 +218,11 @@ enum AppConfig {
     /// 别把这份文件拷到别的机器、也别提交进任何仓库。真要上云分发，
     /// 还是回去走 `cosSTSURL`。
     static var cosSecretID: String? {
-        value(env: "COS_SECRET_ID", file: box.current.cosSecretID)
+        value(env: "COS_SECRET_ID", file: store.current.cosSecretID)
     }
 
     static var cosSecretKey: String? {
-        value(env: "COS_SECRET_KEY", file: box.current.cosSecretKey)
+        value(env: "COS_SECRET_KEY", file: store.current.cosSecretKey)
     }
 
     /// 是否走「直填永久密钥」这条路（决定界面上的提示文案）
@@ -200,12 +240,12 @@ enum AppConfig {
     /// 允许环境变量覆盖，是为了无头自检能指定档位跑——
     /// 例如 `MIC_GAIN=off ClassroomTranscriber --mic-selftest`。
     static var micGain: MicGainMode {
-        MicGainMode.of(value(env: "MIC_GAIN", file: box.current.micGain))
+        MicGainMode.of(value(env: "MIC_GAIN", file: store.current.micGain))
     }
 
     /// 课堂提问检测灵敏度。认不出来的值回落 NORMAL（见 `QuestionSensitivity.of`）。
     static var questionSensitivity: QuestionSensitivity {
-        QuestionSensitivity.of(value(env: "QUESTION_SENSITIVITY", file: box.current.questionSensitivity))
+        QuestionSensitivity.of(value(env: "QUESTION_SENSITIVITY", file: store.current.questionSensitivity))
     }
 
     /// 段落定稿后是否自动联网核查。配置文件里没写这一项时判定为 false——
@@ -214,7 +254,7 @@ enum AppConfig {
     static var autoFactCheck: Bool {
         let raw = value(
             env: "AUTO_FACT_CHECK",
-            file: box.current.autoFactCheck.map { $0 ? "true" : "false" }
+            file: store.current.autoFactCheck.map { $0 ? "true" : "false" }
         )
         guard let raw else { return false }
         return ["1", "true", "yes", "on"].contains(raw.lowercased())
@@ -226,7 +266,7 @@ enum AppConfig {
     /// 例如 `TRANSCRIBE_BACKEND=whisper ClassroomTranscriber --mic-selftest`。
     /// 这条覆盖**只能选后端，不能改默认值**：文件里没写这一项时仍然是 apple。
     static var transcriptionBackend: TranscriptionBackend {
-        .of(value(env: "TRANSCRIBE_BACKEND", file: box.current.transcriptionBackend))
+        .of(value(env: "TRANSCRIBE_BACKEND", file: store.current.transcriptionBackend))
     }
 
     /// 术语表前移（作为 whisper 的 `initial_prompt`）的开关。**缺省关**。
@@ -263,7 +303,7 @@ enum AppConfig {
     /// 环境变量 `GLOSSARY_PROMPT`（1/true/yes/on 为开）只给无头 A/B 用。
     static var glossaryPromptEnabled: Bool {
         glossaryPromptEnabled(
-            fileValue: box.current.glossaryPrompt,
+            fileValue: store.current.glossaryPrompt,
             envValue: ProcessInfo.processInfo.environment["GLOSSARY_PROMPT"]
         )
     }
@@ -309,34 +349,29 @@ enum AppConfig {
     /// 配置存取的往返自检。
     ///
     /// 要防的是「填了、点了保存、其实没生效」——这类 bug 不报错，只是
-    /// 让用户下次打开 App 发现又空了，然后再填一遍。所以这里直接动真实的
-    /// 配置文件：**先备份，结束时还原**，中途异常也走 defer。
+    /// 让用户下次打开 App 发现又空了，然后再填一遍。
+    ///
+    /// **往返在临时目录里做，真实配置文件一个字节都不碰。** 上一版是直接动
+    /// 用户那份 `config.json`（先备份成 `.selftest-backup`、写完测试值再搬回
+    /// 来）——那条路上任何一次中途退出（崩溃、被 kill、断电）都会让用户的密钥
+    /// 停在「真文件已删、备份还在旁边」的状态，而那份文件里是 COS / DeepSeek /
+    /// Tavily 的真钥匙，没有第二份。所以现在：走的是**同一条**编解码 + chmod
+    /// 路径（同一个 `Store` 类型、同一个 `save`），只是文件的地址换成了临时目录，
+    /// 而「真文件没被动过」本身是这一节最后一条判据（指纹前后一致）。
     ///
     /// 输出里**不打印任何密钥值**，只说长度和前缀。
     static func selfTest() -> [String] {
         var lines: [String] = []
-        let backup = configURL.appendingPathExtension("selftest-backup")
-        let hadOriginal = FileManager.default.fileExists(atPath: configURL.path)
 
-        if hadOriginal {
-            try? FileManager.default.removeItem(at: backup)
-            do {
-                try FileManager.default.copyItem(at: configURL, to: backup)
-                lines.append("  ✅ 已备份原配置 → \(backup.lastPathComponent)")
-            } catch {
-                return ["  ❌ 备份失败，为免弄丢你的密钥，自检中止：\(error.localizedDescription)"]
-            }
-        } else {
-            lines.append("  ⚠️ 原配置不存在，自检结束后会删掉临时建的这份")
-        }
+        // 真实配置的指纹（存在与否 / 大小 / 修改时间 / inode）。**只取元数据，
+        // 不读内容**——这一节从头到尾都不该打开那个文件
+        let realBefore = fingerprint(of: configURL)
 
-        defer {
-            try? FileManager.default.removeItem(at: configURL)
-            if hadOriginal { try? FileManager.default.moveItem(at: backup, to: configURL) }
-            // 还原完必须重读：不然内存里还留着测试写的值，
-            // 自检最后那几行「还原后现状」就是在拿假数据骗人
-            reload()
-        }
+        let tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ct-config-selftest-\(UUID().uuidString)", isDirectory: true)
+        let store = Store(url: tmpDir.appendingPathComponent("config.json"))
+        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        lines.append("  ✅ 往返在临时目录里做 → \(store.url.path)")
 
         // 1. 写入一份每个字段都有值的配置
         var seed = Config()
@@ -360,21 +395,33 @@ enum AppConfig {
         seed.glossaryPrompt = true
 
         do {
-            try save(seed)
+            try store.save(seed)
             lines.append("  ✅ save() 未抛错")
         } catch {
             return lines + ["  ❌ save() 失败：\(error.localizedDescription)"]
         }
 
-        // 2. 内存副本要立刻生效，不能等下次启动
-        let inMemory = current
+        // 2. 内存副本要立刻生效，不能等下次启动。
+        //    这里问的是**这份 store** 的内存副本（上一版问的是全局那个，
+        //    因为那时测试值就写在全局那份文件里；性质没变，主语变了）
+        let inMemory = store.current
         lines.append("  \(inMemory.cosBucket == seed.cosBucket ? "✅" : "❌") 内存副本已更新（cosBucket）")
-        lines.append("  \(AppConfig.isCOSConfigured ? "✅" : "❌") isCOSConfigured 立刻变 true（永久密钥那条路）")
-        lines.append("  \(AppConfig.cosEndpoint == "https://sentinel-1300000000.cos.ap-shanghai.myqcloud.com" ? "✅" : "❌") 端点推导正确 → \(AppConfig.cosEndpoint ?? "nil")")
+        // 已配置与端点推导都走纯函数问同一组值——不再依赖「先把值写进真文件」
+        let configured = endpoint(explicit: nil, bucket: inMemory.cosBucket, region: inMemory.cosRegion) != nil
+            && inMemory.cosSecretID != nil && inMemory.cosSecretKey != nil
+        lines.append("  \(configured ? "✅" : "❌") 只要字段齐就是「已配置」（永久密钥那条路，纯函数判定）")
+        let derived = endpoint(explicit: nil, bucket: inMemory.cosBucket, region: inMemory.cosRegion)
+        lines.append("  \(derived == "https://sentinel-1300000000.cos.ap-shanghai.myqcloud.com" ? "✅" : "❌") 端点推导正确 → \(derived ?? "nil")")
+        // 显式配的端点优先于推导；缺 bucket / region 时给 nil 而不是半截 URL
+        let explicitWins = endpoint(explicit: "https://explicit.example.com", bucket: "b", region: "r")
+            == "https://explicit.example.com"
+        let blankIsNotExplicit = endpoint(explicit: "   ", bucket: nil, region: nil) == nil
+        let halfConfigIsNil = endpoint(explicit: nil, bucket: "b", region: nil) == nil
+        lines.append("  \(explicitWins && blankIsNotExplicit && halfConfigIsNil ? "✅" : "❌") 端点规则：显式优先、空白不算显式、缺 bucket/region 给 nil")
 
         // 3. 真的落盘了吗——重新从文件里读一遍，不信内存
         let onDisk: Config? = {
-            guard let data = try? Data(contentsOf: configURL) else { return nil }
+            guard let data = try? Data(contentsOf: store.url) else { return nil }
             return try? JSONDecoder().decode(Config.self, from: data)
         }()
         guard let onDisk else {
@@ -421,7 +468,7 @@ enum AppConfig {
         lines.append("  \(!dflt && !offByFile && onByFile && envWins ? "✅" : "❌") 术语表前移开关：缺省 \(dflt ? "开" : "关")、文件写 false → \(offByFile ? "开" : "关")、文件写 true → \(onByFile ? "开" : "关")、环境变量 1 覆盖 → \(envWins ? "开" : "关")")
 
         // 4. 权限：这文件里有密钥，同机其他账户不该读得到
-        let mode = (try? FileManager.default.attributesOfItem(atPath: configURL.path))?[.posixPermissions] as? NSNumber
+        let mode = (try? FileManager.default.attributesOfItem(atPath: store.url.path))?[.posixPermissions] as? NSNumber
         lines.append("  \(mode?.intValue == 0o600 ? "✅" : "❌") 权限 600（实测 \(mode.map { String($0.intValue, radix: 8) } ?? "未知")）")
 
         // 5. 空白要折算成 nil，不能存进去一个空串——读配置那边用「非空」
@@ -429,14 +476,54 @@ enum AppConfig {
         var blanked = seed
         blanked.searchAPIKey = "   "
         do {
-            try save(blanked)
-            let round = current
+            try store.save(blanked)
+            let round = store.current
             lines.append("  \(round.searchAPIKey == "   " ? "✅" : "❌") 原文原样保留（折算成 nil 由设置层负责，不是存储层）")
         } catch {
             lines.append("  ❌ 二次保存失败：\(error.localizedDescription)")
         }
 
+        // 6. **本节的底线判据**：用户的真实配置文件从头到尾没被碰过。
+        //
+        //    这一条是整节的存在理由——前面每一条都在验「往返对不对」，
+        //    只有这一条在验「你的钥匙还在不在原处」。指纹比的是元数据
+        //    （存在与否 / 大小 / 修改时间 / inode）：内容变了这几项必变，
+        //    而元数据不泄密。
+        //
+        //    它**能红**（2026-10-15 实测）：把上面那行 `Store(url: tmpDir…)`
+        //    改成 `Store(url: configURL)`（让这一节重新去动真文件），同一份
+        //    输出的末条立刻变成「❌ 真实配置全程未被触碰（指纹变了：不存在，
+        //    现在 存在 · 432 字节 · mtime … · inode …）」。注意这一条红了
+        //    **进程退出码还是 0**——自检是打印式的，判它在那个 ✅/❌ 字样上，
+        //    不在退出码上（`exit_codes.sh` 里也是这么断言的）。
+        //
+        //    ⚠️ 那次注入必须配 `CFFIXED_USER_HOME=$(mktemp -d)`，**`HOME=` 不管用**：
+        //    macOS 上 Foundation 的 `.applicationSupportDirectory`（和
+        //    `NSHomeDirectory()`）根本不看 `$HOME`，看的是 `CFFIXED_USER_HOME`。
+        //    实测：`HOME=/tmp/x` 之后 `NSHomeDirectory()` 仍是 `/Users/you`；
+        //    `CFFIXED_USER_HOME=/tmp/x` 才变成 `/tmp/x`。**按 `HOME=` 写等于没隔离**，
+        //    那一下就是拿用户那份装着 COS / DeepSeek / Tavily 真钥匙的
+        //    `config.json` 去写 `sentinel-` 那组值——真文件、无第二份。
+        //    注入跑完回头比一次真文件的 sha256 确认没被碰（实测一致）。
+        let realAfter = fingerprint(of: configURL)
+        lines.append("  \(realAfter == realBefore ? "✅" : "❌") 真实配置全程未被触碰（\(realAfter == realBefore ? "指纹一致" : "指纹变了")：\(realBefore)，现在 \(realAfter)）")
+
         return lines
+    }
+
+    /// 文件指纹：存在与否 / 大小 / 修改时间 / inode。**不读内容**。
+    ///
+    /// 用途只有一个：证明某个文件在这段代码前后**没被动过**。
+    /// 拿内容哈希也行，但那意味着要把一份装着明文的密钥文件读进内存——
+    /// 为了证明「我没碰它」而去读它，方向反了。
+    static func fingerprint(of url: URL) -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path) else {
+            return "不存在"
+        }
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        let inode = (attrs[.systemFileNumber] as? NSNumber)?.intValue ?? -1
+        return String(format: "存在 · %lld 字节 · mtime %.3f · inode %d", size, mtime, inode)
     }
 
     /// 生成模板配置文件，方便用户填

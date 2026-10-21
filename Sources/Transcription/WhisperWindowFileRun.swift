@@ -18,7 +18,7 @@ import whisper
 /// 诊断开关（都只影响这个入口的输出，**不改任何生产参数**）：
 ///
 /// ```
-/// --whisper-window-file <wav> [--timing] [--dump-all] [--first-window <秒>]
+/// --whisper-window-file <wav> [--timing] [--dump-all] [--first-window <秒>] [--step <秒>]
 ///                            [--repeat <n>] [--label <文字>]
 ///                            [--confidence-probe [--probe-step <秒>] [--probe-only]] [--sweep]
 ///                            [--head <秒>]
@@ -29,11 +29,20 @@ import whisper
 ///   该窗音频特征 / 进程内存），并给首段被改写的轨迹。占用率那条均值被
 ///   离群窗拖偏时，只有这张表能指出是哪一窗、以及它落在什么音频上。
 /// - `--first-window <秒>`：首窗要攒够多少音频才取。默认 = 步长
-///   （实时链路的行为：3 秒时缓冲里只有 3 秒 → 首窗必然是 3 秒碎片）。
+///   （实时链路的行为：缓冲里只有「步长」那么多秒 → 首窗必然是步长那么长的
+///   碎片。它跟着步长走：生产 3 秒，`--step` 覆盖时跟着覆盖值走。
+/// - `--step <秒>`：覆盖取窗步长（默认 = 生产步长 3 秒）。**它存在的理由是
+///   探针要跑「另一种取窗节奏」**：P12-2 用 5.0 / 7.0 / 9.6 做过灵敏度对照，
+///   也用它复现过基线的大重叠取窗（基线二进制的 `--dump-all` 只打到秒、
+///   判不了毫秒偏差；同一份代码换个步长就得到格式相同的参照臂）。
+///   改过步长时输出**头一行就会写「这一趟不是生产行为」**，免得它的数字
+///   被当成生产读数。
 /// - `--repeat <n>`：同一引擎、重开管线跑 n 遍。**第一遍的离群窗在第二遍
 ///   是否消失**是「内存/首次编译」和「音频内容」的分水岭——同一位置复现
 ///   = 内容相关，位置乱跳 = 机器状态相关。
-/// - `--dump-all`：把所有段（不只前 12 段）按时间顺序打出来。
+/// - `--dump-all`：把所有段（不只前 12 段）按时间顺序打出来。每行**同时给
+///   起止毫秒**（`9.600–19.600s`）——P12-2 的判据 ③ 要按毫秒比起止偏差，
+///   而人读的那一列只到秒；两个都留着，脚本读小数那一段。
 /// - `--confidence-probe`：另跑一趟**测量通道**（绕开合并器，直接调引擎），
 ///   把每个识别段的文本与连续置信度一起打出来。标定档位阈值必须要这一对，
 ///   而合并器转成 `TranscriptSegment` 时把 `confidences` 丢掉了。
@@ -42,6 +51,10 @@ import whisper
 ///   看每条候选线会把多少段判成「不可信」。
 /// - `--head <秒>`：只跑前 N 秒（问「开头几秒怎么样」时不用把整条跑完，
 ///   输出里会标明覆盖率的分母是这 N 秒）。
+/// - `--gate-scan`：只把静音门控**逐窗判一遍**并打出逐窗读数与分布，
+///   **不加载模型**（判据只吃音频）。走的是生产那条取窗路径、喂入节奏也一致，
+///   所以它看到的就是真实跑会看到的那批窗——交付里「阈值怎么定的」那句话
+///   靠的就是这份分布。见 `gateScan(samples:)`
 /// - `--suppress-regex <模式>`：把模式交给 whisper 的 `suppress_regex`。
 ///   **必须显式传才启用**，因为上游语义（整 token 精确匹配、每 token 遍历
 ///   整个词表、模式非法即 abort）使它的效果和代价都得先量再说，见
@@ -70,8 +83,24 @@ enum WhisperWindowFileRun {
     struct Options {
         /// 首窗要攒够的音频（秒）。默认 = 步长，即实时链路的行为
         var firstWindowSeconds: Double = WhisperWindowPipeline.stepSeconds
+        /// `--step <秒>`：覆盖取窗步长（nil = 生产步长）。
+        ///
+        /// **只为 P12-2 判据 ③ 存在**：那条判据要拿「改造前那种大重叠取窗」
+        /// 当参照，而基线二进制的 `--dump-all` 只打到秒，判不了毫秒级的
+        /// 起止偏差。用 `--step 3.0`（基线步长）+ `CLASSROOM_SPEECH_GATE=off`
+        /// 跑出来的这一臂，取窗节奏与基线逐字相同、输出格式与被测臂相同，
+        /// 于是「每一段定稿文本都对得上、且偏差 ≤ 重叠量」才判得动。
+        /// 生产与课后重转从不传它（见 `WhisperFileTranscription.run` 的注释）。
+        ///
+        /// 给了它、又没显式给 `--first-window` 时，**首窗长度也跟着变成它**——
+        /// 「首窗默认 = 步长」这条不变量在基线里同样成立，不跟着走就不是基线了
+        /// （见 `parse` 里那段）
+        var stepSecondsOverride: Double?
         var timing = false
         var dumpAll = false
+        /// `--gate-scan`：只把静音门控**逐窗判一遍**并打出分布，不加载模型。
+        /// 见 `gateScan(samples:)`
+        var gateScan = false
         var repeatCount = 1
         var label = ""
         var confidenceProbe = false
@@ -132,6 +161,21 @@ enum WhisperWindowFileRun {
             if let raw = value("--probe-step"), let seconds = Double(raw), seconds > 0 {
                 options.probeStepSeconds = seconds
             }
+            // `--step` 的用途见 `Options.stepSecondsOverride`：它**不是**
+            // 「调参」的旋钮，是「用老取窗跑一遍、好跟改造前对账」用的。
+            // 和 `--probe-step` 分开两件事：那个只影响置信度探针的取样节奏
+            if let raw = value("--step"), let seconds = Double(raw), seconds > 0 {
+                options.stepSecondsOverride = seconds
+            }
+            // `--step` 一给，**首窗长度必须跟着走**：`firstWindowSeconds` 的
+            // 缺省是那个**常量**，不是 `--step` 的值。只改步长不改首窗，
+            // 取窗节奏会变成「首窗 3.0、之后按新步长」的错拍——两边都不是，
+            // 参照臂会对着一条谁都没跑过的路径量（第一次就是这么写错的，
+            // 靠「首窗默认 = 步长」这条不变量才看出来）。
+            // 显式给了 `--first-window` 就听它的
+            if let step = options.stepSecondsOverride, value("--first-window") == nil {
+                options.firstWindowSeconds = step
+            }
             if let raw = value("--head"), let seconds = Double(raw), seconds > 0 {
                 options.headSeconds = seconds
             }
@@ -149,6 +193,7 @@ enum WhisperWindowFileRun {
                 options.glossaryPrompt = .disk
             }
             options.glossaryScore = arguments.contains("--glossary-score")
+            options.gateScan = arguments.contains("--gate-scan")
             options.timing = arguments.contains("--timing")
             options.dumpAll = arguments.contains("--dump-all")
             options.probeOnly = arguments.contains("--probe-only")
@@ -183,6 +228,9 @@ enum WhisperWindowFileRun {
         let peak: Double
         let voicedRatio: Double
         let footprintMB: Double
+        /// 这一窗被静音门控跳过、**没进模型**（P12-2）。耗时会是 0，
+        /// 而 0 在这里不代表「很快」，代表模型没被调用——两种含义必须分得开
+        var skippedSilence = false
         var note = ""
     }
 
@@ -191,6 +239,8 @@ enum WhisperWindowFileRun {
         var windows: [WindowTrace] = []
         var attempts = 0
         var wallSeconds = 0.0
+        /// 只装**真解码过**的窗（管线在门控跳过时不追加）。被跳过的窗耗时为 0、
+        /// 根本没调模型，混进来会把均值拉低成一个假的「优化」数字
         var transcriptSeconds: [Double] = []
         var guardTrips = 0
         var confidences: [Double] = []
@@ -219,6 +269,9 @@ enum WhisperWindowFileRun {
         /// 生产链路丢掉的幻觉段（`WhisperWindowPipeline.hallucinationLog`）。
         /// 从管线自己那儿读，不是从最终段列表反推——反推不出来
         var hallucinations: [String] = []
+        /// 静音门控这一轮的数与逐窗记录（P12-2），同样从管线回读
+        var gate: WhisperFileTranscription.GateSummary?
+        var gateLog: [String] = []
 
         var realWindows: [WindowTrace] { windows.filter { $0.startMillis != nil } }
     }
@@ -281,6 +334,17 @@ enum WhisperWindowFileRun {
             lines.append(String(format: "首窗最小长度被改为 %.1f 秒（默认 %.1f = 步长）",
                                 options.firstWindowSeconds, WhisperWindowPipeline.stepSeconds))
         }
+        // 步长被改过**必须打在头上**：这一趟的数字不再描述生产管线，
+        // 混进任何「改造前/改造后」的对账里都会读错
+        if let step = options.stepSecondsOverride, step != WhisperWindowPipeline.stepSeconds {
+            lines.append(String(format: "⚠️ 取窗步长被改为 %.1f 秒（生产 %.1f 秒）——这一趟不是生产行为",
+                                step, WhisperWindowPipeline.stepSeconds))
+        }
+        // 步长取**实际生效**的那个：下面「跑滑窗」那行和占用率都从它算。
+        // 头上写的和实际跑的不是同一个数的话，读的人会拿这一行去核对一份
+        // 对不上的读数（P12-2 参照臂第一次跑就撞上：头上写 9.6、占用率也按
+        // 9.6 算成 180%，而那趟实际是 3.0，真值是 576%）
+        let effectiveStepSeconds = options.stepSecondsOverride ?? WhisperWindowPipeline.stepSeconds
 
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         guard let file = try? AVAudioFile(forReading: url) else {
@@ -326,6 +390,20 @@ enum WhisperWindowFileRun {
         lines.append(String(format: "  ✅ 重采样到 16k 单声道：%d 采样点 · %.1f 秒",
                             samples.count, audioSeconds))
 
+        // --gate-scan：门控逐窗判一遍就收工。**在构造引擎之前返回**——
+        // 这一趟要的读数是音频的，与模型无关，加载 539MB 只为打印电平是白花
+        if options.gateScan {
+            lines.append("")
+            // 步长必须跟着 `--step` 走：扫描的第一句就说「走生产那条取窗路径」，
+            // 拿生产 3 秒的步长去扫一趟 `--step 9.6`，扫出来的分布不描述那一趟
+            // ——独立核验者在 P12-2 抓到过（头上警告写着 9.6，实际扫的还是 38 个 3 秒窗）
+            lines.append(contentsOf: gateScan(
+                samples: samples,
+                stepMillis: Int((effectiveStepSeconds * 1000).rounded())
+            ))
+            return lines
+        }
+
         lines.append("")
         lines.append("─── 加载引擎 ───")
         let engine: WhisperEngine
@@ -366,7 +444,14 @@ enum WhisperWindowFileRun {
         }
 
         lines.append("")
-        lines.append("─── 跑滑窗（窗口 \(Int(WhisperWindowPipeline.windowSeconds)) 秒 / 步长 \(Int(WhisperWindowPipeline.stepSeconds)) 秒）───")
+        // 步长**别用 `Int(...)` 打**：`--step` 可以是 9.6 这类小数，取整会打成
+        // 「步长 9 秒」，而这一行是给人读的唯一一处「这次跑的是什么参数」——
+        // 差 0.6 秒没人看得出来
+        lines.append(String(
+            format: "─── 跑滑窗（窗口 %.1f 秒 / 步长 %.1f 秒 → 重叠 %.1f 秒）───",
+            WhisperWindowPipeline.windowSeconds, effectiveStepSeconds,
+            WhisperWindowPipeline.windowSeconds - effectiveStepSeconds
+        ))
 
         var rounds: [Round] = []
         do {
@@ -387,7 +472,9 @@ enum WhisperWindowFileRun {
 
         lines.append(String(format: "  %d 窗 · 离线全程 %.1f 秒（音频 %.1f 秒）",
                             round.realWindows.count, round.wallSeconds, audioSeconds))
-        lines.append("  \(statsLine(round))")
+        lines.append("  \(statsLine(round, stepSeconds: effectiveStepSeconds))")
+        lines.append("")
+        lines.append(contentsOf: gateSection(round))
         if options.repeatCount > 1 {
             lines.append("")
             lines.append("─── 重复跑（看离群窗会不会自己消失）───")
@@ -523,7 +610,15 @@ enum WhisperWindowFileRun {
             let prefix = options.dumpAll ? String(format: "%4d ", offset + 1) : ""
             let revisions = round.revisionCounts[segment.id] ?? 0
             let rewritten = revisions > 0 ? " ✎\(revisions)" : ""
-            lines.append("  \(prefix)[\(segment.formattedTimestamp)] (\(grade))\(question)\(rewritten) \(segment.text)")
+            // 起止时间**同时给毫秒**：人读那一列（`[00:00:09]`）只到秒，而
+            // 「改造前后同一句话的起止偏差」要按毫秒比（P12-2 判据 ③ 的上限
+            // 是重叠量 400ms，秒级的分辨率比判据本身还粗，根本判不动）。
+            // 两个都留着：人看前一个，脚本读后一个，不必让任何一边将就
+            // 定稿与否**必须标出来**：P12-2 的判据 ③ 只对「定稿文本」成立
+            // （未定稿的段是下一窗还会改写的东西，拿它比对等于拿半成品对账），
+            // 而档位 `grade` 不是这个标记——候选段一进合并器就带着档位了
+            let state = segment.isFinal ? "定稿" : "临时"
+            lines.append("  \(prefix)[\(segment.formattedTimestamp)] (\(grade))[\(state)]\(question)\(rewritten) \(millisRange(segment)) \(segment.text)")
         }
 
         if options.confidenceProbe || options.sweep {
@@ -538,6 +633,180 @@ enum WhisperWindowFileRun {
             }
         }
 
+        return lines
+    }
+
+    // MARK: - 门控逐窗扫描（--gate-scan）
+
+    /// 把门控在**真实录音**上逐窗判一遍，打出每窗的读数与整段的分布。
+    /// **不加载模型、不转写**——判据只吃音频。
+    ///
+    /// 为什么它必须走 `peekWindow`：交付里要说清「判据与阈值是怎么定的」，
+    /// 那就得把逐窗读数摆出来。取窗另写一遍的话，扫出来的分布不描述生产
+    /// 实际取的那批窗（`WhisperWindowBuffer.windowWithOrigin` 的注释里记着
+    /// 这个坑踩过一次）。
+    ///
+    /// 喂入节奏与 `WhisperFileTranscription.run` 逐句对齐：0.5 秒一块、
+    /// `nextWindowAt += stepMillis`、末尾补一窗收尾。**它看到的就是那条路
+    /// 会看到的那批窗**——这是「扫描的分布能当阈值依据」的前提。
+    private static func gateScan(samples: [Float], stepMillis: Int) -> [String] {
+        let pipeline = WhisperWindowPipeline()
+        let chunk = max(1, Int(WhisperFileTranscription.chunkSeconds * WhisperWindowPipeline.sampleRate))
+        var fed = 0
+        var nextWindowAt = stepMillis
+        var rows: [(start: Int, verdict: SpeechGate.Verdict, reading: SpeechGate.Reading, isFinish: Bool)] = []
+
+        /// 取这一窗并判定。**不动管线状态**（`peekWindow` 本来就是纯取窗），
+        /// 去重靠调用点自己记「上一个起点」——生产那边靠 `lastWindowStartMillis`，
+        /// 这里靠 `rows.last`
+        func take(minimumSeconds: Double, isFinish: Bool) {
+            guard let window = pipeline.peekWindow(minimumSeconds: minimumSeconds) else { return }
+            if let last = rows.last, last.start == window.startMillis { return }
+            let (verdict, reading) = SpeechGate.evaluate(
+                samples: window.samples, sampleRate: WhisperWindowPipeline.sampleRate
+            )
+            rows.append((window.startMillis, verdict, reading, isFinish))
+        }
+
+        while fed < samples.count {
+            let end = min(fed + chunk, samples.count)
+            pipeline.append(Array(samples[fed..<end]))
+            fed = end
+            let fedMillis = Int(Double(fed) / WhisperWindowPipeline.sampleRate * 1000)
+            guard fedMillis >= nextWindowAt else { continue }
+            nextWindowAt += stepMillis
+            take(minimumSeconds: 0, isFinish: false)
+        }
+        take(minimumSeconds: WhisperWindowPipeline.minimumFlushSeconds, isFinish: true)
+
+        // MARK: 输出
+
+        let silenced = rows.filter { $0.verdict.isSilence }
+        let speech = rows.filter { !$0.verdict.isSilence }
+        var lines = [String(
+            format: "─── 静音门控逐窗扫描（不加载模型；走生产那条取窗路径 · 步长 %.1f 秒）───",
+            Double(stepMillis) / 1000
+        )]
+        lines.append(String(
+            format: "  判据：语音帧占比 < %.2f 且 p90 < %.5f（两条同时成立才判静音）",
+            SpeechGate.minSpeechRatio, SpeechGate.speechCeiling
+        ))
+        lines.append(String(
+            format: "  窗 %d · 判静音 %d（%.1f%%）· 判有声 %d · 其中收尾窗 %d",
+            rows.count, silenced.count,
+            rows.isEmpty ? 0 : Double(silenced.count) / Double(rows.count) * 100,
+            speech.count, rows.filter(\.isFinish).count
+        ))
+
+        lines.append("")
+        lines.append("     #   起点s   窗长s  语音帧占比      p90      dBFS     底噪   动态范围  判定")
+        for (index, row) in rows.enumerated() {
+            let r = row.reading
+            lines.append(String(
+                format: "  %4d %8.3f %7.3f %11.4f %9.5f %8.1f %9.5f %8.1f  %@%@",
+                index + 1, Double(row.start) / 1000, r.windowSeconds, r.speechRatio,
+                r.speech, MicLevelMetrics.dbfs(Float(r.speech)),
+                r.floor, r.dynamicRangeDB,
+                row.verdict.isSilence ? "静音" : "有声", row.isFinish ? "（收尾）" : ""
+            ))
+        }
+
+        // 分布：阈值到底卡在哪一批窗上，只有把两批的边界摆出来才看得见。
+        // **这就是「阈值怎么定的」那句话的依据**，不是换个说法重说一遍判据
+        lines.append("")
+        lines.append("  分布（判据两维各自落在哪）：")
+        let ratioBands: [(String, (Double) -> Bool)] = [
+            ("= 0（整窗数字静音）", { $0 == 0 }),
+            ("0 < 占比 < 0.05", { $0 > 0 && $0 < 0.05 }),
+            ("0.05 ≤ 占比 < 0.10（阈值下沿附近）", { $0 >= 0.05 && $0 < 0.10 }),
+            ("0.10 ≤ 占比 < 0.30（刚过阈值）", { $0 >= 0.10 && $0 < 0.30 }),
+            ("占比 ≥ 0.30", { $0 >= 0.30 }),
+        ]
+        for (label, test) in ratioBands {
+            let count = rows.filter { test($0.reading.speechRatio) }.count
+            lines.append(String(format: "    语音帧占比 %@：%d 窗", label, count))
+        }
+        let ceilingDB = MicLevelMetrics.dbfs(Float(SpeechGate.speechCeiling))
+        lines.append(String(format: "    （p90 上限 %.5f = %.1f dBFS；判静音那批的 p90 上限、判有声那批的 p90 下限见下）",
+                            SpeechGate.speechCeiling, ceilingDB))
+        if let maxSilentP90 = silenced.map(\.reading.speech).max(),
+           let minSpeechP90 = speech.map(\.reading.speech).min() {
+            lines.append(String(
+                format: "    p90 两批之间的余量：判静音最大 %.5f（%.1f dBFS）→ 判有声最小 %.5f（%.1f dBFS），差了 %.1f dB",
+                maxSilentP90, MicLevelMetrics.dbfs(Float(maxSilentP90)),
+                minSpeechP90, MicLevelMetrics.dbfs(Float(minSpeechP90)),
+                MicLevelMetrics.dbfs(Float(minSpeechP90)) - MicLevelMetrics.dbfs(Float(maxSilentP90))
+            ))
+        }
+        if let maxSilentRatio = silenced.map(\.reading.speechRatio).max(),
+           let minSpeechRatio = speech.map(\.reading.speechRatio).min() {
+            lines.append(String(
+                format: "    占比两批之间的余量：判静音最大 %.4f → 判有声最小 %.4f（阈值 %.2f 落在两者之间%s）",
+                maxSilentRatio, minSpeechRatio, SpeechGate.minSpeechRatio,
+                minSpeechRatio > maxSilentRatio ? "" : "——⚠️ 两批交叠，这条阈值在这段录音上分不开"
+            ))
+        }
+
+        // 边界窗：真正被阈值决定的就是这几窗。它们过或不过，改阈值就会改结论
+        let borderline = rows.enumerated().filter { _, row in
+            let r = row.reading
+            return (r.speechRatio >= 0.05 && r.speechRatio < 0.20) || (r.speech > 0 && r.speech < SpeechGate.speechCeiling * 3)
+        }
+        lines.append("")
+        if borderline.isEmpty {
+            lines.append("  边界窗：一个都没有（两批之间没有窗落在阈值附近，这段录音上阈值怎么选都不改结论）")
+        } else {
+            lines.append("  边界窗 \(borderline.count) 个（阈值稍微一动，结论就变的就是它们）：")
+            for (index, row) in borderline {
+                lines.append("    #\(index + 1) @\(row.start)ms \(row.reading.summaryLine) → \(row.verdict.label)")
+            }
+        }
+        return lines
+    }
+
+    /// 段的起止时间，毫秒三位小数，形如 `9.600–19.600s`。给脚本读的。
+    ///
+    /// 之所以不直接用 `startTimeMillis`：那个是整数毫秒，同一句话在两趟里
+    /// 差几十毫秒时读起来是「9600 对 9637」，不如小数直观；而判据要的是
+    /// 「差得比 400ms 还小吗」，小数形式一眼能看出来
+    private static func millisRange(_ segment: TranscriptSegment) -> String {
+        String(format: "%.3f–%.3fs",
+               Double(segment.startTimeMillis) / 1000, Double(segment.endTimeMillis) / 1000)
+    }
+
+    // MARK: - 静音门控（P12-2）
+
+    /// 门控这一趟的账。**四个数缺一不可**（P12-2 验收 ②）：
+    /// 跳过率（跳过/总窗）、CPU 秒数、解码窗数、段数/字数（后者在 `run` 的
+    /// 「结果」那一段，与门控无关，不对在这里重复打）。
+    ///
+    /// 其中 `transcriptionSeconds.count`（= 真的解了几窗）与
+    /// `windowsTaken - windowsSkipped` **必须相等**，这条恒等式是「跳过解码」
+    /// 与「解完再丢」的分水岭：后者跳过数照样涨，但解码数一个不少。
+    /// 断言它的地方在探针脚本里（`tools/probes/p12_2_speech_gate.sh`），
+    /// 不是在这里——这里只把两个数摆出来
+    private static func gateSection(_ round: Round) -> [String] {
+        guard let gate = round.gate else { return ["─── 静音门控：这一趟没有记录 ───"] }
+        var lines = ["─── 静音门控（P12-2：静音不进模型）───"]
+        lines.append(String(
+            format: "  开关：%@ · 判据：语音帧占比<%.2f 且 p90<%.5f",
+            gate.policy.label, SpeechGate.minSpeechRatio, SpeechGate.speechCeiling
+        ))
+        lines.append(String(
+            format: "  取窗 %d · 跳过 %d（%.1f%%）· 跳过音频 %.1f 秒 · 真的解了 %d 窗",
+            gate.windowsTaken, gate.windowsSkipped, gate.skipRate * 100,
+            gate.skippedAudioSeconds, round.transcriptSeconds.count
+        ))
+        let cpu = round.transcriptSeconds.reduce(0, +)
+        lines.append(String(
+            format: "  转写耗时合计 %.1f 秒（CPU·只算真解码的窗）· 离线全程 %.1f 秒（墙钟）",
+            cpu, round.wallSeconds
+        ))
+        if gate.skipRate > 0, !round.gateLog.isEmpty {
+            let shown = min(round.gateLog.count, 5)
+            lines.append("  跳过的窗（前 \(shown)/\(gate.windowsSkipped) 条）：")
+            for entry in round.gateLog.prefix(shown) { lines.append("    \(entry)") }
+        }
         return lines
     }
 
@@ -652,6 +921,7 @@ enum WhisperWindowFileRun {
             samples: samples,
             engine: engine,
             firstWindowSeconds: options.firstWindowSeconds,
+            stepSeconds: options.stepSecondsOverride ?? WhisperWindowPipeline.stepSeconds,
             initialPrompt: resolvedPrompt
         ) { facts in
             let startMillis = facts.startMillis
@@ -674,7 +944,10 @@ enum WhisperWindowFileRun {
                     fromMillis: startMillis ?? 0, toMillis: facts.windowEndMillis
                 ),
                 footprintMB: footprint,
-                note: facts.isFinishWindow ? "（收尾窗：录音最后那一段补转）" : ""
+                skippedSilence: facts.skippedSilence,
+                note: facts.skippedSilence
+                    ? "（静音·跳过解码）"
+                    : (facts.isFinishWindow ? "（收尾窗：录音最后那一段补转）" : "")
             ))
             round.maxFootprintMB = max(round.maxFootprintMB, footprint)
 
@@ -731,6 +1004,8 @@ enum WhisperWindowFileRun {
         round.confidences = result.confidences
         round.hallucinations = result.hallucinations
         round.wallSeconds = result.wallSeconds
+        round.gate = result.gate
+        round.gateLog = result.gateLog
         return round
     }
 
@@ -1073,14 +1348,17 @@ enum WhisperWindowFileRun {
 
     // MARK: - 输出
 
-    private static func statsLine(_ round: Round) -> String {
+    /// `stepSeconds` 传**实际生效**的那个：占用率 = 单窗耗时 / 步长，步长填错的
+    /// 话这个数会整片偏掉（参照臂用 `--step 3.0` 跑时，按 9.6 算出来是 180%，
+    /// 实际该是 576%）
+    private static func statsLine(_ round: Round, stepSeconds: Double) -> String {
         guard !round.transcriptSeconds.isEmpty else { return "Whisper 滑窗：还没转过一窗" }
         let sorted = round.transcriptSeconds.sorted()
         let mean = round.transcriptSeconds.reduce(0, +) / Double(round.transcriptSeconds.count)
         return String(
             format: "Whisper 滑窗 %d 窗 · 单次转写 均 %.2f / 中位 %.2f / 最大 %.2f 秒 · 步长 %.1f 秒 → 占用 %.0f%% · 守卫触发 %d 次 · 空转 %d 轮",
             round.transcriptSeconds.count, mean, sorted[sorted.count / 2], sorted.last ?? 0,
-            WhisperWindowPipeline.stepSeconds, mean / WhisperWindowPipeline.stepSeconds * 100,
+            stepSeconds, mean / stepSeconds * 100,
             round.guardTrips, round.windows.filter { $0.startMillis == nil }.count
         )
     }

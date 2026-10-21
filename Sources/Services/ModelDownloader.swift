@@ -219,8 +219,18 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
         /// 属性」，装进 `any Error` 之后再问走的是 NSError 桥接，与它无关，于是打出
         /// `The operation couldn't be completed. (…Failure error 0.)`（2026-10-13
         /// 现场就是这句）。**认了 `LocalizedError` 并给出 `errorDescription`，
-        /// 桥接才会去问它**——对照实验（`/tmp/p12b_bridge.swift` 那种两行 enum）：
-        /// 无 conformance → 天书；加 conformance → 人话。
+        /// 桥接才会去问它**。
+        ///
+        /// 机制说清（这就是那个对照实验的结论，不需要现场）：`any Error` 在需要
+        /// `localizedDescription` 时，对**结构化**错误走的是
+        /// `_bridgeToObjectiveC()` → NSError 这条路；NSError 的
+        /// `localizedDescription` 只认 `LocalizedError.errorDescription`
+        /// （以及 `NSLocalizedDescriptionKey`），**不认**一个恰好同名的自定义属性。
+        /// 所以「有没有 conform」是分水岭，属性叫什么名字无关。
+        ///
+        /// 想亲手复核的话，`--model-download-selftest` 的 `【九之零】`那一组把
+        /// 这件事造了出来：两个只差一个 conformance 的类型，各装进 `any Error`
+        /// 再问一次 `localizedDescription`，一个给天书、一个给人话
         /// 内容**和上面那句是同一句话**，不另写一份文案（两份迟早各说各话）
         var errorDescription: String? { localizedDescription }
     }
