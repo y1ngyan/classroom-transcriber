@@ -202,6 +202,24 @@ struct SettingsView: View {
                     .textStyle(Theme.Text.caption)
                     .foregroundStyle(Theme.textSecondary)
 
+                // 静音窗跳过（P12-3）。**不藏在「后端 = whisper」后面**：这条只看
+                // 转录走没走 whisper，和「录不录」无关；藏起来会让默认的后端用户
+                // 以为设置页里根本没有这个开关。措辞必须写出代价——「关掉」是
+                // 一次显式选择，不是免费的：静音窗会重新送进模型，而那正是
+                // 幻觉句的来源
+                LabeledField(label: "静音窗跳过（省算力）") {
+                    Toggle("", isOn: $store.skipSilentWindows)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                        .frame(width: 360, alignment: .leading)
+                }
+
+                Text("开启后整窗都判为静音（没人说话）的窗口不进模型，省算力；"
+                        + "关闭后静音窗也会送进模型，可能重新长出「像真话的幻觉句」，"
+                        + "但不会因为门控判错而漏掉小声说话")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
                 note(
                     "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
                         + "纯本地规则判定，不联网、不调模型。"

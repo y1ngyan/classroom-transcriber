@@ -41,6 +41,12 @@ enum AppConfig {
         /// 是否把术语表作为 whisper 的 `initial_prompt` 送进去（P12-1）。
         /// 缺省见 `AppConfig.glossaryPromptEnabled`——那里的注释写了为什么
         var glossaryPrompt: Bool?
+        /// 静音窗跳过（P12-3）。**缺省开**，见 `AppConfig.speechGatePolicy`。
+        ///
+        /// 老配置里没有这一项时解出来是 nil —— 那是「从没配过」，必须走缺省（开），
+        /// 不能因为字段缺失就默默关掉：门控挡的是已实测四次的静音幻觉，
+        /// 关掉之后静音窗会重新送进模型，长出像真话的句子
+        var speechGate: Bool?
     }
 
     private static let configURL: URL = {
@@ -324,6 +330,40 @@ enum AppConfig {
         return fileValue
     }
 
+    // MARK: - 静音窗跳过（P12-3）
+
+    /// 静音门控的开关，**两步裁决**：环境变量设了 → 按它（探针/开发的强制覆盖）；
+    /// 没设 → 设置页那一项；文件里也没有这一项 → **开**。
+    ///
+    /// **为什么环境变量优先**：它是探针的强制覆盖。A/B 要拿同一份二进制、
+    /// 同一条录音、只换这一个变量跑两臂，让「设置页里存的是什么」参与进来
+    /// 就让两臂不再只差一个变量了。所以探针设了它就必须盖过生产设置；
+    /// 没设时才轮到用户在界面上选的那个值。两者不打架的判据在
+    /// `AppConfig.selfTest()` 与 `SpeechGate.selfTest()` 里各钉了一组边界值。
+    ///
+    /// **为什么缺省开**：门控挡的是**已经实测过四次**的静音幻觉（见 `SpeechGate`
+    /// 类型注释）；它省的是算力，而算力是用户自己的。缺省关会让「录一节课、
+    /// 回来看转录」在没人说话的地方多出一堆像真话的句子——那是内容层面的坏，
+    /// 比多花几秒算力严重得多。但判据在这条录音上只有 0.4 dB 的 p90 余量，
+    /// 「人离麦很远、说话很小声」那个边界没标定过（`SpeechGate` 末尾的 ⚠️），
+    /// 所以**必须给用户一个关得掉的开关**——这就是 P12-3 的存在理由。
+    static var speechGatePolicy: SpeechGatePolicy {
+        SpeechGatePolicy.resolve(
+            fileValue: store.current.speechGate,
+            envValue: ProcessInfo.processInfo.environment[SpeechGatePolicy.environmentKey]
+        )
+    }
+
+    /// 上面那条的**纯函数**形式（布尔）。
+    ///
+    /// 抽出来的理由和 `glossaryPromptEnabled(fileValue:envValue:)` 一样：自检要断言
+    /// 「文件里没这一项 → 开」，而真实 accessor 读的是本进程的配置和环境变量——
+    /// 拿它断言缺省值只能撞运气。设置页的 `reload()` 也走这一条，两处用的是同一个
+    /// 纯函数，不会出现「界面缺省」和「无头缺省」各写一个 `?? true` 然后分家
+    static func speechGateEnabled(fileValue: Bool?, envValue: String?) -> Bool {
+        SpeechGatePolicy.resolve(fileValue: fileValue, envValue: envValue) == .on
+    }
+
     static var configFilePath: String { configURL.path }
 
     /// 供 UI 提示用：哪些能力当前可用
@@ -393,6 +433,9 @@ enum AppConfig {
         // 「落盘往返」，写一个和缺省相同的值就分不出「存进去了」和
         // 「没存、读的时候回落到了缺省」——那正是这条自检要抓的 bug
         seed.glossaryPrompt = true
+        // 同理：静音窗跳过的缺省是 true，这里写 false。写 true 的话
+        // 「没存进去」和「存对了」读出来一模一样
+        seed.speechGate = false
 
         do {
             try store.save(seed)
@@ -419,6 +462,44 @@ enum AppConfig {
         let halfConfigIsNil = endpoint(explicit: nil, bucket: "b", region: nil) == nil
         lines.append("  \(explicitWins && blankIsNotExplicit && halfConfigIsNil ? "✅" : "❌") 端点规则：显式优先、空白不算显式、缺 bucket/region 给 nil")
 
+        // 静音窗跳过（P12-3）：持久化与优先级。**三条各自钉一个真实失效形态**：
+        //
+        //   ① 缺省：老配置里没有 `speechGate` 这一项 → 必须读成**开**。
+        //      不能因为升级后字段缺失就默默关掉（那等于把静音幻觉放回来）。
+        //      老配置必须是一份**真的能解出来的**旧 JSON：随手写一个坏文件
+        //      也能得到 nil → 也读成开，那样这条判据就是跟着被测缺省走的空转
+        //      （所以同时断言旧配置里的其它字段读出来了）。
+        //   ② 落盘往返：写 false 重读得 false、写 true 重读得 true。
+        //      两次都用一个**新建的 Store** 从磁盘读，而不是复用内存副本——
+        //      复用内存的话「只改内存没写盘」照样绿。
+        //   ③ 优先级：环境变量设了就按它，没设才看文件；空白视同没设。
+        //
+        // **这一段放在「3. 真的落盘了吗」之前**：那一节在文件读不回来时直接
+        // `return`。放它后面的话，把写盘那一行去掉（变异②）会让整节提前返回，
+        // 这三条根本轮不到打印——「红」变成了「没有这一行」，而不是「这一行是 ❌」。
+        let legacyURL = tmpDir.appendingPathComponent("legacy-config.json")
+        let legacyJSON = #"{"deepSeekAPIKey": "sk-legacy-sentinel", "autoFactCheck": true}"#
+        let legacyWrote = (try? legacyJSON.write(to: legacyURL, atomically: true, encoding: .utf8)) != nil
+        let legacyConfig = Store(url: legacyURL).current
+        let legacyDecoded = legacyWrote && legacyConfig.deepSeekAPIKey == "sk-legacy-sentinel"
+        let legacyDefault = SpeechGatePolicy.resolve(fileValue: legacyConfig.speechGate, envValue: nil)
+        lines.append("  \(legacyDecoded && legacyDefault == .on ? "✅" : "❌") 静音窗跳过·老配置没有该字段 → 读出来是\(legacyDefault.label)（\(legacyDecoded ? "旧 JSON 正常解出，其它字段在" : "旧 JSON 没解出来，这条不成立")）")
+
+        let gateURL = tmpDir.appendingPathComponent("speech-gate.json")
+        var gateSeed = Config()
+        gateSeed.speechGate = false
+        let wroteOff = (try? Store(url: gateURL).save(gateSeed)) != nil
+        let rereadOff = Store(url: gateURL).current.speechGate
+        gateSeed.speechGate = true
+        let wroteOn = (try? Store(url: gateURL).save(gateSeed)) != nil
+        let rereadOn = Store(url: gateURL).current.speechGate
+        lines.append("  \(wroteOff && rereadOff == false && wroteOn && rereadOn == true ? "✅" : "❌") 静音窗跳过·落盘往返：写 false → 重读 \(rereadOff.map { $0 ? "true" : "false" } ?? "nil")，写 true → 重读 \(rereadOn.map { $0 ? "true" : "false" } ?? "nil")")
+
+        let envOffWins = SpeechGatePolicy.resolve(fileValue: true, envValue: "off")
+        let envOnWins = SpeechGatePolicy.resolve(fileValue: false, envValue: "1")
+        let blankIsUnset = SpeechGatePolicy.resolve(fileValue: false, envValue: "   ")
+        lines.append("  \(envOffWins == .off && envOnWins == .on && blankIsUnset == .off ? "✅" : "❌") 静音窗跳过·优先级：环境变量 off 盖过文件 true → \(envOffWins.label)，环境变量 1 盖过文件 false → \(envOnWins.label)，空白视同没设 → 按文件 \(blankIsUnset.label)")
+
         // 3. 真的落盘了吗——重新从文件里读一遍，不信内存
         let onDisk: Config? = {
             guard let data = try? Data(contentsOf: store.url) else { return nil }
@@ -441,6 +522,7 @@ enum AppConfig {
             ("autoFactCheck", onDisk.autoFactCheck == seed.autoFactCheck),
             ("transcriptionBackend", onDisk.transcriptionBackend == seed.transcriptionBackend),
             ("glossaryPrompt", onDisk.glossaryPrompt == seed.glossaryPrompt),
+            ("speechGate", onDisk.speechGate == seed.speechGate),
         ]
         let lost = fields.filter { !$0.1 }.map(\.0)
         lines.append("  \(lost.isEmpty ? "✅" : "❌") \(fields.count) 个字段全部落盘（漏掉：\(lost.isEmpty ? "无" : lost.joined(separator: ", "))）")
@@ -549,7 +631,8 @@ enum AppConfig {
           "questionSensitivity": "normal",
           "autoFactCheck": false,
           "transcriptionBackend": "apple",
-          "glossaryPrompt": true
+          "glossaryPrompt": true,
+          "speechGate": true
         }
         """
         try? FileManager.default.createDirectory(

@@ -45,6 +45,12 @@ final class SettingsStore {
     /// 只对 whisper 后端有效；Apple 后端那条走 `contextualStrings`，本来就在送
     var glossaryPrompt = false
 
+    /// 静音窗跳过（P12-3）。**默认开**：关掉之后静音窗也会送进模型，
+    /// 可能重新长出「像真话的幻觉句」——这是代价，界面上要说明白。
+    /// 判据在长静音那条录音上只有 0.4 dB 的 p90 余量，「人离麦很远、
+    /// 说话很小声」没标定过，所以用户必须有办法关掉它
+    var skipSilentWindows = true
+
     // MARK: - 状态
 
     private(set) var saveMessage = ""
@@ -119,6 +125,11 @@ final class SettingsStore {
         // 改了一处另一处不会跟着动，而两处不一致在界面上看不出来
         glossaryPrompt = AppConfig.glossaryPromptEnabled(
             fileValue: config.glossaryPrompt, envValue: nil)
+        // 同上：界面显示的是**文件里的值**（没写这一项时就是缺省开），
+        // 不含环境变量覆盖——那个用户在界面上改不动，显示出来只会让人对
+        // 一个改不动的值发懵（`AppConfig.current` 的注释里同理）
+        skipSilentWindows = AppConfig.speechGateEnabled(
+            fileValue: config.speechGate, envValue: nil)
     }
 
     var configFilePath: String { AppConfig.configFilePath }
@@ -145,6 +156,7 @@ final class SettingsStore {
         config.autoFactCheck = autoFactCheck
         config.transcriptionBackend = backend.rawValue
         config.glossaryPrompt = glossaryPrompt
+        config.speechGate = skipSilentWindows
 
         do {
             try AppConfig.save(config)
@@ -171,6 +183,8 @@ final class SettingsStore {
             || backend != .of(config.transcriptionBackend)
             || glossaryPrompt != AppConfig.glossaryPromptEnabled(
                 fileValue: config.glossaryPrompt, envValue: nil)
+            || skipSilentWindows != AppConfig.speechGateEnabled(
+                fileValue: config.speechGate, envValue: nil)
             || trimmed(deepSeekAPIKey) != config.deepSeekAPIKey
             || trimmed(searchAPIKey) != config.searchAPIKey
             || trimmed(cosBucket) != config.cosBucket

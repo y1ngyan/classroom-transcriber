@@ -54,7 +54,14 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         var skippedSilence = false
     }
 
-    /// 静音门控的开关（见 `SpeechGatePolicy`）。缺省从环境变量读（缺省开）
+    /// 静音门控的开关（见 `SpeechGatePolicy`）。
+    ///
+    /// 缺省是 `fromConfig()`，**不是 `fromEnvironment()`**：P12-3 之前只有环境变量
+    /// 这一层，用户在设置页里根本没有这个开关（那正是这一包要修的）。现在是
+    /// 「环境变量设了就按它（探针强制覆盖）→ 否则设置页 → 否则开」。
+    /// 实时链路（`TranscriptionEngine`）与课后重转（`WhisperFileTranscription`）
+    /// **都从这里取窗**，所以这一行同时决定两条链路——不要在其中一条调用处
+    /// 另传一个写死的策略
     let gatePolicy: SpeechGatePolicy
 
     /// 交给**合并器**的步长（`WhisperMergeInput.stepMillis`）。
@@ -112,7 +119,7 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         segments: [TranscriptSegment] = [],
         capacitySeconds: Double = 15,
         initialPrompt: String? = nil,
-        gatePolicy: SpeechGatePolicy = .fromEnvironment(),
+        gatePolicy: SpeechGatePolicy = .fromConfig(),
         mergeStepMillis: Int = WhisperWindowPipeline.stepMillis
     ) {
         self.segments = segments

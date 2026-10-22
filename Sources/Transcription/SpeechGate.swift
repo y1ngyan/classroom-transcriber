@@ -331,6 +331,22 @@ extension SpeechGate {
         check("环境变量名是 CLASSROOM_SPEECH_GATE",
               SpeechGatePolicy.environmentKey == "CLASSROOM_SPEECH_GATE", SpeechGatePolicy.environmentKey)
 
+        // P12-3：设置页那一层。**每一条都钉一个方向**——环境变量能盖过设置页
+        // 的两个方向都要验：只验「能关」的话，把环境变量写成单向覆盖
+        // （只会关、不会开）也照样绿，而那种实现会让「探针强制开」失效
+        check("没环境变量、文件也没值 → 缺省开",
+              SpeechGatePolicy.resolve(fileValue: nil, envValue: nil) == .on)
+        check("设置页关掉 → 关（用户关得掉，这是 P12-3 的目的）",
+              SpeechGatePolicy.resolve(fileValue: false, envValue: nil) == .off)
+        check("设置页打开 → 开",
+              SpeechGatePolicy.resolve(fileValue: true, envValue: nil) == .on)
+        check("环境变量 off 盖过设置页「开」（探针要能强制关）",
+              SpeechGatePolicy.resolve(fileValue: true, envValue: "off") == .off)
+        check("环境变量 on 盖过设置页「关」（两个方向都要能盖）",
+              SpeechGatePolicy.resolve(fileValue: false, envValue: "on") == .on)
+        check("空白环境变量视同没设 → 回到设置页",
+              SpeechGatePolicy.resolve(fileValue: false, envValue: "   ") == .off)
+
         lines.append(failures == 0
             ? "✅ 静音门控自检通过（\(checked) 条）"
             : "❌ 静音门控自检未通过（\(failures)/\(checked) 条红）")
@@ -354,22 +370,62 @@ extension SpeechGate {
 /// 与 `URLFallbackPolicy`（P12-1b）同形：环境变量、缺省开、关的写法有穷枚举。
 /// 缺省开是因为它挡的是**已经实测过四次**的静音幻觉——那是个 bug 级别的现象，
 /// 不是「可选的优化」；关掉留给 A/B 与排障。
+///
+/// **P12-3 起多了一层设置页**：`CLASSROOM_SPEECH_GATE` 从「唯一的开关」变成
+/// 「探针/开发用的强制覆盖」，没设时才看用户在设置页里选的值（缺省仍是开）。
+/// 在这之前，用户在界面上关不掉它——而判据在这条录音上只有 0.4 dB 的 p90 余量，
+/// 「人离麦很远、说话很小声」那条边界没标定过，于是存在一种没量过的场景：
+/// 门控把真人说话整窗跳过，而用户没有任何办法把它关掉。裁决顺序见 `resolve`。
 enum SpeechGatePolicy: Equatable, Sendable {
     case on
     case off
 
+    /// 探针/开发的**强制覆盖**。设了它就必须按它走，盖过设置页——
+    /// 两臂 A/B 要的是「同一份二进制、同一条录音、只差这一个变量」，
+    /// 让用户存的值参与进来，两臂就不再只差一个变量了
     static let environmentKey = "CLASSROOM_SPEECH_GATE"
 
+    /// 两步裁决的**纯函数**本体。P12-3 把它抽出来，因为三处要问同一件事：
+    /// 生产管线（`fromConfig`）、设置页（`AppConfig.speechGateEnabled`）、
+    /// 自检。三处各写一遍 `?? true`，改一处另两处不会跟着动，而分家之后
+    /// 界面上看不出来（界面显示「开」、生产却是关）。
+    ///
+    /// - 环境变量**设了且非空白** → 按它（`0/off/false/no` 是关，其余是开）；
+    ///   空白视同没设，与 `AppConfig.value(env:file:)` 的口径一致。
+    /// - 没设 → 文件里的值；文件里**也没有这一项**（老配置）→ **开**。
+    ///
+    /// 缺省开不是随手定的：门控挡的是已实测四次的静音幻觉，缺省关 =
+    /// 把那个 bug 放回默认路径。判据的余量薄（那条录音上 p90 只差 0.4 dB）、
+    /// 「人离麦很远的小声课堂」没标定过，所以**用户要能关**——但关是一条
+    /// 显式选择，不是缺省
+    static func resolve(fileValue: Bool?, envValue: String?) -> SpeechGatePolicy {
+        if let raw = envValue {
+            let clean = raw.trimmingCharacters(in: .whitespaces).lowercased()
+            if !clean.isEmpty {
+                switch clean {
+                case "0", "off", "false", "no": return .off
+                default: return .on
+                }
+            }
+        }
+        guard let fileValue else { return .on }
+        return fileValue ? .on : .off
+    }
+
+    /// 只看环境变量（缺省开）。保留这个入口是因为自检与历史探针按它断言
+    /// 「环境变量的写法有穷」；生产走 `fromConfig()`，它多看了设置页那一层
     static func fromEnvironment(
         _ environment: [String: String] = ProcessInfo.processInfo.environment
     ) -> SpeechGatePolicy {
-        guard let raw = environment[environmentKey]?.trimmingCharacters(in: .whitespaces).lowercased() else {
-            return .on
-        }
-        switch raw {
-        case "0", "off", "false", "no": return .off
-        default: return .on
-        }
+        resolve(fileValue: true, envValue: environment[environmentKey])
+    }
+
+    /// 生产缺省：环境变量优先，其次设置页，最后缺省开。
+    ///
+    /// **不要把它换回 `fromEnvironment()`**：那样设置页的开关对生产管线完全无效，
+    /// 用户关掉了、门控还在跳，而且没有任何报错——这正是 P12-3 要修的那件事
+    static func fromConfig() -> SpeechGatePolicy {
+        AppConfig.speechGatePolicy
     }
 
     var label: String { self == .on ? "开" : "关" }

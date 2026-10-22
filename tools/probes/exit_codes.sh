@@ -30,7 +30,13 @@
 # P12-2 收尾又把 `--config-selftest` 从 `run` 升成 `run_assert_env`（**第 3 条**）：
 # 那一节唯一的底线判据「真实配置全程未被触碰」红了进程也是 exit=0，
 # 原先只看退出码等于没测；现在断言在字样上，并单独套隔离 HOME。
-# 所以现在是 **23 条 `run_assert` + 3 条 refuse + 1 条不落盘 + 1 条超时 = 28 条**。
+# P12-3 又加了 **2 条**：①`--config-selftest` 的「静音窗跳过·老配置没有该字段 →
+# 读出来是开」（变异①把缺省改成 false 就是靠它红的；那一节红不红进程照样 exit=0，
+# 所以必须断言在字样上）；②同一段合成夹具再跑一遍、**只改用户设置**
+# （`speechGate=false`，不设环境变量）也必须一窗不跳——证明开关是从设置页那条
+# 持久化链走到生产取窗的，而不是只有环境变量那一层。
+# 所以现在是 **26 条输出断言（25 条 `run_assert`/`run_assert_env` + 1 条手工断言的
+# 设置页路径） + 3 条 refuse + 1 条不落盘 + 1 条超时 = 31 条**。
 #
 # P12-2 那两条**为什么必须在这里**：门控的判据（跳过率 / 不许丢真人说话）
 # 在真实录音上验，量级是十几分钟，归 `tools/probes/p12_2_speech_gate.sh`；
@@ -67,7 +73,7 @@
 #   WITH_MIC=1 ./tools/probes/exit_codes.sh # 加上麦克风入口（会独占麦克风）
 #   WITH_NET=1 ./tools/probes/exit_codes.sh # 加上要联网/要密钥的入口
 #
-# 退出码 0 = 跑到的入口全部 exit=0、且二十八条断言都命中（23 条 `run_assert`/`run_assert_env` +
+# 退出码 0 = 跑到的入口全部 exit=0、且三十一条断言都命中（26 条输出断言 +
 # 3 条「必须拒绝」+ 1 条「被拦住时不落盘」+ 1 条「超时的退出码必须是 124」——
 # 后五条期望的本来就不是 0）。逐条计数见文件开头那段。
 #
@@ -611,6 +617,13 @@ run "--manual-check-selftest"       --manual-check-selftest
 CFGFIX="$(mktemp -d)"
 run_assert_env "--config-selftest" "✅ 真实配置全程未被触碰（指纹一致" \
   "CFFIXED_USER_HOME=$CFGFIX" --config-selftest
+# P12-3：静音窗跳过在**老配置**（没有该字段）上必须读成「开」。这一条是
+# 变异①（把缺省改成 false）的落点——自检红不红进程都 exit=0，所以只能断言字样。
+# 它同时钉住「缺省开」这个决定：哪天有人觉得「关掉更省事」顺手翻默认，
+# 这条会红，而不是等用户的静音段重新长出幻觉句才发现
+run_assert_env "--config-selftest 静音窗跳过缺省" \
+  "✅ 静音窗跳过·老配置没有该字段 → 读出来是开" \
+  "CFFIXED_USER_HOME=$CFGFIX" --config-selftest
 rm -rf "$CFGFIX"
 run "--conv-probe"                  --conv-probe
 run "--wav-selftest"                --wav-selftest
@@ -627,7 +640,7 @@ run "--whisper-buffer-selftest"     --whisper-buffer-selftest
 # 门控的**判据本体**（纯函数／合成波形）：阈值上下、同一段音频的窗口边界、
 # 以及那条已知误判（连续 0.006 平音被当成静音）。不加载模型、不碰麦克风，
 # 所以放在这一段。断言抓「N 条」——用例掉到 0 也照样 exit=0
-run_assert "--speech-gate-selftest" "✅ 静音门控自检通过（27 条）" --speech-gate-selftest
+run_assert "--speech-gate-selftest" "✅ 静音门控自检通过（33 条）" --speech-gate-selftest
 
 echo
 echo "════ 要真模型的入口（会加载 539MB 模型）════"
@@ -682,6 +695,36 @@ run_assert "--whisper-window-file 门控关掉一窗不跳" \
   "取窗 6 · 跳过 0（0.0%）· 跳过音频 0.0 秒 · 真的解了 6 窗" \
   --whisper-window-file "$GATEFIX/gate.wav" --head 24
 unset CLASSROOM_SPEECH_GATE
+
+# ── P12-3：设置页那条路（**不设环境变量**）──
+#
+# 上一条证明的是「环境变量能把门关上」；这一条证明的是「**用户在设置页里关**
+# 也能关」——那是 P12-3 存在的理由。判据必须走**持久化链**：把
+# `speechGate: false` 写进用户配置（设置页保存后文件就长这样），不设
+# `CLASSROOM_SPEECH_GATE`，同一段夹具必须一窗都不跳。
+#
+# 隔离用 `CFFIXED_USER_HOME`（**不是 `HOME=`**：macOS 上 Foundation 的
+# `.applicationSupportDirectory` 根本不看 `$HOME`，见 `AppConfig.selfTest`）。
+# 它同时把模型目录挪走了，所以 `CLASSROOM_MODELS_DIR` 单独指回真目录——
+# 不指回的话这里会以「模型缺失」退出，而那和门控无关，红得没有意义。
+GATECFG="$(mktemp -d)"
+mkdir -p "$GATECFG/Library/Application Support/ClassroomTranscriber"
+printf '{"speechGate": false}' \
+  > "$GATECFG/Library/Application Support/ClassroomTranscriber/config.json"
+GATE_MODELS="${CLASSROOM_MODELS_DIR:-$HOME/Library/Application Support/ClassroomTranscriber/models}"
+ASSERTS=$((ASSERTS + 1))
+out="$(CFFIXED_USER_HOME="$GATECFG" CLASSROOM_MODELS_DIR="$GATE_MODELS" \
+  with_limit "$BIN" --whisper-window-file "$GATEFIX/gate.wav" --head 24 2>&1)"
+code=$?
+if [ "$code" = "0" ] && printf '%s' "$out" | grep -qF "取窗 6 · 跳过 0（0.0%）· 跳过音频 0.0 秒 · 真的解了 6 窗"; then
+  printf '  ✅ %-34s exit=0 · 断言命中（设置页关 → 一窗不跳）\n' "--whisper-window-file 设置页关闭门控"
+  PASS=$((PASS + 1))
+else
+  printf '  ❌ %-34s exit=%s，或输出里没有「设置页关 → 一窗不跳」的读数\n' "--whisper-window-file 设置页关闭门控" "$code"
+  printf '       %s\n' "$(printf '%s' "$out" | grep -F '取窗 ' | head -1 | sed 's/^ *//')"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$GATECFG"
 rm -rf "$GATEFIX"
 
 if [ -n "$SAMPLE" ]; then
