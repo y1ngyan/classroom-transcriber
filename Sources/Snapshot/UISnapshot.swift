@@ -119,11 +119,13 @@ enum UISnapshot {
         // ── 渲染 ──
         // `tallHeight` 只给「关键内容在折叠线以下」的屏：
         //   · 术语表 —— 页头是三段说明，760pt 一屏只拍得到说明，拍不到术语列表；
-        //   · 转录 —— 第四段是**正在转写**的那一段（`isHighlighted` 是本包的
-        //     改动之一），760pt 一屏时它落在底部录制条后面，一行都看不见。
+        //   · 转录 —— 760pt 一屏时第四段（正在转写、`isHighlighted`）落在底部
+        //     栏后面，所以加高宿主。高度只要让**整张列表装得进滚动区**即可：
+        //     装得下时列表按自身高度停在顶部，快照展示的就是真实使用中
+        //     「滚到末尾」的那一个静止状态，且最后一张卡片与底栏之间留出安全区。
         // 离屏宿主不能滚（见 `renderBottom` 的注释），只能把宿主加高再截最后一段
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
-            ("transcription", AnyView(TranscriptionView().environment(populated)), 900),
+            ("transcription", AnyView(TranscriptionView().environment(populated)), 980),
             ("fact-check", AnyView(FactCheckView().environment(populated)), nil),
             ("notes", AnyView(NotesView().environment(populated)), nil),
             ("glossary", AnyView(GlossaryView().environment(populated)), 2000),
@@ -208,7 +210,51 @@ enum UISnapshot {
         failure.check(darkLayers.isEmpty, "深色一级/二级都不带阴影",
                       detail: darkLayers.isEmpty ? "" : "（多出 \(darkLayers.count) 层）")
 
-        // ── 自检 ⑤：亮暗真的渲成了两套（色板没被忽略）──
+        // ── 自检 ⑤：正文补充灰字对比度 ──
+        //
+        // 判据是 WCAG 的 AA 正文标准：sRGB 相对亮度算出的对比度 ≥ 4.5:1。
+        // 三个底都测——同一档灰字会同时出现在页面底和两级卡片底上，
+        // 只测白底会漏掉卡片里最暗的那一档。
+        // 变异实验：把 `textSupporting` 换回 `textSecondary`（#86868B），
+        // 亮色三档会掉到 3.4–3.6:1，这一组必须红
+        for scheme in [ColorScheme.light, .dark] {
+            let schemeName = scheme == .light ? "亮色" : "深色"
+            guard let text = srgbComponents(Theme.textSupporting, scheme: scheme) else {
+                failure.check(false, "\(schemeName) textSupporting 能解析成 sRGB")
+                continue
+            }
+            let backgrounds: [(String, Color)] = [
+                ("页面底", Theme.background),
+                ("卡片底", Theme.Surface.card),
+                ("抬高卡片底", Theme.Surface.cardElevated),
+            ]
+            for (backgroundName, background) in backgrounds {
+                guard let backgroundRGB = srgbComponents(background, scheme: scheme) else {
+                    failure.check(false, "\(schemeName) \(backgroundName) 能解析成 sRGB")
+                    continue
+                }
+                let ratio = contrastRatio(text, backgroundRGB)
+                failure.check(ratio >= 4.5,
+                              "\(schemeName) textSupporting / \(backgroundName) 对比度 ≥ 4.5:1",
+                              detail: String(format: "（%.2f:1）", ratio))
+            }
+        }
+
+        // ── 自检 ⑥：转录页底部安全区 ──
+        //
+        // 转录页的底部栏用 `safeAreaInset` 挂在列表上，预留量取
+        // `Theme.Control.floatingBarHeight`。这条判据盯的是那个常量：
+        // 它必须至少「胶囊高度 + 一级间距」，否则最后一张卡片会被压住。
+        // 变异实验：把 floatingBarHeight 改成 pillHeight，这条红
+        let requiredInset = Theme.Control.pillHeight + Theme.Spacing.md
+        failure.check(Theme.Control.floatingBarHeight >= requiredInset,
+                      "转录页底部预留 ≥ 胶囊高度 + Spacing.md",
+                      detail: String(format: "（%.0f ≥ %.0f + %.0f）",
+                                     Theme.Control.floatingBarHeight,
+                                     Theme.Control.pillHeight,
+                                     Theme.Spacing.md))
+
+        // ── 自检 ⑦：亮暗真的渲成了两套（色板没被忽略）──
         if let light = written["recordings-light.png"], let dark = written["recordings-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
             failure.check(lightLum > 0.9 && darkLum < 0.1,
@@ -218,7 +264,7 @@ enum UISnapshot {
             failure.check(false, "亮/暗两张能读出来做像素比对")
         }
 
-        // ── 自检 ⑥：每张非空 + 卡片真的从背景里分出来 ──
+        // ── 自检 ⑧：每张非空 + 卡片真的从背景里分出来 ──
         //
         // **这是 P13-1 那个「页头有数、下面空白」的直接判据**：只看文件
         // 大小会被一张白图骗过，所以按像素数「和页面底色不一样的点」。
@@ -532,6 +578,40 @@ enum UISnapshot {
         return pixels.backgroundLuminance()
     }
 
+    // MARK: - 对比度
+
+    /// 把 `Theme` 的动态色调到指定外观下解析成 sRGB 分量。
+    ///
+    /// `Theme.adaptive` 用的是 `NSColor(name:provider:)`，它的 provider 读的是
+    /// **当前绘制外观**——所以必须先 `performAsCurrentDrawingAppearance`
+    /// 再取颜色，否则两种外观会解析成同一个值，对比度自检就变成了空转
+    static func srgbComponents(_ color: Color, scheme: ColorScheme) -> (Double, Double, Double)? {
+        let appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        guard let appearance else { return nil }
+        var components: (Double, Double, Double)?
+        appearance.performAsCurrentDrawingAppearance {
+            guard let ns = NSColor(color).usingColorSpace(.sRGB) else { return }
+            components = (Double(ns.redComponent), Double(ns.greenComponent), Double(ns.blueComponent))
+        }
+        return components
+    }
+
+    /// WCAG 2.x 的相对亮度（sRGB 先做 gamma 展开再加权）
+    static func relativeLuminance(_ rgb: (Double, Double, Double)) -> Double {
+        func linear(_ component: Double) -> Double {
+            component <= 0.04045
+                ? component / 12.92
+                : pow((component + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(rgb.0) + 0.7152 * linear(rgb.1) + 0.0722 * linear(rgb.2)
+    }
+
+    static func contrastRatio(_ a: (Double, Double, Double),
+                              _ b: (Double, Double, Double)) -> Double {
+        let la = relativeLuminance(a), lb = relativeLuminance(b)
+        return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+    }
+
     // MARK: - 夹具
 
     /// 转录夹具：四段，覆盖「有提问 / 有存疑段 / 最后一段还没定稿」三种状态。
@@ -599,13 +679,18 @@ enum UISnapshot {
         return [verified, disputed, unverifiable]
     }
 
-    /// 术语表夹具：五条，覆盖「有别名 / 只有释义 / 二者都有」
+    /// 术语表夹具：五条，全部带真实别名。
+    ///
+    /// **刻意不留空的「误转写」**：空的 TextField 会把占位提示语
+    /// （「误转写，用「、」分隔（可留空）」）画在数据行里，看快照的人
+    /// 会把它读成一条假数据。P13-3 之前第 4 条就是这样。
+    /// 空别名的真实使用场景由编辑器本身的占位提示覆盖，快照不负责演它
     private static func glossaryFixture() -> [GlossaryEntry] {
         [
             GlossaryEntry(term: "梯度下降", aliases: ["梯度递减"], note: "一种一阶最优化算法"),
             GlossaryEntry(term: "学习率", aliases: ["learning rate"], note: "每次更新的步长"),
             GlossaryEntry(term: "反向传播", aliases: ["backprop"], note: "按链式法则逐层求梯度"),
-            GlossaryEntry(term: "卷积", aliases: [], note: "局部加权求和"),
+            GlossaryEntry(term: "卷积", aliases: ["convolution"], note: "局部加权求和"),
             GlossaryEntry(term: "过拟合", aliases: ["overfitting"], note: "训练集表现好、泛化差"),
         ]
     }

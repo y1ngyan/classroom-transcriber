@@ -23,8 +23,17 @@ enum Theme {
     static let textPrimary = adaptive(light: 0x1D1D1F, dark: 0xFFFFFF)
     /// 次要文字 #86868B
     static let textSecondary = adaptive(light: 0x86868B, dark: 0x98989D)
-    /// 三级文字 / 时间戳 #D2D2D7
+    /// 三级文字 #D2D2D7。只留给极次要信息（占位说明、装饰刻度）——
+    /// 白底上只有 1.4:1，任何需要读的字都不该用它
     static let textTertiary = adaptive(light: 0xD2D2D7, dark: 0x48484A)
+    /// 正文补充文字 #6E6E73 / #A1A1A6。
+    ///
+    /// **为什么单独一档**：`textSecondary`（#86868B）在白底上只有 3.4:1，
+    /// 放在卡片里当正文的补充说明（接口说明、释义、空状态引导）时肉眼发虚；
+    /// `textTertiary` 更浅，只够当「看一眼定位」的刻度。
+    /// 这一档按 AA 正文标准取值：白底 5.1:1、黑底 8.2:1，卡片底上也在
+    /// 4.9:1 以上（`--ui-snapshot` 里有对比度自检）。
+    static let textSupporting = adaptive(light: 0x6E6E73, dark: 0xA1A1A6)
     /// 分隔线 #D2D2D7
     static let separator = adaptive(light: 0xD2D2D7, dark: 0x38383A)
 
@@ -257,6 +266,24 @@ enum Theme {
         static let mono = TextStyle(
             name: "mono", size: 15, weight: .regular, tracking: 0, lineHeight: 20, monospaced: true
         )
+        /// `body` 的粗体变体。字号不动（17 那档），只把字重提到 semibold——
+        /// 术语表卡片里「词条名」要压过「误转写 / 释义」两行，
+        /// 而 `rowTitle` 的 medium 在同一张卡里分不出「条目名」和「条目说明」
+        static let bodyEmphasized = TextStyle(
+            name: "bodyEmphasized", size: 17, weight: .semibold, tracking: -0.2, lineHeight: 25
+        )
+    }
+
+    // MARK: - 控件尺寸
+
+    enum Control {
+        /// 胶囊按钮固定高度。**必须固定**：转录页底部安全区是按
+        /// 「按钮高度 + 一级间距」算的，按钮高度要是随字号/加载态漂，
+        /// 安全区就会在某次改字号之后悄悄不够
+        static let pillHeight: CGFloat = 38
+        /// 转录页底部浮动区的最小占位：胶囊 + 底部外边距（`Spacing.xl`）。
+        /// 列表用 `safeAreaInset` 挂在它上面，实际预留还会加上「下次录制」那行
+        static let floatingBarHeight: CGFloat = pillHeight + Spacing.xl
     }
 
     // MARK: - 动态色

@@ -84,18 +84,21 @@ struct NotesView: View {
                 VStack(spacing: Theme.Spacing.md) {
                     Image(systemName: "text.page")
                         .font(.system(size: 22))
-                        .foregroundStyle(Theme.textTertiary)
+                        .foregroundStyle(Theme.textSupporting)
 
-                    Text(segments.isEmpty
-                         ? "先转录一些内容，再回来生成笔记。"
-                         : "点击「生成笔记」，把转录整理成带时间戳的结构化笔记。")
+                    // 不写「点击上面的按钮」：顶部那个胶囊就在眼前，指的是同一件事。
+                    // 空状态该回答的是「这里将来会有什么」
+                    Text(segments.isEmpty ? "还没有转录内容" : "还没有生成笔记")
                         .textStyle(Theme.Text.body)
-                        .foregroundStyle(Theme.textTertiary)
+                        .foregroundStyle(Theme.textPrimary)
                         .multilineTextAlignment(.center)
 
-                    Text("将包含：核心知识点大纲 · 关键术语解释 · 行动项")
+                    Text(segments.isEmpty
+                         ? "转录结束后，这里会整理出带时间戳的结构化笔记。"
+                         : "将包含：核心知识点大纲 · 关键术语解释 · 行动项")
                         .textStyle(Theme.Text.caption)
-                        .foregroundStyle(Theme.textTertiary)
+                        .foregroundStyle(Theme.textSupporting)
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: 520)
                 .cardStyle(elevation: 1)

@@ -28,20 +28,9 @@ struct TranscriptionView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                transcript
-            }
-
-            // 底部悬浮胶囊按钮。**后端提示紧贴在它上面**——「这次会用
-            // 哪个后端、为什么」这个问题是在按下按钮的那一刻问的，
-            // 放到别处（比如设置页）等于让人先切走再回来
-            VStack(spacing: Theme.Spacing.sm) {
-                backendIndicator
-                recordButton
-            }
-            .padding(.bottom, Theme.Spacing.xl)
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            transcript
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -219,8 +208,13 @@ struct TranscriptionView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, Theme.pagePadding)
                 .padding(.top, Theme.Spacing.sm)
-                // 给悬浮按钮留出空间，避免遮住最后一段
-                .padding(.bottom, 120)
+                .padding(.bottom, Theme.Spacing.md)
+            }
+            // 底部栏走 safeAreaInset，不再叠在列表上：之前用 ZStack 悬浮 +
+            // 列表底部写死 120，按钮压住最后一段和「下次录制」提示；
+            // 现在滚动的可视区天然止于栏的上沿，预留量由布局自己算
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                bottomBar
             }
             .onChange(of: engine.segments.count) {
                 guard let last = engine.segments.last else { return }
@@ -231,11 +225,26 @@ struct TranscriptionView: View {
         }
     }
 
+    /// 底部悬浮区：后端提示 + 录制胶囊。
+    ///
+    /// **后端提示紧贴在按钮上面**——「这次会用哪个后端、为什么」这个问题
+    /// 是在按下按钮的那一刻问的，放到别处（比如设置页）等于让人先切走再回来。
+    private var bottomBar: some View {
+        VStack(spacing: Theme.Spacing.sm) {
+            backendIndicator
+            recordButton
+        }
+        .padding(.top, Theme.Spacing.md)
+        .padding(.bottom, Theme.Spacing.xl)
+        .frame(maxWidth: .infinity, minHeight: Theme.Control.floatingBarHeight,
+               alignment: .bottom)
+    }
+
     // MARK: - 录制按钮
 
     /// 设计规范要求不使用阴影。这个按钮原本靠阴影从滚动的文字上"浮"起来，
-    /// 去掉之后改用实心填充 + 留白来拉开层次——它下面那 120pt 的留白
-    /// 就是干这个的。
+    /// 去掉之后改用实心填充 + 留白来拉开层次——底部栏（`bottomBar`）的
+    /// 上下留白就是干这个的。
     private var recordButton: some View {
         PillButton(
             title: engine.isRunning ? "停止录制" : "开始录制",

@@ -127,7 +127,7 @@ private struct GlossaryContent: View {
                      + "第一节课拿不准就随便挑一个，下课用下面的「从转录提取」把这场课真正的术语捞出来，"
                      + "下次上课前就有对得上的词表了。")
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -262,7 +262,7 @@ private struct GlossaryContent: View {
                      + "不一致的段保持原文。要联网，只在你点按钮时跑；补过标点的段落，展示时会"
                      + "严格按标点断句。")
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -312,7 +312,7 @@ private struct GlossaryContent: View {
                  : "提取发生在录完之后，所以改不了已经录好的这场——它救的是下一场同类课，"
                    + "以及马上要跑的术语校正。模型猜的词不一定对，逐条看一眼再采纳。")
                 .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .foregroundStyle(Theme.textSupporting)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
@@ -443,7 +443,7 @@ private struct GlossaryContent: View {
                 Text("误转写留空也能用——模型会自己判断，填了更准。中文说法不要填进来，"
                      + "否则模型会把转录里本来正确的中文改写成英文。")
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -476,15 +476,15 @@ private struct GlossaryEntryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 TextField("正确写法", text: $entry.term)
                     .textFieldStyle(.plain)
-                    .font(.system(size: Theme.Text.caption.size, weight: .medium))
+                    .textStyle(Theme.Text.bodyEmphasized)
 
                 TextField("误转写，用「、」分隔（可留空）", text: $aliasesText)
                     .textFieldStyle(.plain)
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                    .foregroundStyle(Theme.textSupporting)
                     .focused($aliasesFocused)
                     .onSubmit { commitAliases() }
                     .onChange(of: aliasesFocused) { _, focused in
@@ -494,7 +494,7 @@ private struct GlossaryEntryRow: View {
                 TextField("说明（可选）", text: $entry.note)
                     .textFieldStyle(.plain)
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
             }
 
             if isHovering {

@@ -418,11 +418,11 @@ struct SettingsView: View {
                 .foregroundStyle(Theme.textSecondary)
             Text(store.configFilePath)
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(Theme.textTertiary)
+                .foregroundStyle(Theme.textSupporting)
                 .textSelection(.enabled)
             Text("权限已设为 600（仅本人可读）。这个文件里有密钥，别拷贝到别的机器，也别提交进任何仓库。")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.textTertiary)
+                .foregroundStyle(Theme.textSupporting)
         }
         .padding(.top, 8)
     }
@@ -474,7 +474,7 @@ struct SettingsView: View {
 
             Text("模型位置：\(center.destination.path)")
                 .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .foregroundStyle(Theme.textSupporting)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -529,7 +529,7 @@ struct SettingsView: View {
                 PillButton(title: "取消下载", style: .quiet) { center.cancel() }
                 Text("模型位置：\(center.destination.path)")
                     .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             } else {

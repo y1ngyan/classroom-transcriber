@@ -89,7 +89,7 @@ struct PillLabel: View {
             }
         }
         .padding(.horizontal, Theme.Spacing.lg)
-        .padding(.vertical, 10)
+        .frame(height: Theme.Control.pillHeight)
         .background(Capsule().fill(background))
         .foregroundStyle(foreground)
     }
@@ -329,19 +329,22 @@ struct TranscriptLine: View {
                 // 每一段都多出一行（一屏几十段），而它和核查按钮、时间戳
                 // 一样都是这行的元数据。
                 //
-                // 颜色比时间戳深一档：说话人是内容（用户要知道谁说的），
-                // 时间戳是定位用的刻度
+                // 说话人是内容（用户要知道谁说的），时间戳是定位用的刻度：
+                // 时间戳提到 textSupporting 之后，说话人必须一起提到正文色，
+                // 否则两档深浅会反（supporting 比 textSecondary 深）
                 if let speakerLabel {
                     Text(speakerLabel)
                         .textStyle(Theme.Text.caption)
                         .monospacedDigit()
-                        .foregroundStyle(Theme.textSecondary)
+                        .foregroundStyle(Theme.textPrimary)
                 }
 
+                // 时间戳：dispatch 里「太浅」点名的一处。它是卡片里的辅助信息，
+                // 不是装饰刻度，按正文补充标准取色（≥4.5:1）
                 Text(segment.formattedTimestamp)
                     .textStyle(Theme.Text.caption)
                     .monospacedDigit()
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSupporting)
             }
         }
     }
@@ -430,7 +433,9 @@ struct StatusMark: View {
             case .ok: return Theme.success
             case .warning: return Theme.warning
             case .error: return Theme.error
-            case .neutral: return Theme.textTertiary
+            // 中性状态旁边常跟着一行说明文字（「下次录制：…」「已核查：…」），
+            // 它们和正文同处一张卡里；用 textTertiary 会跟文字一起淡到看不清
+            case .neutral: return Theme.textSupporting
             case .live: return Theme.error
             }
         }
