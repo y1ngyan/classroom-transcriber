@@ -268,24 +268,25 @@ struct RecordingsView: View {
     private func courseGroup(name: String, sessions: [SessionSummary]) -> some View {
         VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupTitleToCard) {
             // 课程名是这一屏的第二级标题（页面标题是 32）：17/600 + 主色。
-            // 日期组标题再低一档（13/500 + supporting），两级要能一眼分开
+            // 计数靠右且低一档（13 + supporting）——挨在名字后面会被读成上标
             HStack(spacing: Theme.Spacing.s6) {
                 Text(name)
                     .textStyle(Theme.Text.bodyEmphasized)
                     .foregroundStyle(Theme.textPrimary)
-                Text("\(sessions.count)")
+                Spacer()
+                Text("\(sessions.count) 条")
                     .textStyle(Theme.Text.meta)
                     .monospacedDigit()
                     .foregroundStyle(Theme.textSupporting)
             }
 
+            // 日期和卡片**不再缩进**（P14-2）：分组标题、日期、卡片共用
+            // 页面边距那一条左基线；两级归属只靠字号和颜色区分
             VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupSpacing) {
                 ForEach(daysWithin(sessions), id: \.0) { day in
                     dayGroup(title: day.0, items: day.1)
                 }
             }
-            // 课程内部缩进一档，让两级归属在视觉上成立
-            .padding(.leading, Theme.Spacing.md)
         }
     }
 
@@ -325,20 +326,20 @@ private struct RecordingRow: View {
             HStack(spacing: Theme.RecordingLayout.cardContentSpacing) {
                 // 播放键是**装饰**，不是第二个按钮：整张卡已经是按钮，
                 // 里面再套一个按钮会变成嵌套命中区，点中间那圈行为不确定。
-                // 点它走的是同一个 `onOpen`，和点卡片其它地方没有区别
+                // 点它走的是同一个 `onOpen`，和点卡片其它地方没有区别。
+                // P14-2：图标 15→13、底 8%→6%，让「能点进去」比「能播放」显眼
                 Image(systemName: "play.fill")
                     .font(.system(size: Theme.RecordingLayout.playIcon))
                     .foregroundStyle(Theme.accent)
                     .frame(width: Theme.RecordingLayout.playButton,
                            height: Theme.RecordingLayout.playButton)
-                    .background(Circle().fill(Theme.accent.opacity(0.08)))
+                    .background(Circle().fill(Theme.accent.opacity(0.06)))
 
                 VStack(alignment: .leading, spacing: Theme.RecordingLayout.cardTextSpacing) {
                     // 标题行。角标钉在右上角（第一行基线），不跟元数据挤一行
                     HStack(alignment: .top, spacing: Theme.RecordingLayout.cardTextSpacing) {
                         // 显示名：用户起过就用它，没起过回落成时间。
-                        // title 为空时才另外补一个时间——否则「9月21日 11:12」
-                        // 会被显示两次
+                        // 标题**永远**是课程/讲次，日期时间在元信息行里
                         Text(summary.displayTitle)
                             .textStyle(Theme.Text.bodyEmphasized)
                             .foregroundStyle(Theme.textPrimary)
@@ -370,30 +371,22 @@ private struct RecordingRow: View {
                     }
 
                     // 读数行，只在实际有内容的项上出现——「0 个提问」这种
-                    // 占位读数没有任何信息量，只会把列表撑高
-                    HStack(spacing: Theme.RecordingLayout.metadataSpacing) {
-                        if !summary.title.isEmpty {
-                            Text(summary.formattedTime)
-                                .monospacedDigit()
-                        }
-                        Text(summary.formattedDuration)
+                    // 占位读数没有任何信息量，只会把列表撑高。
+                    // P14-2：各项用 ` · ` 连起来，否则四个读数会糊成一串
+                    HStack(spacing: 0) {
+                        Text(metadataText)
+                            .textStyle(Theme.Text.meta)
                             .monospacedDigit()
-                        if summary.partCount > 1 {
-                            Text("\(summary.partCount) 段录音")
-                        }
-                        Text("\(summary.segmentCount) 段转录")
-                        if summary.questionCount > 0 {
-                            Text("\(summary.questionCount) 个提问")
-                        }
+                            .foregroundStyle(Theme.textSupporting)
+                            .lineLimit(1)
                     }
-                    .textStyle(Theme.Text.meta)
-                    .foregroundStyle(Theme.textSupporting)
                 }
 
-                // 「这行能点」的暗示。三级色，不抢标题和角标
+                // 「这行能点」的暗示。P14-2：13→14pt 且提到 textSecondary，
+                // 三级色压在黑底上几乎看不见，而它正是这一行最重要的提示
                 Image(systemName: "chevron.right")
                     .font(.system(size: Theme.RecordingLayout.chevronSize, weight: .semibold))
-                    .foregroundStyle(Theme.textTertiary)
+                    .foregroundStyle(Theme.textSecondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             // 卡片外观必须套在**按钮的 label 里**，不能套在按钮外面：
@@ -411,31 +404,38 @@ private struct RecordingRow: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
     }
 
-    /// 右上角状态角标（P14-1）：胶囊 + 状态色 12% 底 + 11/600 状态色文字。
-    /// 文案压到「几段什么状态」，长句留给详情页——列表里一行放不下
+    /// 元信息一行：`09:00 · 1:36:00 · 4 段转录 · 1 个提问`（P14-2）。
+    /// 时间固定第一项（标题不再兼任日期）；没有标题的旧数据里标题本身
+    /// 就是日期时间，这里不再重复一遍。空项不占位——「0 个提问」没有信息量
+    private var metadataText: String {
+        var items: [String] = []
+        if !summary.title.isEmpty { items.append(summary.formattedTime) }
+        items.append(summary.formattedDuration)
+        if summary.partCount > 1 { items.append("\(summary.partCount) 段录音") }
+        items.append("\(summary.segmentCount) 段转录")
+        if summary.questionCount > 0 { items.append("\(summary.questionCount) 个提问") }
+        return items.joined(separator: " · ")
+    }
+
+    /// 右上角状态角标（P14-2）：胶囊 + 状态色 12% 底 + 11/600 角标色文字。
+    /// 文案由 `RecordingBadge` 统一生成（形状、顺序、超长处理都在那边），
+    /// 这里只按最严重的状态选颜色——有不可信就不该用存疑的橙色报
     private var qualityBadge: QualityBadge {
-        // 两种段可以并存（是两个独立计数），所以不能写成「有坏段就只说坏段」——
-        // 那样有 1 段不可信 + 20 段存疑时，用户只看得到那个 1
         let poor = summary.poorCount
         let fair = summary.fairCount
-        if poor > 0 && fair > 0 {
-            return QualityBadge(text: "\(poor) 不可信 · \(fair) 存疑", color: Theme.error)
-        }
-        if poor > 0 {
-            return QualityBadge(text: "\(poor) 段不可信", color: Theme.error)
-        }
-        if fair > 0 {
-            return QualityBadge(text: "\(fair) 段存疑", color: Theme.warning)
-        }
-        // 全部可信时也要有一个角标：列表里每行右上都空着，
-        // 用户会以为「状态还没出」，而不是「没有问题」
-        let verified = max(0, summary.segmentCount)
-        return QualityBadge(text: "已核实 \(verified) 段", color: Theme.success)
+        let verified = max(0, summary.segmentCount - poor - fair)
+        let color = poor > 0 ? Theme.errorBadge
+            : (fair > 0 ? Theme.warningBadge : Theme.successBadge)
+        return QualityBadge(
+            text: RecordingBadge.text(verified: verified, fair: fair, poor: poor),
+            color: color
+        )
     }
 }
 
 /// 状态角标。底色用状态色 12% 透明——不是不透明色块：
-/// 它是注释，不是警告牌，面积大了会盖过标题
+/// 它是注释，不是警告牌，面积大了会盖过标题。
+/// 文案本身由 `RecordingBadge.text` 收口；这里只保证**不换行**
 private struct QualityBadge: View {
     let text: String
     let color: Color
@@ -444,6 +444,7 @@ private struct QualityBadge: View {
         Text(text)
             .font(Theme.Text.footnote.font.weight(.semibold))
             .foregroundStyle(color)
+            .lineLimit(1)
             .padding(.horizontal, Theme.RecordingLayout.badgePaddingH)
             .padding(.vertical, Theme.RecordingLayout.badgePaddingV)
             .background(Capsule().fill(color.opacity(0.12)))

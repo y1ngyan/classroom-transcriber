@@ -15,12 +15,12 @@ enum Theme {
 
     // MARK: - 颜色
 
-    /// 页面背景 #F5F5F7 / #000000。
+    /// 页面背景 #F1F1F4 / #000000。
     ///
-    /// P14-1 起浅色页面**不再是纯白**：白卡叠白底没有厚度，卡片只能靠
-    /// 一圈 6% 描边分界。把页面压成 systemGray6 之后，白卡靠底色差 +
-    /// 阴影就能立起来。深色仍是纯黑（阴影画不出来，靠亮一档的卡片底）
-    static let background = adaptive(light: 0xF5F5F7, dark: 0x000000)
+    /// P14-1 起浅色页面**不再是纯白**：白卡叠白底没有厚度。P14-2 又压深一档
+    /// （#F5F5F7 → #F1F1F4）：第一版快照里白卡仍像贴纸，底色差不够。
+    /// 深色仍是纯黑（阴影画不出来，靠 12% 白描边 + 卡片底分界）
+    static let background = adaptive(light: 0xF1F1F4, dark: 0x000000)
     /// 次级背景（分组块、输入框底）#F5F5F7
     static let backgroundSecondary = adaptive(light: 0xF5F5F7, dark: 0x1C1C1E)
     /// 正文 #1D1D1F
@@ -30,14 +30,16 @@ enum Theme {
     /// 三级文字 #D2D2D7。只留给极次要信息（占位说明、装饰刻度）——
     /// 白底上只有 1.4:1，任何需要读的字都不该用它
     static let textTertiary = adaptive(light: 0xD2D2D7, dark: 0x48484A)
-    /// 正文补充文字 #6E6E73 / #A1A1A6。
+    /// 正文补充文字 #6D6D72 / #A1A1A6。
     ///
     /// **为什么单独一档**：`textSecondary`（#86868B）在白底上只有 3.4:1，
     /// 放在卡片里当正文的补充说明（接口说明、释义、空状态引导）时肉眼发虚；
     /// `textTertiary` 更浅，只够当「看一眼定位」的刻度。
     /// 这一档按 AA 正文标准取值：白底 5.1:1、黑底 8.2:1，卡片底上也在
     /// 4.9:1 以上（`--ui-snapshot` 里有对比度自检）。
-    static let textSupporting = adaptive(light: 0x6E6E73, dark: 0xA1A1A6)
+    /// P14-2 由 #6E6E73 压深 1/255：#F1F1F4 页面底上原值算出来 4.499:1，
+    /// 差 0.001 卡在 AA 线下面（自检按未取整的比值判）
+    static let textSupporting = adaptive(light: 0x6D6D72, dark: 0xA1A1A6)
     /// 分隔线 #D2D2D7
     static let separator = adaptive(light: 0xD2D2D7, dark: 0x38383A)
 
@@ -53,6 +55,16 @@ enum Theme {
     static let warning = Color(hex: 0xFF9F0A)
     static let error = Color(hex: 0xFF453A)
 
+    /// 状态**角标文字**用的状态色（P14-2）。
+    ///
+    /// 角标底是同色 12% 透明，深色下普通状态色压在这层底上偏暗
+    /// （成功绿尤其明显），所以深色单独提亮一档；success / error 直接取
+    /// 派单给的可读值 #4ADE80 / #FF6B5E。浅色仍是原状态色——浅色底上的
+    /// 问题不是「太暗」而是绿色本身对比不足，那属于角标配色的另一件事
+    static let successBadge = adaptive(light: 0x30D158, dark: 0x4ADE80)
+    static let warningBadge = adaptive(light: 0xFF9F0A, dark: 0xFFB340)
+    static let errorBadge = adaptive(light: 0xFF453A, dark: 0xFF6B5E)
+
     // MARK: - 表面（卡片）
 
     /// 卡片用的表面色。
@@ -61,19 +73,19 @@ enum Theme {
     /// 表达，而不是靠把卡片涂深。把卡片涂成灰的会让整页变成「灰底白卡」，
     /// 那是 Material 的读法，不是这个 App 的（规格是留白和层次）。
     ///
-    /// **深色下没有阴影可用**（见 `Shadow.layers`），层级只能靠底色差：
-    /// `card`(#1C1C1E) 比页面黑底亮一档，`cardElevated`(#2C2C2E) 再亮一档，
-    /// 于是「抬起来的那张」在深色里是**更亮**的那张。这两个值就是苹果
-    /// 深色外观的 systemGray6 / systemGray5，直接沿用，不另调
+    /// **深色下没有阴影可用**（见 `Shadow.layers`），层级只能靠描边和底色差。
+    /// `card`(#1C1C1E) 是所有卡片的底（P14-2 起不再随层级换色），
+    /// `cardElevated`(#2C2C2E) 只给显式声明 `.elevated` 的分组底板（设置页）
     enum Surface {
         /// 卡片底
         static let card = adaptive(light: 0xFFFFFF, dark: 0x1C1C1E)
         /// 抬高一级的卡片底（深色下靠它表达层级，见上）
         static let cardElevated = adaptive(light: 0xFBFBFD, dark: 0x2C2C2E)
-        /// 卡片描边：浅色白底上是 6% 黑，深色是 8% 白。
-        /// 0.5pt 宽（`cardStyle` 里写死）——再粗一圈就成「边框设计」了
+        /// 卡片描边：浅色白底上是 6% 黑，深色是 12% 白。
+        /// 0.5pt 宽（`cardStyle` 里写死）——再粗一圈就成「边框设计」了。
+        /// 深色 P14-2 由 8% 提到 12%：8% 压在 #1C1C1E 上几乎看不出来
         static let cardBorder = alphaAdaptive(light: (0x000000, 0.06),
-                                              dark: (0xFFFFFF, 0.08))
+                                              dark: (0xFFFFFF, 0.12))
         /// 悬停 / 选中反馈：浅色 4% 黑、深色 6% 白。**叠在卡片底上**，
         /// 不是替换卡片底——替换的话卡片会在悬停时换一个颜色，看起来像切换选中
         static let cardHighlight = alphaAdaptive(light: (0x000000, 0.04),
@@ -95,12 +107,12 @@ enum Theme {
             var color: Color { Color.black.opacity(opacity) }
         }
 
-        /// 一级（列表行这种「浮起来一点」的）：两层叠加（P14-1 定死）。
-        /// 小半径那层给「贴着桌面」的接触感，大半径那层给大范围的环境光。
+        /// 一级（列表行这种「浮起来一点」的）：两层叠加（P14-2 定死）。
+        /// 大半径那层给大范围的环境光，小半径那层给「贴着桌面」的接触感。
         /// 数值是派单钉死的，不要凭手感改
         static let card: [Layer] = [
-            Layer(opacity: 0.06, radius: 10, y: 2),
-            Layer(opacity: 0.04, radius: 2, y: 1),
+            Layer(opacity: 0.06, radius: 2, y: 1),
+            Layer(opacity: 0.10, radius: 20, y: 6),
         ]
 
         /// 二级（弹层 / 详情面板这种「更靠近眼睛」的）：同结构、再重一档
@@ -114,7 +126,7 @@ enum Theme {
         /// **深色恒为空，这不是省事，是实测结论**：深色页面是纯黑，
         /// 阴影是「比背景更暗」——黑底上没有任何更暗可画，`black 0.06`
         /// 落在 #000 上和没画逐像素一样。所以深色下**不许有阴影**，
-        /// 层级改由 `Surface.cardElevated`（更亮一档的底）+ 0.5pt 描边表达。
+        /// 层级改由 0.5pt 描边（深色 12% 白）表达。
         /// 谁把阴影加回深色，谁就是在往黑底上刷看不成的东西
         static func layers(elevation: Int, scheme: ColorScheme) -> [Layer] {
             guard scheme != .dark else { return [] }
@@ -137,7 +149,9 @@ enum Theme {
 
     /// 卡片底色该用哪一档表面。
     enum CardSurface {
-        /// 按层级自动：深色下 elevation > 0 用 `cardElevated`，否则 `card`
+        /// 按层级自动：一律 `card`。**深色下也不再随层级换 `cardElevated`**——
+        /// P14-2 评审点名「深色卡片底必须是 #1C1C1E」，而原来 elevation > 0
+        /// 会静默换成 #2C2C2E，卡片和黑底分不开的观感有一半来自这里
         case automatic
         /// 强制用 `cardElevated`。设置页那种「分组底板」用它——
         /// 分组是铺在页面上的盆地，不是浮起来的卡片
@@ -148,13 +162,12 @@ enum Theme {
                            scheme: ColorScheme,
                            surface: CardSurface = .automatic) -> CardTokens {
         let level = min(max(elevation, 0), 2)
-        // 深色下「抬起来」= 更亮的底。elevation 0 是平铺的、不需要抬
         let fill: Color
         switch surface {
         case .elevated:
             fill = Surface.cardElevated
         case .automatic:
-            fill = (scheme == .dark && level > 0) ? Surface.cardElevated : Surface.card
+            fill = Surface.card
         }
         return CardTokens(
             fill: fill,
@@ -347,8 +360,12 @@ enum Theme {
         static let iconButton: CGFloat = 44
         static let newButton: CGFloat = 28
         static let playButton: CGFloat = 44
-        static let playIcon: CGFloat = 15
-        static let chevronSize: CGFloat = 13
+        /// P14-2：15 → 13。播放是次要入口，不能比「点进详情」更抢眼
+        static let playIcon: CGFloat = 13
+        /// P14-2：13 → 14，并换成 `textSecondary`（三级色在黑底上看不见）
+        static let chevronSize: CGFloat = 14
+        /// 角标一格的最大宽度。超过就退成「N 段异常」，不换行、不截字
+        static let badgeMaxWidth: CGFloat = 150
 
         /// 自检用：上面所有间距类数值，必须全部落在 `Spacing.rhythm` 里
         static let spacingValues: [CGFloat] = [

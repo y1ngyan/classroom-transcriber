@@ -383,10 +383,10 @@ enum UISnapshot {
         // 「四层都落在范围内」，而定死的就是两层这两个数
         if let lightBG = srgbComponents(Theme.background, scheme: .light),
            let darkBG = srgbComponents(Theme.background, scheme: .dark) {
-            let lightIsGray6 = abs(lightBG.0 - 245.0 / 255) < 0.002
-                && abs(lightBG.1 - 245.0 / 255) < 0.002
-                && abs(lightBG.2 - 247.0 / 255) < 0.002
-            failure.check(lightIsGray6, "亮色页面底 = #F5F5F7",
+            let lightIsGray6 = abs(lightBG.0 - 241.0 / 255) < 0.002
+                && abs(lightBG.1 - 241.0 / 255) < 0.002
+                && abs(lightBG.2 - 244.0 / 255) < 0.002
+            failure.check(lightIsGray6, "亮色页面底 = #F1F1F4",
                           detail: String(format: "（%.4f, %.4f, %.4f）", lightBG.0, lightBG.1, lightBG.2))
             let darkIsBlack = darkBG.0 < 0.001 && darkBG.1 < 0.001 && darkBG.2 < 0.001
             failure.check(darkIsBlack, "深色页面底 = #000000",
@@ -395,16 +395,56 @@ enum UISnapshot {
             failure.check(false, "页面底色能解析成 sRGB")
         }
         let expectedLayers: [Theme.Shadow.Layer] = [
-            .init(opacity: 0.06, radius: 10, y: 2),
-            .init(opacity: 0.04, radius: 2, y: 1),
+            .init(opacity: 0.06, radius: 2, y: 1),
+            .init(opacity: 0.10, radius: 20, y: 6),
         ]
         failure.check(Theme.Shadow.layers(elevation: 1, scheme: .light) == expectedLayers,
-                      "亮色一级阴影 = 两层 (0,2,10,0.06) + (0,1,2,0.04)",
+                      "亮色一级阴影 = 两层 (0,1,2,0.06) + (0,6,20,0.10)",
                       detail: "（实得 \(Theme.Shadow.layers(elevation: 1, scheme: .light).map { "(y\($0.y), r\($0.radius), \($0.opacity))" }.joined(separator: " + "))）")
         failure.check(Theme.Shadow.layers(elevation: 1, scheme: .dark).isEmpty,
                       "深色一级零阴影")
+        // 深色卡片底必须正好是 #1C1C1E（P14-2 评审：原来 elevation>0
+        // 被换成了 #2C2C2E，卡片和纯黑底分不开）。这一条直接钉 token，
+        // 不靠像素亮度带——#1C1C1E 和 #2C2C2E 都落在那个带里
+        if let darkFill = srgbComponents(Theme.cardTokens(elevation: 1, scheme: .dark).fill,
+                                         scheme: .dark) {
+            let isCard = abs(darkFill.0 - 28.0 / 255) < 0.002
+                && abs(darkFill.1 - 28.0 / 255) < 0.002
+                && abs(darkFill.2 - 30.0 / 255) < 0.002
+            failure.check(isCard, "深色卡片底 = #1C1C1E（不被 cardElevated 覆盖）",
+                          detail: String(format: "（%.4f, %.4f, %.4f）", darkFill.0, darkFill.1, darkFill.2))
+        } else {
+            failure.check(false, "深色卡片底能解析成 sRGB")
+        }
 
-        // ── 自检 ⑫：这一包只渲 4 张 ──
+        // ── 自检 ⑫：角标文案形状（P14-2）──
+        //
+        // 形状必须是「数字 + 段 + 状态」；多状态用 ` · `、顺序固定
+        // （已核实 → 存疑 → 不可信）；放不下时退成「N 段异常」。
+        // 变异实验：把文案改回 P14-1 的「1 不可信」或「已核实 4 段」，
+        // 正则与期望值这两条都会红
+        let badgePattern = try? NSRegularExpression(
+            pattern: #"^\d+ 段(已核实|存疑|不可信|异常)( · \d+ 段(已核实|存疑|不可信)){0,2}$"#
+        )
+        let badgeCases: [(String, String)] = [
+            (RecordingBadge.text(verified: 4, fair: 0, poor: 0), "4 段已核实"),
+            (RecordingBadge.text(verified: 0, fair: 1, poor: 0), "1 段存疑"),
+            (RecordingBadge.text(verified: 0, fair: 0, poor: 1), "1 段不可信"),
+            (RecordingBadge.text(verified: 1, fair: 1, poor: 1), "2 段异常"),
+        ]
+        for (actual, expected) in badgeCases {
+            let range = NSRange(actual.startIndex..., in: actual)
+            let matches = badgePattern?.firstMatch(in: actual, range: range) != nil
+            failure.check(matches && actual == expected,
+                          "角标文案「\(expected)」形状合规",
+                          detail: actual == expected ? "" : "（实得「\(actual)」）")
+        }
+        let ordered = RecordingBadge.text(verified: 3, fair: 1, poor: 0)
+        failure.check(ordered == "3 段已核实 · 1 段存疑",
+                      "多状态用 ` · ` 连、顺序固定（已核实 → 存疑 → 不可信）",
+                      detail: "（实得「\(ordered)」）")
+
+        // ── 自检 ⑬：这一包只渲 4 张 ──
         if onlyRecordings {
             failure.check(expected.count == 4,
                           "只渲录音屏 4 张（亮/暗 × 有数据/空）",
@@ -832,11 +872,12 @@ enum UISnapshot {
                 segment("对，因为泰勒展开的一阶项里它取到最小值。", start: 25_000, end: 31_000),
             ]
         ))
-        // 没起名：列表回落显示「M月d日 HH:mm」，同一行还会补上时刻。
-        // 这一段**刻意让 fair 和 poor 并存**：质量状态那格曾经写着
-        // 「有坏段就只说坏段」，并存时会静默吞掉存疑段数
+        // P14-2：这一条原来 title 为空、靠日期回落当标题，评审看到的是
+        // 「同一列表里一条是讲次、一条是日期」。标题永远是课程/讲次，
+        // 日期时间只出现在元信息行第一项。
+        // 这一段**刻意让 fair 和 poor 并存**：质量角标必须两种数都报
         store.save(session(
-            title: "", course: "机器学习", startedAt: at(daysAgo: 1, hour: 14),
+            title: "第 4 讲 · 反向传播", course: "机器学习", startedAt: at(daysAgo: 1, hour: 14),
             minutes: 88,
             segments: [
                 segment("接着上节课讲反向传播，先把链式法则再推一遍。", start: 0, end: 8_000, grade: .fair),

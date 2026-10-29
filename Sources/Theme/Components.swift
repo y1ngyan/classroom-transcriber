@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 // MARK: - PillButton
 
@@ -405,6 +406,41 @@ struct Thumbnail: View {
         }
         .onHover { isHovering = $0 }
         .help("\(attachment.originalName) · \(attachment.formattedTimestamp)")
+    }
+}
+
+// MARK: - 录音状态角标
+
+/// 录音列表右上角状态角标的文案（P14-2）。
+///
+/// 文案形状钉死成「数字 + 段 + 状态」：`4 段已核实` / `1 段存疑` /
+/// `1 段不可信`。多状态用 ` · ` 连、顺序固定（已核实 → 存疑 → 不可信），
+/// 这样「有几段怎么回事」永远按同一个方向读。
+///
+/// 一格放不下时整句退成「N 段异常」（N = 存疑 + 不可信），**不换行也不截字**：
+/// 换行会把旁边的标题挤到第二行，截字则会把「不可信」截成「不可」——
+/// 两种都比说实话的粗粒度更糟。
+///
+/// 放在这里而不是 View 私有：快照自检要拿真实逻辑跑正则
+/// （「不许出现 `1 不可信` 这种」），私有函数测不到
+enum RecordingBadge {
+    static func text(verified: Int, fair: Int, poor: Int) -> String {
+        var parts: [String] = []
+        if verified > 0 { parts.append("\(verified) 段已核实") }
+        if fair > 0 { parts.append("\(fair) 段存疑") }
+        if poor > 0 { parts.append("\(poor) 段不可信") }
+        guard !parts.isEmpty else { return "0 段已核实" }
+        let full = parts.joined(separator: " · ")
+        return measuredWidth(full) <= Theme.RecordingLayout.badgeMaxWidth
+            ? full
+            : "\(fair + poor) 段异常"
+    }
+
+    /// 按角标同字号、同字重量宽度，不按字符数估——
+    /// 「1」和「段」的宽度差一倍，按字数估会在中英混排上判错
+    static func measuredWidth(_ text: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: Theme.Text.footnote.size, weight: .semibold)
+        return (text as NSString).size(withAttributes: [.font: font]).width
     }
 }
 
