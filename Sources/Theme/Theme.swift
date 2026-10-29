@@ -15,8 +15,12 @@ enum Theme {
 
     // MARK: - 颜色
 
-    /// 页面背景 #FFFFFF / #000000
-    static let background = adaptive(light: 0xFFFFFF, dark: 0x000000)
+    /// 页面背景 #F5F5F7 / #000000。
+    ///
+    /// P14-1 起浅色页面**不再是纯白**：白卡叠白底没有厚度，卡片只能靠
+    /// 一圈 6% 描边分界。把页面压成 systemGray6 之后，白卡靠底色差 +
+    /// 阴影就能立起来。深色仍是纯黑（阴影画不出来，靠亮一档的卡片底）
+    static let background = adaptive(light: 0xF5F5F7, dark: 0x000000)
     /// 次级背景（分组块、输入框底）#F5F5F7
     static let backgroundSecondary = adaptive(light: 0xF5F5F7, dark: 0x1C1C1E)
     /// 正文 #1D1D1F
@@ -91,12 +95,12 @@ enum Theme {
             var color: Color { Color.black.opacity(opacity) }
         }
 
-        /// 一级（列表行这种「浮起来一点」的）：两层叠加。
-        /// 单层要么太重（看得出边界）要么太轻（等于没画）；两层里
-        /// 小半径那层给「贴着桌面」的接触感，大半径那层给大范围的环境光
+        /// 一级（列表行这种「浮起来一点」的）：两层叠加（P14-1 定死）。
+        /// 小半径那层给「贴着桌面」的接触感，大半径那层给大范围的环境光。
+        /// 数值是派单钉死的，不要凭手感改
         static let card: [Layer] = [
             Layer(opacity: 0.06, radius: 10, y: 2),
-            Layer(opacity: 0.04, radius: 24, y: 8),
+            Layer(opacity: 0.04, radius: 2, y: 1),
         ]
 
         /// 二级（弹层 / 详情面板这种「更靠近眼睛」的）：同结构、再重一档
@@ -169,20 +173,36 @@ enum Theme {
     // MARK: - 间距
 
     enum Spacing {
+        static let xxs: CGFloat = 2
         static let xs: CGFloat = 4
         static let sm: CGFloat = 8
+        /// P14-1 的节奏档：录音页只用这些值（自检会钉住）
+        static let s6: CGFloat = 6
+        static let s10: CGFloat = 10
+        static let s12: CGFloat = 12
         static let md: CGFloat = 16
+        static let s20: CGFloat = 20
         static let lg: CGFloat = 24
+        static let s28: CGFloat = 28
+        static let s32: CGFloat = 32
         static let xl: CGFloat = 40
         /// 区块之间的留白。`CLAUDE.md` 设计规范里「`Theme.Spacing.xxl`(80)」就是它——
         /// 取代卡片：靠留白分组，而不是靠框
         static let xxl: CGFloat = 80
+
+        /// 卡片内边距（P14-1）：水平 20 / 垂直 16。**全站卡片共用**
+        static let cardPaddingH: CGFloat = 20
+        static let cardPaddingV: CGFloat = 16
+
+        /// 录音页允许出现的间距值。自检拿它去卡 `RecordingLayout`
+        static let rhythm: Set<CGFloat> = [2, 4, 6, 10, 12, 16, 20, 24, 28, 32]
     }
 
     /// 圆角。`button` 的 980 是「永远等于半高」的惯用写法，
     /// SwiftUI 里对应的东西叫 `Capsule()`，见 `PillButton`
     enum Radius {
-        static let card: CGFloat = 18
+        /// P14-1 由 18 收到 16：圆角越大越像「卡片组件」，16 更接近系统列表
+        static let card: CGFloat = 16
         static let button: CGFloat = 980
         static let input: CGFloat = 12
     }
@@ -191,7 +211,7 @@ enum Theme {
 
     static let pagePadding: CGFloat = Spacing.xl
     static let segmentSpacing: CGFloat = Spacing.md
-    static let titleSize: CGFloat = 48
+    static let titleSize: CGFloat = Text.largeTitle.size
     static let subtitleSize: CGFloat = Text.caption.size
     static let bodySize: CGFloat = Text.body.size
     static let captionSize: CGFloat = Text.caption.size
@@ -245,8 +265,10 @@ enum Theme {
     }
 
     enum Text {
+        /// 页面标题（P14-1）：48 → 32 / 700。48 在 1100pt 宽的窗口里像一张
+        /// 海报标题，把工具栏和内容全压到第二屏；32 是「App 标题」的高度
         static let largeTitle = TextStyle(
-            name: "largeTitle", size: 48, weight: .semibold, tracking: -0.5, lineHeight: 52
+            name: "largeTitle", size: 32, weight: .bold, tracking: -0.4, lineHeight: 38
         )
         static let title = TextStyle(
             name: "title", size: 28, weight: .semibold, tracking: -0.3, lineHeight: 34
@@ -275,9 +297,18 @@ enum Theme {
         )
         /// `body` 的粗体变体。字号不动（17 那档），只把字重提到 semibold——
         /// 术语表卡片里「词条名」要压过「误转写 / 释义」两行，
-        /// 而 `rowTitle` 的 medium 在同一张卡里分不出「条目名」和「条目说明」
+        /// 而 `rowTitle` 的 medium 在同一张卡里分不出「条目名」和「条目说明」。
+        /// P14-1 起它也是录音页的卡片标题 / 分组标题
         static let bodyEmphasized = TextStyle(
             name: "bodyEmphasized", size: 17, weight: .semibold, tracking: -0.2, lineHeight: 25
+        )
+        /// 卡片摘要 15（P14-1）：比标题轻一档，但仍要能读
+        static let summary = TextStyle(
+            name: "summary", size: 15, weight: .regular, tracking: 0, lineHeight: 20
+        )
+        /// 元数据 13（P14-1）：时长 / 段数 / 提问这一行
+        static let meta = TextStyle(
+            name: "meta", size: 13, weight: .regular, tracking: 0, lineHeight: 18
         )
     }
 
@@ -291,6 +322,40 @@ enum Theme {
         /// 转录页底部浮动区的最小占位：胶囊 + 底部外边距（`Spacing.xl`）。
         /// 列表用 `safeAreaInset` 挂在它上面，实际预留还会加上「下次录制」那行
         static let floatingBarHeight: CGFloat = pillHeight + Spacing.xl
+    }
+
+    // MARK: - 录音页尺寸
+
+    /// 录音列表（P14-1）的尺寸规格。**数值是派单定死的**，页面里不许
+    /// 再就地写数字；自检会把所有间距类数值拿去对 `Spacing.rhythm`
+    enum RecordingLayout {
+        static let pagePadding: CGFloat = 24
+        static let titleToToolbar: CGFloat = 16
+        static let toolbarToGroup: CGFloat = 28
+        static let groupSpacing: CGFloat = 24
+        static let groupTitleToCard: CGFloat = 10
+        static let cardSpacing: CGFloat = 12
+        static let cardContentSpacing: CGFloat = 12
+        static let cardTextSpacing: CGFloat = 6
+        static let metadataSpacing: CGFloat = 10
+        static let badgePaddingH: CGFloat = 6
+        static let badgePaddingV: CGFloat = 2
+        static let listBottom: CGFloat = 32
+
+        /// 控件尺寸（不是间距，不参与节奏表校验）
+        static let toolbarHeight: CGFloat = 44
+        static let iconButton: CGFloat = 44
+        static let newButton: CGFloat = 28
+        static let playButton: CGFloat = 44
+        static let playIcon: CGFloat = 15
+        static let chevronSize: CGFloat = 13
+
+        /// 自检用：上面所有间距类数值，必须全部落在 `Spacing.rhythm` 里
+        static let spacingValues: [CGFloat] = [
+            pagePadding, titleToToolbar, toolbarToGroup, groupSpacing,
+            groupTitleToCard, cardSpacing, cardContentSpacing, cardTextSpacing,
+            metadataSpacing, badgePaddingH, badgePaddingV, listBottom,
+        ]
     }
 
     // MARK: - 动态色
@@ -361,7 +426,8 @@ private struct CardStyleModifier: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
 
         content
-            .padding(Theme.Spacing.md)
+            .padding(.horizontal, Theme.Spacing.cardPaddingH)
+            .padding(.vertical, Theme.Spacing.cardPaddingV)
             .background {
                 shape
                     .fill(token.fill)

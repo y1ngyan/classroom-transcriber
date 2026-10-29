@@ -124,7 +124,7 @@ enum UISnapshot {
         //     装得下时列表按自身高度停在顶部，快照展示的就是真实使用中
         //     「滚到末尾」的那一个静止状态，且最后一张卡片与底栏之间留出安全区。
         // 离屏宿主不能滚（见 `renderBottom` 的注释），只能把宿主加高再截最后一段
-        let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
+        let allScreens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
             ("transcription", AnyView(TranscriptionView().environment(populated)), 980),
             ("fact-check", AnyView(FactCheckView().environment(populated)), nil),
             ("notes", AnyView(NotesView().environment(populated)), nil),
@@ -133,6 +133,19 @@ enum UISnapshot {
             ("recordings", AnyView(RecordingsView().environment(populated)), nil),
             ("recordings-empty", AnyView(RecordingsView().environment(empty)), nil),
         ]
+
+        // P14-1：只看录音这一屏时（派单要求「只渲 4 张」），用
+        // `UI_SNAPSHOT_ONLY=recordings` 把其余五屏整体跳过。做成环境变量而不是
+        // 新 CLI 参数：`--ui-snapshot` 的解析在 `App.swift`，本包不许改它
+        let onlyRecordings = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
+            == "recordings"
+        let screens = onlyRecordings
+            ? allScreens.filter { $0.name.hasPrefix("recordings") }
+            : allScreens
+        if onlyRecordings {
+            print("  模式：只渲录音屏（UI_SNAPSHOT_ONLY=recordings）")
+            print("")
+        }
 
         var written: [String: URL] = [:]
         for screen in screens {
@@ -183,11 +196,12 @@ enum UISnapshot {
         // ── 自检 ②：token 值域 ──
         let allLayers = Theme.Shadow.card + Theme.Shadow.cardRaised
         let badOpacity = allLayers.filter { !(0.01...0.15).contains($0.opacity) }
-        let badRadius = allLayers.filter { !(4...40).contains($0.radius) }
+        // 半径下限 P14-1 由 4 收到 2：定死的两层阴影里，贴桌面那层就是 2
+        let badRadius = allLayers.filter { !(2...40).contains($0.radius) }
         let badY = allLayers.filter { !(0...20).contains($0.y) }
         failure.check(badOpacity.isEmpty, "阴影 opacity 都在 0.01–0.15",
                       detail: badOpacity.isEmpty ? "" : "（越界 \(badOpacity.map { "\($0.opacity)" }.joined(separator: "、"))）")
-        failure.check(badRadius.isEmpty, "阴影半径都在 4–40pt",
+        failure.check(badRadius.isEmpty, "阴影半径都在 2–40pt",
                       detail: badRadius.isEmpty ? "" : "（越界 \(badRadius.map { "\($0.radius)" }.joined(separator: "、"))）")
         failure.check(badY.isEmpty, "阴影 y 偏移都在 0–20pt",
                       detail: badY.isEmpty ? "" : "（越界 \(badY.map { "\($0.y)" }.joined(separator: "、"))）")
@@ -258,7 +272,7 @@ enum UISnapshot {
         if let light = written["recordings-light.png"], let dark = written["recordings-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
             failure.check(lightLum > 0.9 && darkLum < 0.1,
-                          "亮/暗两张分别是白底和黑底",
+                          "亮/暗两张分别是浅底和黑底",
                           detail: String(format: "（角落亮度 %.2f / %.2f）", lightLum, darkLum))
         } else {
             failure.check(false, "亮/暗两张能读出来做像素比对")
@@ -317,13 +331,84 @@ enum UISnapshot {
                 failure.check(border, "\(name) 深色卡片有 0.5pt 描边",
                               detail: fillLuma == nil ? "" : String(format: "（底 %.3f，要求 ≥ %.3f 的长条）", fillLuma!, threshold))
             } else {
-                // 浅色卡片底是白的、页面也是白的：分离靠 6% 描边。
-                // 描边在卡片顶边是一条约等于卡宽的横线，页面白底和阴影
-                // 渐变都落不进这个亮度带；同样按 900px 起步找
+                // 浅色卡片底是白的、页面是 #F5F5F7：分离靠 6% 黑描边
+                // （合成后约 0.94，比页面底暗一档）。**不能再用固定亮度带**：
+                // P14-1 之前页面是纯白（1.0），落在带外；现在页面底自己也
+                // 落在 0.85–0.98 里，固定带会被整行背景骗过。所以按
+                // 「比该图左上角页面底暗 0.004 以上」判，描边合成后约暗 0.02
+                let pageLuma = pixels.backgroundLuminance()
                 let edges = pixels.longestRunLuminances(minLength: 900, tolerance: 0.012)
-                let border = edges.contains { (0.85...0.98).contains($0.luma) }
-                failure.check(border, "\(name) 亮色卡片有描边（从白底分出边界）")
+                let border = edges.contains {
+                    (pageLuma - 0.08)...(pageLuma - 0.004) ~= $0.luma
+                }
+                failure.check(border, "\(name) 亮色卡片有描边（从页面底分出边界）",
+                              detail: String(format: "（页面底 %.3f）", pageLuma))
             }
+        }
+
+        // ── 自检 ⑨：圆角与字号五档（P14-1 定死）──
+        //
+        // 这些是「规格里的数」而不是观感判据：派单把 32/17/15/13/11 和圆角 16
+        // 写死了，谁哪天顺手把标题调回 48、或给卡片新开一档 14pt，这里必须红
+        failure.check(Theme.Radius.card == 16, "卡片圆角 = 16",
+                      detail: "（实得 \(Theme.Radius.card)）")
+        failure.check(Theme.Spacing.cardPaddingH == 20 && Theme.Spacing.cardPaddingV == 16,
+                      "卡片内边距 = 水平 20 / 垂直 16",
+                      detail: "（实得 \(Theme.Spacing.cardPaddingH) / \(Theme.Spacing.cardPaddingV)）")
+        let styleSizes: Set<CGFloat> = [
+            Theme.Text.largeTitle.size, Theme.Text.bodyEmphasized.size,
+            Theme.Text.summary.size, Theme.Text.meta.size, Theme.Text.footnote.size,
+        ]
+        failure.check(styleSizes == Set<CGFloat>([32, 17, 15, 13, 11]),
+                      "字号正好五档 32/17/15/13/11",
+                      detail: "（实得 \(styleSizes.sorted().map { "\($0)" }.joined(separator: "/"))）")
+        failure.check(Theme.Text.largeTitle.weight == .bold,
+                      "页面标题 32/700")
+        failure.check(Theme.Text.bodyEmphasized.weight == .semibold,
+                      "分组/卡片标题 17/600")
+        failure.check(Theme.Text.summary.weight == .regular && Theme.Text.meta.weight == .regular,
+                      "摘要/元数据 400")
+
+        // ── 自检 ⑩：间距只允许节奏表里的值 ──
+        let offRhythm = Theme.RecordingLayout.spacingValues.filter {
+            !Theme.Spacing.rhythm.contains($0)
+        }
+        failure.check(offRhythm.isEmpty,
+                      "录音页间距全部落在 2/4/6/10/12/16/20/24/28/32",
+                      detail: offRhythm.isEmpty ? "" : "（越界 \(offRhythm.map { "\($0)" }.joined(separator: "、"))）")
+
+        // ── 自检 ⑪：页面底色与两级阴影（P14-1 定死）──
+        //
+        // 阴影按**数值逐层比对**，不比范围：范围判据分不出「两层」和
+        // 「四层都落在范围内」，而定死的就是两层这两个数
+        if let lightBG = srgbComponents(Theme.background, scheme: .light),
+           let darkBG = srgbComponents(Theme.background, scheme: .dark) {
+            let lightIsGray6 = abs(lightBG.0 - 245.0 / 255) < 0.002
+                && abs(lightBG.1 - 245.0 / 255) < 0.002
+                && abs(lightBG.2 - 247.0 / 255) < 0.002
+            failure.check(lightIsGray6, "亮色页面底 = #F5F5F7",
+                          detail: String(format: "（%.4f, %.4f, %.4f）", lightBG.0, lightBG.1, lightBG.2))
+            let darkIsBlack = darkBG.0 < 0.001 && darkBG.1 < 0.001 && darkBG.2 < 0.001
+            failure.check(darkIsBlack, "深色页面底 = #000000",
+                          detail: String(format: "（%.4f, %.4f, %.4f）", darkBG.0, darkBG.1, darkBG.2))
+        } else {
+            failure.check(false, "页面底色能解析成 sRGB")
+        }
+        let expectedLayers: [Theme.Shadow.Layer] = [
+            .init(opacity: 0.06, radius: 10, y: 2),
+            .init(opacity: 0.04, radius: 2, y: 1),
+        ]
+        failure.check(Theme.Shadow.layers(elevation: 1, scheme: .light) == expectedLayers,
+                      "亮色一级阴影 = 两层 (0,2,10,0.06) + (0,1,2,0.04)",
+                      detail: "（实得 \(Theme.Shadow.layers(elevation: 1, scheme: .light).map { "(y\($0.y), r\($0.radius), \($0.opacity))" }.joined(separator: " + "))）")
+        failure.check(Theme.Shadow.layers(elevation: 1, scheme: .dark).isEmpty,
+                      "深色一级零阴影")
+
+        // ── 自检 ⑫：这一包只渲 4 张 ──
+        if onlyRecordings {
+            failure.check(expected.count == 4,
+                          "只渲录音屏 4 张（亮/暗 × 有数据/空）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
 
         for line in failure.lines { print(line) }
