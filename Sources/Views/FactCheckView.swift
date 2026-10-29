@@ -17,29 +17,60 @@ struct FactCheckView: View {
     // MARK: - 标题区
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text("事实核查")
-                .textStyle(Theme.Text.largeTitle)
-                .foregroundStyle(Theme.textPrimary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // 44pt 工具栏：主操作在右上角（P14-4）
+            HStack(alignment: .center, spacing: Theme.Spacing.md) {
+                Text("事实核查")
+                    .textStyle(Theme.Text.largeTitle)
+                    .foregroundStyle(Theme.textPrimary)
 
-            HStack(spacing: Theme.Spacing.sm) {
+                Spacer(minLength: Theme.Spacing.md)
+
+                ToolbarActionButton(
+                    title: "重新核查",
+                    systemImage: "arrow.clockwise",
+                    isEnabled: canRecheck
+                ) {
+                    recheckAll()
+                }
+            }
+            .frame(height: Theme.RecordingLayout.toolbarHeight)
+
+            HStack(spacing: Theme.Spacing.s6) {
                 Text("\(store.results.count) 条")
                 if store.pendingCount > 0 {
                     Text("·")
                     Text("\(store.pendingCount) 条核查中").foregroundStyle(Theme.accent)
                 }
             }
-            .textStyle(Theme.Text.caption)
-            .foregroundStyle(Theme.textSecondary)
+            .textStyle(Theme.Text.meta)
+            .foregroundStyle(Theme.textSupporting)
 
             if !store.isConfigured {
                 configWarning
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.top, Theme.Spacing.xl)
-        .padding(.bottom, Theme.Spacing.lg)
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.RecordingLayout.pagePadding)
+        .padding(.bottom, Theme.Spacing.md)
+    }
+
+    /// 有结论、有凭证、且没有正在跑的核查时才允许「重新核查」。
+    /// 跑着的时候再点一次会给同一条 claim 起两个请求
+    private var canRecheck: Bool {
+        store.isConfigured && !store.results.isEmpty && store.pendingCount == 0
+    }
+
+    /// 重新核查 = 对当前每一条结果再走一次既有的 `retry`。
+    /// 这是 UI 层的批量动作，不改 store 的语义：`retry` 本来就是
+    /// 「删掉这条、拿同一句 claim 重新提交」，逐条调用和用户逐条点
+    /// 右上角的「重试」完全同一条路径
+    private func recheckAll() {
+        guard canRecheck else { return }
+        for result in store.results {
+            store.retry(result)
+        }
     }
 
     /// 缺配置是「这个功能现在不能用」的状态，用警告图标 + 颜色说，
@@ -49,8 +80,8 @@ struct FactCheckView: View {
             StatusMark(kind: .warning, text: "未配置搜索密钥，核查不可用")
             ForEach(AppConfig.statusLines, id: \.self) { line in
                 Text(line)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.textSecondary)
+                    .font(Theme.Text.footnote.font.monospaced())
+                    .foregroundStyle(Theme.textSupporting)
                     .textSelection(.enabled)
             }
         }
@@ -69,7 +100,7 @@ struct FactCheckView: View {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.lg) {
                 if store.results.isEmpty {
                     Text("转录出完整句子后，核查结果会自动出现在这里。")
-                        .textStyle(Theme.Text.body)
+                        .textStyle(Theme.Text.summary)
                         .foregroundStyle(Theme.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 100)
@@ -84,7 +115,7 @@ struct FactCheckView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Theme.pagePadding)
+            .padding(.horizontal, Theme.RecordingLayout.pagePadding)
             .padding(.bottom, Theme.Spacing.xxl)
         }
     }
@@ -108,12 +139,27 @@ private struct FactCheckRow: View {
             statusIcon
 
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                // 原句
-                Text(result.claim)
-                    .textStyle(Theme.Text.body)
-                    .foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
+                // 原句 + 右上角结论角标。置信度从正文行里拿出来贴在角标旁
+                // （P14-4）：它是结论的注脚，不是正文的第二行
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
+                    Text(result.claim)
+                        .textStyle(Theme.Text.summary)
+                        .foregroundStyle(Theme.textPrimary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: Theme.Spacing.s12)
+
+                    if result.phase == .done {
+                        StatusCapsule(text: result.status.label, color: statusColor)
+                        if result.showsConfidence {
+                            Text("把握 \(Int(result.confidence * 100))%")
+                                .font(Theme.Text.footnote.font.monospacedDigit())
+                                .foregroundStyle(Theme.textSupporting)
+                                .lineLimit(1)
+                        }
+                    }
+                }
 
                 switch result.phase {
                 case .searching:
@@ -125,7 +171,7 @@ private struct FactCheckRow: View {
                         StatusMark(kind: .error, text: message)
                         Button("重试", action: onRetry)
                             .buttonStyle(.plain)
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                             .foregroundStyle(Theme.accent)
                     }
                 case .done:
@@ -199,8 +245,8 @@ private struct FactCheckRow: View {
                 ProgressView().controlSize(.small)
             }
         }
-        // 和原句首行对齐（body 是 17pt）
-        .frame(width: 18, height: 22)
+        // 和原句首行对齐（原句是 15pt）
+        .frame(width: 18, height: 20)
     }
 
     /// verified #30D158，unverifiable #FF9F0A，disputed 用系统红
@@ -234,26 +280,22 @@ private struct FactCheckRow: View {
 
     private var doneBody: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            HStack(spacing: Theme.Spacing.sm) {
-                Text(result.status.label)
-                    .font(.system(size: Theme.Text.caption.size, weight: .medium))
-                    .foregroundStyle(statusColor)
-                if result.showsConfidence {
-                    Text("把握 \(Int(result.confidence * 100))%")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Theme.textTertiary)
-                }
-            }
-
             Text(result.explanation)
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textSecondary)
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textSupporting)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !result.sources.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                    ForEach(result.sources) { source in
+                    // 每条来源一行；整个来源块最多两行（P14-4），
+                    // 多出来的用一行计数收口，不把卡片撑成一段链接列表
+                    ForEach(result.sources.prefix(2)) { source in
                         SourceLink(source: source)
+                    }
+                    if result.sources.count > 2 {
+                        Text("+\(result.sources.count - 2) 个来源")
+                            .textStyle(Theme.Text.footnote)
+                            .foregroundStyle(Theme.textTertiary)
                     }
                 }
             }
@@ -264,8 +306,8 @@ private struct FactCheckRow: View {
         HStack(spacing: Theme.Spacing.xs) {
             ProgressView().controlSize(.small)
             Text(text)
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textSupporting)
         }
     }
 }
@@ -297,19 +339,19 @@ private struct FactCheckPreview: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(statusColor)
                 Text(result.status.label)
-                    .font(.system(size: Theme.Text.caption.size, weight: .medium))
+                    .font(Theme.Text.meta.font.weight(.semibold))
                     .foregroundStyle(statusColor)
                 if result.showsConfidence {
                     Text("把握 \(Int(result.confidence * 100))%")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Theme.textTertiary)
+                        .font(Theme.Text.footnote.font.monospacedDigit())
+                        .foregroundStyle(Theme.textSupporting)
                 }
             }
 
             if result.phase == .done {
                 Text(result.explanation)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -317,16 +359,16 @@ private struct FactCheckPreview: View {
             if !context.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                     Text("原文上下文")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Theme.Text.footnote.font.weight(.medium))
                         .foregroundStyle(Theme.textTertiary)
 
                     ForEach(context) { segment in
                         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                             Text(segment.formattedTimestamp)
-                                .font(.system(size: 10, design: .monospaced))
+                                .font(Theme.Text.footnote.font.monospacedDigit())
                                 .foregroundStyle(Theme.textTertiary)
                             Text(segment.text)
-                                .textStyle(Theme.Text.caption)
+                                .textStyle(Theme.Text.meta)
                                 .foregroundStyle(segment.id == result.segmentID
                                     ? Theme.textPrimary : Theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -346,7 +388,7 @@ private struct FactCheckPreview: View {
             if !result.sources.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                     Text("来源")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(Theme.Text.footnote.font.weight(.medium))
                         .foregroundStyle(Theme.textTertiary)
                     ForEach(result.sources) { source in
                         SourceLink(source: source)
@@ -357,7 +399,7 @@ private struct FactCheckPreview: View {
 
             if context.isEmpty && result.sources.isEmpty && result.phase != .done {
                 Text("核查尚未完成")
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textTertiary)
             }
         }
@@ -377,18 +419,20 @@ private struct SourceLink: View {
                 Link(destination: url) {
                     HStack(spacing: Theme.Spacing.xs) {
                         Image(systemName: "link")
-                            .font(.system(size: 9))
+                            .font(.system(size: Theme.Text.footnote.size))
                         Text(source.title)
+                            // 来源每条一行：长标题截断，不换行挤成两段
                             .lineLimit(1)
                     }
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textSecondary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
                 }
                 .buttonStyle(.plain)
             } else {
                 Text(source.title)
-                    .font(.system(size: 11))
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1)
             }
         }
     }

@@ -209,9 +209,12 @@ enum MarkdownRenderer {
           @media (prefers-color-scheme: dark) {
             :root { --fg: #f5f5f7; --muted: #a1a1a6; --rule: #3a3a3c; }
           }
-          h1 { font-size: 30px; font-weight: 300; letter-spacing: -0.5px; margin: 34px 0 14px; }
-          h2 { font-size: 23px; font-weight: 400; letter-spacing: -0.3px; margin: 32px 0 12px; }
-          h3 { font-size: 18px; font-weight: 500; margin: 24px 0 8px; }
+          /* P14-4：笔记块的小节标题 17/600、正文 15（body 已定在 15）。
+             30/23/18 那套是「文档网页」的比例，放进 App 卡片里比页面标题
+             还大；标题层级只用字重和留白表达 */
+          h1 { font-size: 32px; font-weight: 700; letter-spacing: -0.4px; margin: 32px 0 12px; }
+          h2 { font-size: 17px; font-weight: 600; letter-spacing: -0.2px; margin: 24px 0 8px; }
+          h3 { font-size: 15px; font-weight: 600; margin: 20px 0 6px; }
           h1:first-child, h2:first-child { margin-top: 8px; }
           p { margin: 10px 0; }
           ul { margin: 10px 0; padding-left: 22px; }
@@ -233,13 +236,13 @@ enum MarkdownRenderer {
           }
           pre code { background: none; padding: 0; }
           table {
-            border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 14px;
+            border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 13px;
           }
           th, td {
             text-align: left; padding: 9px 12px;
             border-bottom: 1px solid var(--rule);
           }
-          th { font-weight: 600; color: var(--muted); font-size: 12px;
+          th { font-weight: 600; color: var(--muted); font-size: 11px;
                text-transform: uppercase; letter-spacing: 0.4px; }
           a { color: var(--accent); text-decoration: none; }
           a:hover { text-decoration: underline; }

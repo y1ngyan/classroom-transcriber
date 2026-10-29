@@ -328,13 +328,12 @@ enum Theme {
     // MARK: - 控件尺寸
 
     enum Control {
-        /// 胶囊按钮固定高度。**必须固定**：转录页底部安全区是按
-        /// 「按钮高度 + 一级间距」算的，按钮高度要是随字号/加载态漂，
-        /// 安全区就会在某次改字号之后悄悄不够
+        /// 胶囊按钮固定高度。**必须固定**：按钮高度要是随字号/加载态漂，
+        /// 同一行里并排的两个按钮就会错位
         static let pillHeight: CGFloat = 38
-        /// 转录页底部浮动区的最小占位：胶囊 + 底部外边距（`Spacing.xl`）。
-        /// 列表用 `safeAreaInset` 挂在它上面，实际预留还会加上「下次录制」那行
-        static let floatingBarHeight: CGFloat = pillHeight + Spacing.xl
+        /// 工具栏里主操作的胶囊高度（P14-4）。工具条本身 44pt，
+        /// 主操作不能跟页面标题一样高，28 是「工具条里的一颗按钮」
+        static let toolbarActionHeight: CGFloat = 28
     }
 
     // MARK: - 录音页尺寸

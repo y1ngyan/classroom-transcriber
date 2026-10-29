@@ -134,16 +134,28 @@ enum UISnapshot {
             ("recordings-empty", AnyView(RecordingsView().environment(empty)), nil),
         ]
 
-        // P14-1：只看录音这一屏时（派单要求「只渲 4 张」），用
-        // `UI_SNAPSHOT_ONLY=recordings` 把其余五屏整体跳过。做成环境变量而不是
-        // 新 CLI 参数：`--ui-snapshot` 的解析在 `App.swift`，本包不许改它
-        let onlyRecordings = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
-            == "recordings"
-        let screens = onlyRecordings
-            ? allScreens.filter { $0.name.hasPrefix("recordings") }
-            : allScreens
+        // 分屏渲染开关。做成环境变量而不是新 CLI 参数：
+        // `--ui-snapshot` 的解析在 `App.swift`，本包不许改它
+        //   · `recordings`：P14-1/P14-2/P14-3 的「只渲 4 张」；
+        //   · `p14-4`：P14-4 的五屏 × 亮暗共 10 张，跳过录音列表
+        let only = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
+        let onlyRecordings = only == "recordings"
+        let onlyFive = only == "p14-4"
+        let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
+            if onlyRecordings {
+                return allScreens.filter { $0.name.hasPrefix("recordings") }
+            }
+            if onlyFive {
+                return allScreens.filter { !$0.name.hasPrefix("recordings") }
+            }
+            return allScreens
+        }()
         if onlyRecordings {
             print("  模式：只渲录音屏（UI_SNAPSHOT_ONLY=recordings）")
+            print("")
+        }
+        if onlyFive {
+            print("  模式：只渲五屏 10 张（UI_SNAPSHOT_ONLY=p14-4）")
             print("")
         }
 
@@ -254,22 +266,20 @@ enum UISnapshot {
             }
         }
 
-        // ── 自检 ⑥：转录页底部安全区 ──
+        // ── 自检 ⑥：五屏共用左右边距 24（P14-4）──
         //
-        // 转录页的底部栏用 `safeAreaInset` 挂在列表上，预留量取
-        // `Theme.Control.floatingBarHeight`。这条判据盯的是那个常量：
-        // 它必须至少「胶囊高度 + 一级间距」，否则最后一张卡片会被压住。
-        // 变异实验：把 floatingBarHeight 改成 pillHeight，这条红
-        let requiredInset = Theme.Control.pillHeight + Theme.Spacing.md
-        failure.check(Theme.Control.floatingBarHeight >= requiredInset,
-                      "转录页底部预留 ≥ 胶囊高度 + Spacing.md",
-                      detail: String(format: "（%.0f ≥ %.0f + %.0f）",
-                                     Theme.Control.floatingBarHeight,
-                                     Theme.Control.pillHeight,
-                                     Theme.Spacing.md))
+        // 五屏都用 `RecordingLayout.pagePadding`（P14-4 把页边距并到
+        // 录音列表那一套）。变异实验：把它改成 40（旧的 `pagePadding`），
+        // 这条红——顺手也会把 10 张快照的左基线全部推歪
+        failure.check(Theme.RecordingLayout.pagePadding == 24,
+                      "五屏左右边距 = 24",
+                      detail: "（实得 \(Theme.RecordingLayout.pagePadding)）")
 
         // ── 自检 ⑦：亮暗真的渲成了两套（色板没被忽略）──
-        if let light = written["recordings-light.png"], let dark = written["recordings-dark.png"],
+        // 两种分屏模式各挑一张同时在两种外观下都存在的屏
+        let schemePair = onlyFive ? "settings" : "recordings"
+        if let light = written["\(schemePair)-light.png"],
+           let dark = written["\(schemePair)-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
             failure.check(lightLum > 0.9 && darkLum < 0.1,
                           "亮/暗两张分别是浅底和黑底",
@@ -468,10 +478,15 @@ enum UISnapshot {
         failure.check(redTexts == ["1 段不可信"], "不可信胶囊里只放异常",
                       detail: "（实得 \(redTexts.joined(separator: "、"))）")
 
-        // ── 自检 ⑬：这一包只渲 4 张 ──
+        // ── 自检 ⑬：分屏模式的张数 ──
         if onlyRecordings {
             failure.check(expected.count == 4,
                           "只渲录音屏 4 张（亮/暗 × 有数据/空）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+        }
+        if onlyFive {
+            failure.check(expected.count == 10,
+                          "只渲五屏 10 张（五屏 × 亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
 

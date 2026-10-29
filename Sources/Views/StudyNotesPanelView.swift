@@ -20,8 +20,10 @@ struct StudyNotesPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // 详情页里的小节标题走 17/600（P14-4）：28 那一档留给页面标题，
+            // 一个区块不能和整页标题一样大
             Text("课后笔记")
-                .textStyle(Theme.Text.title)
+                .textStyle(Theme.Text.bodyEmphasized)
                 .foregroundStyle(Theme.textPrimary)
 
             // 面板内容（状态、操作、正文）是一个整体，用一张卡片圈住。
@@ -62,10 +64,10 @@ struct StudyNotesPanelView: View {
         case .empty:
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text("还没有这条录音的课后笔记。")
-                    .textStyle(Theme.Text.body)
+                    .textStyle(Theme.Text.summary)
                     .foregroundStyle(Theme.textTertiary)
                 Text("将包含：摘要 · 重点 · 待办 · 考点 · 术语（每条都带转录时间戳）")
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textTertiary)
             }
 
@@ -76,7 +78,7 @@ struct StudyNotesPanelView: View {
                 HStack(spacing: Theme.Spacing.sm) {
                     ProgressView().controlSize(.small)
                     Text(progress?.label(now: context.date) ?? "正在生成…")
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .monospacedDigit()
                         .foregroundStyle(Theme.textSecondary)
                 }
@@ -129,7 +131,7 @@ struct StudyNotesPanelView: View {
 
             if state.showsExistingNotes {
                 Button(action: exportNotes) {
-                    Text("导出 Markdown").textStyle(Theme.Text.caption)
+                    Text("导出 Markdown").textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.accent).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

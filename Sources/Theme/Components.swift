@@ -150,6 +150,97 @@ struct PillMenu<Content: View>: View {
     }
 }
 
+// MARK: - 工具栏主操作
+
+/// 每屏顶部工具栏右侧的主操作（P14-4）：accent 胶囊、固定 28pt 高。
+///
+/// 和 `PillButton` 分开而不是加个高度参数：工具条里的按钮和页面里的
+/// 胶囊不是同一种东西——`PillButton` 的水平内边距、字号、高度都是按
+/// 「页面里的主按钮」定的，把尺寸做成参数会让每个调用点都要记住一组数
+struct ToolbarActionButton: View {
+    let title: String
+    var systemImage: String?
+    var isLoading = false
+    var isEnabled = true
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    private var isInteractive: Bool { isEnabled && !isLoading }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Spacing.s6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(.white)
+                } else if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: Theme.Text.meta.size))
+                }
+                Text(title)
+                    .font(Theme.Text.meta.font.weight(.semibold))
+            }
+            .padding(.horizontal, Theme.Spacing.s12)
+            .frame(height: Theme.Control.toolbarActionHeight)
+            .background(Capsule().fill(Theme.accent))
+            .foregroundStyle(.white)
+        }
+        .buttonStyle(.plain)
+        .opacity(isInteractive ? 1 : 0.35)
+        .disabled(!isInteractive)
+        .brightness(isHovering && isInteractive ? 0.06 : 0)
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - 状态胶囊
+
+/// 11pt 状态胶囊：文字 + 12% 同色底（P14-4）。
+///
+/// 录音列表那版角标是「N 段 + 状态」，这里的单段状态 / 提问标记没有段数，
+/// 只放状态词——两者形状一致（胶囊 + 12% 底），扫读时是同一族的标记
+struct StatusCapsule: View {
+    let text: String
+    let color: Color
+    var systemImage: String?
+
+    var body: some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: Theme.Text.footnote.size))
+            }
+            Text(text)
+                .font(Theme.Text.footnote.font.weight(.semibold))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, Theme.RecordingLayout.badgePaddingH)
+        .padding(.vertical, Theme.RecordingLayout.badgePaddingV)
+        .background(Capsule().fill(color.opacity(0.12)))
+        .foregroundStyle(color)
+    }
+}
+
+// MARK: - 说明气泡
+
+/// 压缩后的说明文字旁边挂一个问号，完整文案进系统帮助气泡。
+///
+/// 用 `.help` 而不是自绘 popover：系统气泡已经把键盘、焦点、点外关闭做完，
+/// 而这里要的只是「放不下的话去哪儿看」
+struct InfoBubble: View {
+    let text: String
+
+    var body: some View {
+        Image(systemName: "questionmark.circle")
+            .font(.system(size: Theme.Text.footnote.size))
+            .foregroundStyle(Theme.textTertiary)
+            .help(text)
+            .accessibilityLabel("更多说明")
+    }
+}
+
 // MARK: - Separator
 
 /// 发丝级分隔线，对应 RN 的 `StyleSheet.hairlineWidth` + #D2D2D7。
@@ -235,26 +326,64 @@ struct TranscriptLine: View {
     }
 
     private var content: some View {
-        VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
-            // 提问标记：小图标 + 颜色（设计规范的状态表达方式），不加底色块。
-            // L2 是确认的提问，L1 只是点名/祈使预警——颜色和措辞都分开，
-            // 混在一起用户会以为每条「谁来回答一下」都是一道完整的问题
-            if segment.isQuestion {
-                HStack(spacing: 5) {
-                    Image(systemName: segment.questionLevel >= 2
-                        ? "questionmark.bubble.fill"
-                        : "hand.raised.fill")
-                        .font(.system(size: 11))
-                    Text(segment.questionLevel >= 2 ? "提问" : "点名")
-                        .textStyle(Theme.Text.caption)
+        VStack(alignment: .leading, spacing: Theme.Spacing.s6) {
+            // 顶部一行：时间是定位刻度，说话人是内容，提问是状态，核查结论
+            // 收在右端。P14-4 把原来「正文下面那一行长文本」整段搬上来：
+            // 核查结论是个状态，不是正文的第二行
+            HStack(alignment: .center, spacing: Theme.Spacing.s6) {
+                Text(segment.formattedTimestamp)
+                    .font(Theme.Text.meta.font.monospacedDigit())
+                    .foregroundStyle(Theme.textSupporting)
+
+                // 说话人是内容（用户要知道谁说的），时间戳是定位用的刻度：
+                // 时间戳用 textSupporting 之后，说话人必须提到正文色，
+                // 否则两档深浅会反
+                if let speakerLabel {
+                    Text(speakerLabel)
+                        .font(Theme.Text.meta.font.weight(.medium).monospacedDigit())
+                        .foregroundStyle(Theme.textPrimary)
                 }
-                .foregroundStyle(segment.questionLevel >= 2 ? Theme.accent : Theme.warning)
-                .frame(maxWidth: .infinity, alignment: .leading)
+
+                // 提问标记：L2 是确认的提问，L1 只是点名/祈使预警——
+                // 颜色和措辞都分开，混在一起用户会以为每条「谁来回答一下」
+                // 都是一道完整的问题
+                if segment.isQuestion {
+                    StatusCapsule(
+                        text: segment.questionLevel >= 2 ? "提问" : "点名",
+                        color: segment.questionLevel >= 2 ? Theme.accent : Theme.warning,
+                        systemImage: segment.questionLevel >= 2
+                            ? "questionmark.bubble.fill"
+                            : "hand.raised.fill"
+                    )
+                }
+
+                Spacer(minLength: Theme.Spacing.sm)
+
+                // 手动核查入口：悬停才出现。常驻的话每段都挂个按钮，
+                // 一屏几十段全是控件，读转录本身反而被挤没了
+                if isHovering, onCheck != nil, segment.isFinal {
+                    Button(action: { onCheck?() }) {
+                        Text(hasResolvedCheck ? "重新核查" : "核查")
+                            .font(Theme.Text.meta.font.weight(.medium))
+                            .foregroundStyle(Theme.accent)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(checkState == .checking)
+                    .opacity(checkState == .checking ? 0.4 : 1)
+                    .transition(.opacity)
+                }
+
+                // 核查状态：右上角标。只在「查过」或「正在查」时出现——
+                // 没查过的段是绝大多数，给每段都挂一个「未核查」
+                // 等于把列表塞满噪声
+                if let badge = checkBadge {
+                    StatusCapsule(text: badge.text, color: badge.color)
+                }
             }
 
-            // 质量自评：小图标 + 颜色（和提问标记同一套状态语言），不加底色块。
-            // good 不标——满屏都是「可信」标记，等于没有标记；只有需要用户
-            // 警惕的段落才占一行
+            // 质量自评：good 不标——满屏都是「可信」标记，等于没有标记；
+            // 只有需要用户警惕的段落才占一行
             if let grade = segment.qualityGrade, grade != .good {
                 StatusMark(
                     kind: grade == .poor ? .error : .warning,
@@ -267,104 +396,59 @@ struct TranscriptLine: View {
 
             // 语义切分：识别器只在长静音处切段，课堂上十几秒一整段是常态。
             // 切分是派生数据（segments 数据层不动，见 TranscriptSplitter），
-            // 这里只负责把子段分行画出来——同一段的子段共享底部那一个
-            // 时间戳，后续子行缩进一档表示「我是续行」，不再重复时间戳
+            // 这里只负责把子段分行画出来。**不再给续行缩进**（P14-4）：
+            // 左基线全站统一，卡内缩进一档会被读成「二级层级」
             let pieces = TranscriptSplitter.split(segment)
             if pieces.count == 1 {
-                Text(TextHighlight.styled(segment.text))
-                    .textStyle(Theme.Text.body)
-                    // 未定稿的段落压暗一档：识别结果还会变，视觉上先区分开
-                    .opacity(segment.isFinal ? 1 : 0.55)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                bodyText(segment.text)
             } else {
                 VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                    ForEach(Array(pieces.enumerated()), id: \.offset) { index, piece in
-                        Text(TextHighlight.styled(piece.text))
-                            .textStyle(Theme.Text.body)
-                            .padding(.leading, index == 0 ? 0 : Theme.Spacing.lg)
-                            .textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                    ForEach(Array(pieces.enumerated()), id: \.offset) { _, piece in
+                        bodyText(piece.text)
                     }
                 }
                 .opacity(segment.isFinal ? 1 : 0.55)
             }
 
-            // 核查状态：和提问标记、质量自评同一套状态语言（小图标 + 颜色）。
-            // 只在「查过」或「正在查」时占一行——没查过的段是绝大多数，
-            // 给每段都挂一个「未核查」等于把列表塞满噪声
-            if let mark = checkMark {
-                StatusMark(kind: mark.kind, text: mark.text)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            // 缩略图 + 时间戳，一起右对齐
-            HStack(alignment: .bottom, spacing: Theme.Spacing.sm) {
-                // 手动核查入口：悬停才出现。
-                // 放在时间戳左边而不是常驻——常驻的话每段都挂个按钮，
-                // 一屏几十段全是控件，读转录本身反而被挤没了
-                if isHovering, onCheck != nil, segment.isFinal {
-                    Button(action: { onCheck?() }) {
-                        Text(hasResolvedCheck ? "重新核查" : "核查")
-                            .textStyle(Theme.Text.caption)
-                            .foregroundStyle(Theme.accent)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(checkState == .checking)
-                    .opacity(checkState == .checking ? 0.4 : 1)
-                    .transition(.opacity)
-                }
-
-                ForEach(attachments) { attachment in
-                    if let onRemoveAttachment {
-                        Thumbnail(attachment: attachment) { onRemoveAttachment(attachment) }
-                    } else {
-                        Thumbnail(attachment: attachment) {}
+            if !attachments.isEmpty {
+                HStack(alignment: .bottom, spacing: Theme.Spacing.sm) {
+                    ForEach(attachments) { attachment in
+                        if let onRemoveAttachment {
+                            Thumbnail(attachment: attachment) { onRemoveAttachment(attachment) }
+                        } else {
+                            Thumbnail(attachment: attachment) {}
+                        }
                     }
                 }
-
-                // 说话人编号。**放在时间戳左边**，不另起一行：另起一行会让
-                // 每一段都多出一行（一屏几十段），而它和核查按钮、时间戳
-                // 一样都是这行的元数据。
-                //
-                // 说话人是内容（用户要知道谁说的），时间戳是定位用的刻度：
-                // 时间戳提到 textSupporting 之后，说话人必须一起提到正文色，
-                // 否则两档深浅会反（supporting 比 textSecondary 深）
-                if let speakerLabel {
-                    Text(speakerLabel)
-                        .textStyle(Theme.Text.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.textPrimary)
-                }
-
-                // 时间戳：dispatch 里「太浅」点名的一处。它是卡片里的辅助信息，
-                // 不是装饰刻度，按正文补充标准取色（≥4.5:1）
-                Text(segment.formattedTimestamp)
-                    .textStyle(Theme.Text.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(Theme.textSupporting)
             }
         }
     }
 
-    /// 核查状态对应的标记。没查过返回 nil（那一行不显示）
-    private var checkMark: (kind: StatusMark.Kind, text: String)? {
+    /// 正文 15pt（P14-4）。未定稿的段落压暗一档：识别结果还会变，视觉上先分开
+    private func bodyText(_ text: String) -> some View {
+        Text(TextHighlight.styled(text))
+            .textStyle(Theme.Text.summary)
+            .opacity(segment.isFinal ? 1 : 0.55)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 核查状态角标。没查过返回 nil
+    private var checkBadge: (text: String, color: Color)? {
         switch checkState {
         case .none:
             return nil
         case .checking:
-            return (.live, "核查中…")
+            return ("核查中", Theme.accent)
         case .failed:
-            return (.warning, "核查失败，可重新核查")
+            return ("核查失败", Theme.warning)
         case .done(.verified):
-            return (.ok, "已核查：已证实")
+            return ("已证实", Theme.success)
         case .done(.disputed):
-            return (.error, "已核查：存疑")
+            return ("存疑", Theme.error)
         case .done(.unverifiable):
-            return (.unknown, "已核查：无法核实")
+            return ("无法核实", Theme.warning)
         }
     }
 }
@@ -502,12 +586,12 @@ struct StatusMark: View {
     var text: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 5) {
+        HStack(alignment: .top, spacing: Theme.Spacing.xs) {
             Image(systemName: kind.symbol)
-                .font(.system(size: 11))
+                .font(.system(size: Theme.Text.footnote.size))
             if let text {
                 Text(text)
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
