@@ -12,7 +12,8 @@ struct RootView: View {
         case settings = "设置"
     }
 
-    @State private var tab: Tab = .transcription
+    /// 选中项住在 `AppState`（见那边的注释）：录音空状态的引导按钮要能切页
+    private var tab: Tab { appState.selectedTab }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,7 +44,7 @@ struct RootView: View {
         HStack(spacing: Theme.Spacing.lg) {
             ForEach(Tab.allCases, id: \.self) { item in
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { tab = item }
+                    withAnimation(.easeInOut(duration: 0.15)) { appState.selectedTab = item }
                 } label: {
                     VStack(spacing: Theme.Spacing.xs) {
                         Text(item.rawValue)

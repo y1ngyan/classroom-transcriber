@@ -17,10 +17,17 @@ import AppKit
 ///     点击、滚动这类**交互态**一张都拍不到（悬停态靠 token 的数值自检兜）；
 ///   · 是真机像素，但不是真机性能：滚动性能、Retina 下 0.5pt 边框的实际
 ///     观感、深色下「用亮一档的底代替阴影」在真实壁纸背景上的效果，
-///     这三件只有人对着 App 看才算验过。
+///     这三件只有人对着 App 看才算验过；
+///   · 笔记正文是 `WKWebView`，离屏渲染**拍不到它加载后的内容**。
+///     `notes` 快照拍的是「还没有笔记」那一档（有图标、有引导、有卡片），
+///     生成后的正文长什么样只验到「外面那张卡片」，里面没有验。
+///   · `transcription` / `glossary` 两张只截得到**内容最后一段**（转录列表 /
+///     术语列表）：页头占掉一屏，而离屏宿主滚不动（见 `renderBottom`）。
+///     它们是「列表区域」的快照，不是整页。
 ///
-/// **夹具不碰用户数据**：会话库整个建在临时目录里（`AppState` 的
-/// `sessionsDirectory` 参数就是为这件事加的），渲完即删。
+/// **夹具不碰用户数据**：会话库整个建在临时目录里；术语表/核查/转录三项
+/// 用 store 的预置 init（不读也不写用户的 glossary.json / 真实录音库），
+/// 渲完即删。
 @MainActor
 enum UISnapshot {
 
@@ -63,32 +70,66 @@ enum UISnapshot {
         }
         defer { try? FileManager.default.removeItem(at: root) }
 
-        seedFixture(into: dataSessions)
-        // 空状态那个 AppState 用空目录：一个文件都不写，index 读出来就是空的
-        let populated = AppState(sessionsDirectory: dataSessions, audioDirectory: dataAudio)
-        let empty = AppState(sessionsDirectory: emptySessions, audioDirectory: emptyAudio)
+        seedRecordings(into: dataSessions)
+
+        let transcript = transcriptFixture()
+        let checks = factCheckFixture(segments: transcript)
+        let terms = glossaryFixture()
+
+        let populated = AppState(
+            sessionsDirectory: dataSessions,
+            audioDirectory: dataAudio,
+            transcription: TranscriptionEngine(segments: transcript),
+            factCheck: FactCheckStore(results: checks),
+            glossary: GlossaryStore(entries: terms)
+        )
+        // 空状态那个 AppState 用空目录 + 空 store：一条都不造，index 读出来就是空的。
+        // 术语表也显式给空数组——走默认 init 会读用户真实的 glossary.json
+        let empty = AppState(
+            sessionsDirectory: emptySessions,
+            audioDirectory: emptyAudio,
+            transcription: TranscriptionEngine(),
+            factCheck: FactCheckStore(results: []),
+            glossary: GlossaryStore(entries: [])
+        )
 
         failure.check(populated.recordings.summaries.count == 3,
-                      "夹具读回来 3 条录音",
+                      "录音夹具读回来 3 条",
                       detail: "（实得 \(populated.recordings.summaries.count)）")
-        // 「不可信 + 存疑」并存的那条：质量状态格必须两种数都报，
-        // 这类回归只有夹具里真的有并存数据才看得见
         let mixedQuality = populated.recordings.summaries.filter {
             $0.poorCount > 0 && $0.fairCount > 0
         }
         failure.check(mixedQuality.count == 1,
-                      "夹具里有一条「不可信 + 存疑」并存的录音",
+                      "录音夹具里有一条「不可信 + 存疑」并存",
                       detail: "（实得 \(mixedQuality.count) 条）")
+        failure.check(populated.transcription.segments.count == 4,
+                      "转录夹具 4 段",
+                      detail: "（实得 \(populated.transcription.segments.count)）")
+        failure.check(populated.factCheck.results.count == 3,
+                      "核查夹具 3 条",
+                      detail: "（实得 \(populated.factCheck.results.count)）")
+        failure.check(populated.glossary.entries.count == 5,
+                      "术语表夹具 5 条",
+                      detail: "（实得 \(populated.glossary.entries.count)）")
         failure.check(empty.recordings.summaries.isEmpty && empty.recordings.recoveryItems.isEmpty,
                       "空状态夹具确实为空")
 
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
         // ── 渲染 ──
-        let screens: [(name: String, view: AnyView)] = [
-            ("recordings", AnyView(RecordingsView().environment(populated))),
-            ("recordings-empty", AnyView(RecordingsView().environment(empty))),
-            ("settings", AnyView(SettingsView().environment(empty))),
+        // `tallHeight` 只给「关键内容在折叠线以下」的屏：
+        //   · 术语表 —— 页头是三段说明，760pt 一屏只拍得到说明，拍不到术语列表；
+        //   · 转录 —— 第四段是**正在转写**的那一段（`isHighlighted` 是本包的
+        //     改动之一），760pt 一屏时它落在底部录制条后面，一行都看不见。
+        // 离屏宿主不能滚（见 `renderBottom` 的注释），只能把宿主加高再截最后一段
+        let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
+            ("transcription", AnyView(TranscriptionView().environment(populated)), 900),
+            ("fact-check", AnyView(FactCheckView().environment(populated)), nil),
+            ("notes", AnyView(NotesView().environment(populated)), nil),
+            ("glossary", AnyView(GlossaryView().environment(populated)), 2000),
+            ("settings", AnyView(SettingsView().environment(populated)), nil),
+            ("recordings", AnyView(RecordingsView().environment(populated)), nil),
+            ("recordings-empty", AnyView(RecordingsView().environment(empty)), nil),
         ]
 
         var written: [String: URL] = [:]
@@ -98,7 +139,12 @@ enum UISnapshot {
                 let name = "\(screen.name)-\(suffix).png"
                 let url = output.appendingPathComponent(name)
                 do {
-                    try render(screen.view, scheme: scheme, to: url)
+                    if let tall = screen.tallHeight {
+                        try renderBottom(of: screen.view, scheme: scheme,
+                                         tallHeight: tall, to: url)
+                    } else {
+                        try render(screen.view, scheme: scheme, to: url)
+                    }
                     written[name] = url
                 } catch {
                     failure.check(false, "渲染 \(name)", detail: "（\(error.localizedDescription)）")
@@ -125,8 +171,10 @@ enum UISnapshot {
                 wrongSize.append("\(name)(\(rep.pixelsWide)×\(rep.pixelsHigh))")
             }
         }
-        failure.check(missing.isEmpty, "6 张 PNG 全部落盘", detail: missing.isEmpty ? "" : "（缺 \(missing.joined(separator: "、"))）")
-        failure.check(undersized.isEmpty, "每张 > 1KB", detail: undersized.isEmpty ? "" : "（\(undersized.joined(separator: "、"))）")
+        failure.check(missing.isEmpty, "\(expected.count) 张 PNG 全部落盘",
+                      detail: missing.isEmpty ? "" : "（缺 \(missing.joined(separator: "、"))）")
+        failure.check(undersized.isEmpty, "每张 > 1KB",
+                      detail: undersized.isEmpty ? "" : "（\(undersized.joined(separator: "、"))）")
         failure.check(wrongSize.isEmpty, "尺寸 = \(Int(canvas.width * scale))×\(Int(canvas.height * scale))",
                       detail: wrongSize.isEmpty ? "" : "（\(wrongSize.joined(separator: "、"))）")
 
@@ -170,12 +218,205 @@ enum UISnapshot {
             failure.check(false, "亮/暗两张能读出来做像素比对")
         }
 
+        // ── 自检 ⑥：每张非空 + 卡片真的从背景里分出来 ──
+        //
+        // **这是 P13-1 那个「页头有数、下面空白」的直接判据**：只看文件
+        // 大小会被一张白图骗过，所以按像素数「和页面底色不一样的点」。
+        // 卡片分离分两种外观判，因为两种外观靠的东西不同：
+        //   · 浅色：卡片底也是白的，靠 6% 描边（+阴影）分界 → 找竖边；
+        //   · 深色：靠更亮一档的底 → 找长横条；描边单独再判一条
+        //     （变异实验里「底还在、描边没了」必须能红）。
+        for name in expected {
+            guard let rep = bitmap(at: output.appendingPathComponent(name)),
+                  let pixels = Pixels(rep) else {
+                failure.check(false, "\(name) 能读成像素")
+                continue
+            }
+            let background = pixels.backgroundLuminance()
+            let fraction = pixels.nonBackgroundFraction(background: background, stride: 2)
+            failure.check(fraction >= 0.0025,
+                          "\(name) 像素非空",
+                          detail: String(format: "（非背景 %.2f%%）", fraction * 100))
+
+            if name.hasSuffix("-dark.png") {
+                let runs = pixels.longestRunLuminances(minLength: 200, tolerance: 0.012)
+                // 卡片底是一大片同色；描边是**两三条**同色长横线。
+                // 用「有多少行出现了这么长的同色横条」把两者分开：
+                // 变异实验里把卡片底改成 .clear，行数会掉到个位数
+                let fillBand = 0.08...0.22
+                let fillRows = runs.filter { fillBand.contains($0.luma) }
+                failure.check(fillRows.count >= 20,
+                              "\(name) 深色卡片底色从背景分出来",
+                              detail: "（同色长条 \(fillRows.count) 行）")
+                let fillLuma = mostCommon(fillRows.map(\.luma))
+                // 描边比它所在的底再亮一档；把描边透明度改成 0 之后，
+                // 整张卡只剩底这一种亮度，这条就红。
+                //
+                // 两个收紧（都是变异 ② 抓出来的漏网）：
+                //   · 长条按 **900px** 起步：200px 太松，「开始录制」「补标点」
+                //     这类蓝色胶囊本身就有一两百像素宽；
+                //   · 还要求这条亮线和**卡片底色的行相邻**：转录页正在转写的
+                //     那一段整卡都被提亮（`isHighlighted`），它也是一条又亮
+                //     又宽的长条；而它是「一整块」，不是「一条贴着底的线」。
+                //     描边线与卡片底只隔 0–3 行，提亮块与别的卡的底隔着 8pt
+                let edges = pixels.longestRunLuminances(minLength: 900, tolerance: 0.012)
+                let threshold = (fillLuma ?? 0.05) + 0.025
+                let fillYs = fillLuma.map { fill in
+                    runs.filter { abs($0.luma - fill) <= 0.012 }.map(\.y)
+                } ?? []
+                let border = edges.contains { edge in
+                    guard (threshold...0.32).contains(edge.luma) else { return false }
+                    return fillYs.contains { abs($0 - edge.y) <= 3 }
+                }
+                failure.check(border, "\(name) 深色卡片有 0.5pt 描边",
+                              detail: fillLuma == nil ? "" : String(format: "（底 %.3f，要求 ≥ %.3f 的长条）", fillLuma!, threshold))
+            } else {
+                // 浅色卡片底是白的、页面也是白的：分离靠 6% 描边。
+                // 描边在卡片顶边是一条约等于卡宽的横线，页面白底和阴影
+                // 渐变都落不进这个亮度带；同样按 900px 起步找
+                let edges = pixels.longestRunLuminances(minLength: 900, tolerance: 0.012)
+                let border = edges.contains { (0.85...0.98).contains($0.luma) }
+                failure.check(border, "\(name) 亮色卡片有描边（从白底分出边界）")
+            }
+        }
+
         for line in failure.lines { print(line) }
         print("")
         print(failure.count == 0
               ? "✅ 界面快照通过（\(failure.lines.count) 条判据）"
               : "❌ 界面快照未通过（\(failure.count) 条红 / 共 \(failure.lines.count) 条）")
         exitReleasingGgml(failure.count == 0 ? 0 : 1)
+    }
+
+    // MARK: - 像素探针
+
+    /// 直接读位图缓冲的扫描器。
+    ///
+    /// 用 `bitmapData` 而不是 `colorAt`：后者每次调用都要走一遍
+    /// NSColor 解析，14 张 2200×1520 的图要跑几百万次，快照会从
+    /// 「一条命令」变成「等一分钟」。PNG 解码出来是 8-bit 非平面位图，
+    /// 通道顺序（RGBA/BGRA）不影响这里的判据——阈值按亮度差定的，
+    /// 灰度文字和描边在两种顺序下都落同一条带
+    private struct Pixels {
+        let width: Int
+        let height: Int
+        let bytesPerRow: Int
+        let bytesPerPixel: Int
+        let data: UnsafeMutablePointer<UInt8>
+
+        init?(_ rep: NSBitmapImageRep) {
+            guard !rep.isPlanar,
+                  rep.bitsPerSample == 8,
+                  rep.samplesPerPixel >= 3,
+                  let data = rep.bitmapData else { return nil }
+            width = rep.pixelsWide
+            height = rep.pixelsHigh
+            bytesPerRow = rep.bytesPerRow
+            bytesPerPixel = max(3, rep.bitsPerPixel / 8)
+            self.data = data
+        }
+
+        func luma(_ x: Int, _ y: Int) -> Double {
+            let offset = y * bytesPerRow + x * bytesPerPixel
+            let r = Double(data[offset])
+            let g = Double(data[offset + 1])
+            let b = Double(data[offset + 2])
+            return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+        }
+
+        /// 左上角 8×8 的平均亮度。三张屏在这个位置都是页面底
+        func backgroundLuminance() -> Double {
+            var total = 0.0
+            var n = 0
+            for y in 0..<8 {
+                for x in 0..<8 {
+                    total += luma(x, y)
+                    n += 1
+                }
+            }
+            return n == 0 ? 0 : total / Double(n)
+        }
+
+        /// 和背景亮度差超过阈值的像素占比。纯背景（或者没画出来的空白）≈ 0
+        func nonBackgroundFraction(background: Double, stride: Int) -> Double {
+            var different = 0
+            var total = 0
+            var y = 0
+            while y < height {
+                var x = 0
+                while x < width {
+                    if abs(luma(x, y) - background) > 0.02 { different += 1 }
+                    total += 1
+                    x += stride
+                }
+                y += stride
+            }
+            return total == 0 ? 0 : Double(different) / Double(total)
+        }
+
+        /// 从下往上第一个「和背景不一样」的像素行。整张都是背景 → nil。
+        /// 给「加高宿主、裁最后一段」的屏找内容末尾用
+        func lastNonBackgroundRow(background: Double) -> Int? {
+            guard height > 0, width > 0 else { return nil }
+            for y in stride(from: height - 1, through: 0, by: -1) {
+                var x = 0
+                while x < width {
+                    if abs(luma(x, y) - background) > 0.02 { return y }
+                    x += 2
+                }
+            }
+            return nil
+        }
+
+        /// 每一行里最长的那条**同色横条**的亮度与行号（长度不够 `minLength` 的行不给值）。
+        ///
+        /// 为什么按「横条」判：卡片底是一大片同色（几百行），描边是两三条
+        /// 同色长线，文字永远凑不出 200 px 连续同色。这样「底」和「描边」
+        /// 可以分开数，变异实验才有一个能红的方向：
+        ///   · 底改成 `.clear` → 落在底色带里的行数掉光；
+        ///   · 描边透明度改成 0 → 只剩底色一种亮度，没有「更亮的长条」
+        ///
+        /// 行号一并返回：描边判据还要求这条亮线和卡片底**相邻**，
+        /// 否则转录页那张被整体提亮的卡会被当成一条粗描边
+        func longestRunLuminances(minLength: Int, tolerance: Double) -> [(y: Int, luma: Double)] {
+            var result: [(y: Int, luma: Double)] = []
+            result.reserveCapacity(height)
+            for y in 0..<height {
+                var runStart = luma(0, y)
+                var runLength = 1
+                var bestLength = 0
+                var best: Double?
+                // 最长的那条，不是最后一条：一张居中窄卡的两侧都是页面底色，
+                // 收尾时那条背景跑得也不短，按「最后一条」记会把卡片底写成 0
+                for x in 1..<width {
+                    let value = luma(x, y)
+                    if abs(value - runStart) <= tolerance {
+                        runLength += 1
+                    } else {
+                        runStart = value
+                        runLength = 1
+                    }
+                    if runLength > bestLength {
+                        bestLength = runLength
+                        best = runLength >= minLength ? value : best
+                    }
+                }
+                if bestLength >= minLength, let best { result.append((y, best)) }
+            }
+            return result
+        }
+    }
+
+    /// 一组亮度里出现最多的那个（按 0.005 分箱）。卡片底色的几百行会压倒
+    /// 只有两三行的描边。空数组返回 nil
+    private static func mostCommon(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        var counts: [Int: Int] = [:]
+        for value in values {
+            counts[Int((value / 0.005).rounded()), default: 0] += 1
+        }
+        guard let best = counts.max(by: { $0.value < $1.value }) else { return nil }
+        return Double(best.key) * 0.005
     }
 
     // MARK: - 渲染
@@ -209,10 +450,46 @@ enum UISnapshot {
     /// （SwiftUI 自己的 `\.colorScheme` 读的那份）。只给一处会得到
     /// 「背景换了、文字没换」这种半套结果。
     static func render(_ view: AnyView, scheme: ColorScheme, to url: URL) throws {
-        let size = NSSize(width: canvas.width, height: canvas.height)
+        let rep = try renderBitmap(of: view, scheme: scheme, height: canvas.height)
+        try write(rep, to: url)
+    }
+
+    /// 给「卡片在折叠线以下」的屏用：宿主加高到内容装得下，整页画完，
+    /// 再裁出**最下面**一段可视区（内容末尾往上 `canvas` 那么高）。
+    ///
+    /// **为什么不滚 ScrollView**：`NSHostingView` 里的 scroll 是
+    /// `HostingScrollView`，它的 `documentView.bounds` 恒为 0，改
+    /// `clipView` 的 `bounds.origin` 会被夹回 0（2026-10-29 实测）——正文
+    /// 不是靠 AppKit 的 document view 滚的，滚不了。
+    ///
+    /// 代价：这一屏顶部那几段说明文字不在快照里。它本来也只是说明文案，
+    /// 而这一版要验的是列表行卡片化成没成——报告里必须写明这一点。
+    static func renderBottom(of view: AnyView, scheme: ColorScheme,
+                             tallHeight: CGFloat, to url: URL) throws {
+        let rep = try renderBitmap(of: view, scheme: scheme, height: tallHeight)
+        let pixels = Pixels(rep)
+        let background = pixels?.backgroundLuminance() ?? 0
+        let target = Int(canvas.height * scale)
+        // 内容最下面一行再往下留 8pt 边，免得裁掉卡片底边那 0.5pt 描边
+        let lastContent = (pixels?.lastNonBackgroundRow(background: background) ?? rep.pixelsHigh - 1) + 8
+        let end = min(rep.pixelsHigh, max(target, lastContent))
+        let start = end - target
+        guard let cg = rep.cgImage,
+              let cropped = cg.cropping(to: CGRect(x: 0, y: start,
+                                                   width: Int(canvas.width * scale),
+                                                   height: target))
+        else { throw RenderError.noBitmap }
+        guard let png = NSBitmapImageRep(cgImage: cropped)
+            .representation(using: .png, properties: [:]) else { throw RenderError.noPNG }
+        try png.write(to: url, options: .atomic)
+    }
+
+    private static func renderBitmap(of view: AnyView, scheme: ColorScheme,
+                                     height: CGFloat) throws -> NSBitmapImageRep {
+        let size = NSSize(width: canvas.width, height: height)
         let host = NSHostingView(
             rootView: view
-                .frame(width: canvas.width, height: canvas.height)
+                .frame(width: canvas.width, height: height)
                 .environment(\.colorScheme, scheme)
         )
         host.frame = NSRect(origin: .zero, size: size)
@@ -225,12 +502,16 @@ enum UISnapshot {
         guard let rep = NSBitmapImageRep(
             bitmapDataPlanes: nil,
             pixelsWide: Int(canvas.width * scale),
-            pixelsHigh: Int(canvas.height * scale),
+            pixelsHigh: Int(height * scale),
             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
             colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
         ) else { throw RenderError.noBitmap }
         rep.size = size
         host.cacheDisplay(in: host.bounds, to: rep)
+        return rep
+    }
+
+    private static func write(_ rep: NSBitmapImageRep, to url: URL) throws {
         guard let png = rep.representation(using: .png, properties: [:]) else {
             throw RenderError.noPNG
         }
@@ -245,33 +526,95 @@ enum UISnapshot {
         return NSBitmapImageRep(data: data)
     }
 
-    /// 左上角一块 8×8 的平均亮度。取角落是因为三张屏在这个位置都是页面底
-    /// （列表从 header 下方才开始；设置页是留白）
+    /// 左上角一块 8×8 的平均亮度。取角落是因为所有屏在这个位置都是页面底
     static func cornerLuminance(_ url: URL) -> Double? {
-        guard let rep = bitmap(at: url) else { return nil }
-        var total = 0.0
-        var n = 0
-        for x in 0..<8 {
-            for y in 0..<8 {
-                guard let color = rep.colorAt(x: x, y: y)?.usingColorSpace(NSColorSpace.sRGB) else {
-                    continue
-                }
-                let r = Double(color.redComponent)
-                let g = Double(color.greenComponent)
-                let b = Double(color.blueComponent)
-                total += 0.2126 * r + 0.7152 * g + 0.0722 * b
-                n += 1
-            }
-        }
-        return n == 0 ? nil : total / Double(n)
+        guard let rep = bitmap(at: url), let pixels = Pixels(rep) else { return nil }
+        return pixels.backgroundLuminance()
     }
 
     // MARK: - 夹具
 
+    /// 转录夹具：四段，覆盖「有提问 / 有存疑段 / 最后一段还没定稿」三种状态。
+    /// 最后一段刻意 `isFinal = false`——转录页要给它一个 `isHighlighted` 态，
+    /// 快照里得看得见那一行
+    private static func transcriptFixture() -> [TranscriptSegment] {
+        let now = Date()
+        func segment(_ text: String, start: Int, end: Int,
+                     finalized: Bool = true, grade: TranscriptGrade? = .good,
+                     question: Bool = false) -> TranscriptSegment {
+            var segment = TranscriptSegment(
+                text: text, isFinal: finalized,
+                startTimeMillis: start, endTimeMillis: end,
+                timestamp: now, languages: ["zh-CN"]
+            )
+            segment.qualityGrade = grade
+            if question {
+                segment.questionLevel = 2
+                segment.coreQuestion = text
+            }
+            return segment
+        }
+        return [
+            segment("今天讲梯度下降，它其实是在参数空间里找下降最快的方向。",
+                    start: 0, end: 9_000),
+            segment("学习率太大会震荡，太小会收敛得很慢，大家调的时候要看曲线。",
+                    start: 9_000, end: 18_000, grade: .fair),
+            segment("这里谁来回答一下，为什么负梯度方向是最快的？",
+                    start: 18_000, end: 25_000, question: true),
+            segment("对，因为泰勒展开的一阶项里它取到最小值。",
+                    start: 25_000, end: 31_000, finalized: false),
+        ]
+    }
+
+    /// 核查夹具：三种结论各一条，且挂在转录夹具的前三段上
+    /// （悬停浮窗会按 segmentID 去取上下文）
+    private static func factCheckFixture(segments: [TranscriptSegment]) -> [FactCheckResult] {
+        let verified = FactCheckResult(
+            segmentID: segments[0].id,
+            claim: "梯度下降是在参数空间里找下降最快的方向。",
+            status: .verified,
+            explanation: "梯度方向是函数增长最快的方向，负梯度因此是最快下降方向，这是多元微积分的基本结论。",
+            confidence: 0.94,
+            sources: [
+                FactCheckSource(title: "梯度下降 - 维基百科", url: "https://zh.wikipedia.org/wiki/梯度下降"),
+                FactCheckSource(title: "Gradient descent", url: "https://en.wikipedia.org/wiki/Gradient_descent"),
+            ]
+        )
+        let disputed = FactCheckResult(
+            segmentID: segments[1].id,
+            claim: "学习率太大会震荡，太小会收敛得很慢。",
+            status: .disputed,
+            explanation: "方向上正确，但「太小只会收敛慢」不完整：学习率过小在非凸问题上可能停在很差的局部区域。",
+            confidence: 0.63,
+            sources: [FactCheckSource(title: "Learning rate", url: "https://en.wikipedia.org/wiki/Learning_rate")]
+        )
+        let unverifiable = FactCheckResult(
+            segmentID: segments[2].id,
+            claim: "负梯度方向是最快的方向。",
+            status: .unverifiable,
+            explanation: "没有检索到能判定这句话的可靠来源：它依赖「最快」是在什么度量下说的。",
+            confidence: 0,
+            sources: []
+        )
+        return [verified, disputed, unverifiable]
+    }
+
+    /// 术语表夹具：五条，覆盖「有别名 / 只有释义 / 二者都有」
+    private static func glossaryFixture() -> [GlossaryEntry] {
+        [
+            GlossaryEntry(term: "梯度下降", aliases: ["梯度递减"], note: "一种一阶最优化算法"),
+            GlossaryEntry(term: "学习率", aliases: ["learning rate"], note: "每次更新的步长"),
+            GlossaryEntry(term: "反向传播", aliases: ["backprop"], note: "按链式法则逐层求梯度"),
+            GlossaryEntry(term: "卷积", aliases: [], note: "局部加权求和"),
+            GlossaryEntry(term: "过拟合", aliases: ["overfitting"], note: "训练集表现好、泛化差"),
+        ]
+    }
+
     /// 三条录音，刻意覆盖列表的三种状态：用户起过名的、没起名（回落成时间）、
     /// 有不可信段的。全是今天/昨天/前天，是为了让分组标题（今天/昨天/M月d日）
-    /// 三条都出现一次——那三档都是列表要画的
-    private static func seedFixture(into sessionsDirectory: URL) {
+    /// 三条都出现一次——那三档都是列表要画的。
+    /// 第二条刻意让 fair 和 poor 并存：质量状态那格必须两种数都报
+    private static func seedRecordings(into sessionsDirectory: URL) {
         let store = RecordingsStore(
             directory: sessionsDirectory,
             recordingsDirectory: sessionsDirectory.deletingLastPathComponent()
@@ -321,8 +664,7 @@ enum UISnapshot {
         ))
         // 没起名：列表回落显示「M月d日 HH:mm」，同一行还会补上时刻。
         // 这一段**刻意让 fair 和 poor 并存**：质量状态那格曾经写着
-        // 「有坏段就只说坏段」，并存时会静默吞掉存疑段数——夹具里必须有
-        // 一条并存的数据，这条回归才看得见
+        // 「有坏段就只说坏段」，并存时会静默吞掉存疑段数
         store.save(session(
             title: "", course: "机器学习", startedAt: at(daysAgo: 1, hour: 14),
             minutes: 88,

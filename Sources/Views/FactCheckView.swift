@@ -134,16 +134,18 @@ private struct FactCheckRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, Theme.Spacing.xs)
-        .padding(.leading, Theme.Spacing.md)
-        .contentShape(Rectangle())
-        // 悬停反馈用左侧一条竖线，不是整块底色——底色就是「卡片」的另
-        // 一种形态。画在 overlay 里不占布局，指针进出时列表不会抖
+        .cardStyle(elevation: 1, isHighlighted: isHovering)
+        // 结论色做成左缘 3pt 竖条：扫一屏时颜色比读文字快。
+        // 圆头而不是方头——方头会被卡片的圆角切掉一半，看着像画坏了
         .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
+            Capsule()
+                .fill(barColor)
+                .frame(width: 3)
+                .padding(.vertical, Theme.Spacing.md)
+                .padding(.leading, 1)
+                .allowsHitTesting(false)
         }
+        .contentShape(Rectangle())
         .onHover { hovering in
             isHovering = hovering
             hovering ? pointerEntered() : pointerExited()
@@ -206,6 +208,21 @@ private struct FactCheckRow: View {
         switch result.phase {
         case .failed: return Theme.error
         case .searching, .analyzing: return .secondary
+        case .done:
+            switch result.status {
+            case .verified: return Theme.success
+            case .unverifiable: return Theme.warning
+            case .disputed: return Theme.error
+            }
+        }
+    }
+
+    /// 左缘那条 3pt 竖条的颜色。还没结论时用分隔线的灰——
+    /// 用绿/黄/红会让人以为已经有结论了
+    private var barColor: Color {
+        switch result.phase {
+        case .failed: return Theme.error
+        case .searching, .analyzing: return Theme.separator
         case .done:
             switch result.status {
             case .verified: return Theme.success
@@ -365,7 +382,7 @@ private struct SourceLink: View {
                             .lineLimit(1)
                     }
                     .font(.system(size: 11))
-                    .foregroundStyle(Theme.accent)
+                    .foregroundStyle(Theme.textSecondary)
                 }
                 .buttonStyle(.plain)
             } else {

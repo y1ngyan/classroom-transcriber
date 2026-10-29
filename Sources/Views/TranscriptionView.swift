@@ -207,7 +207,11 @@ struct TranscriptionView: View {
                             // 管的是「自动跑不跑」，这里管的是「我现在想查
                             // 这一段」。定稿后才能查：未定稿的文字还在被
                             // 模型改写，拿去核查既浪费请求又会得到错结论
-                            onCheck: { appState.factCheck.submit(segment: segment) }
+                            onCheck: { appState.factCheck.submit(segment: segment) },
+                            // 流式内容用 0：段与段是同一股流的切分，不是独立条目
+                            cardElevation: 0,
+                            // 最后一段还没定稿 = 模型正在写它
+                            isActive: segment.id == engine.segments.last?.id && !segment.isFinal
                         )
                         .id(segment.id)
                     }

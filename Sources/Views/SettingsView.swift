@@ -11,7 +11,8 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            // 区块之间靠 80 的留白分开，不放卡片框（设计规范要求）
+            // P13-2 起每个分组是一张 elevation 0 的卡片（cardElevated 底板），
+            // 卡片之间仍用 80 的留白拉开——卡片是分组的边界，不是布局容器
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
                 audioSection()
@@ -604,9 +605,8 @@ struct SettingsView: View {
 
 /// 一个设置区块：标题、说明、「去哪儿拿」的步骤，然后是表单。
 ///
-/// 没有外框。分组靠上面那条发丝分隔线和 80 的留白——这是设计规范要的
-/// 苹果产品页那种做法，框和阴影都不要。
-///
+/// P13-2 起整节包成一张 `elevation 0 + cardElevated` 的卡片：分组终于有了
+/// 可见的边界，但它是「盆地」不是「浮起来的卡片」——不阴影、不抢页面标题。
 /// 步骤直接印在界面上而不是只写在文档里：用户卡住的那一刻他人就在
 /// 这个页面，不会去翻 README。
 private struct SettingsSection<Content: View>: View {
@@ -621,8 +621,6 @@ private struct SettingsSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Separator()
-
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
                     .textStyle(Theme.Text.title)
@@ -660,7 +658,7 @@ private struct SettingsSection<Content: View>: View {
                         }
                     }
                 }
-                // 靠缩进区分层级，不靠底色：底色就是「卡片」的另一种形态
+                // 靠缩进区分层级，不靠底色：底色在这里是卡片的，不是步骤的
                 .padding(.leading, Theme.Spacing.md)
             }
 
@@ -668,6 +666,10 @@ private struct SettingsSection<Content: View>: View {
                 .padding(.top, Theme.Spacing.xs)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // 分组用 elevation 0 + cardElevated 的底板：它是铺在页面上的
+        // 分组盆地，不是浮起来的卡片（深色下 #2C2C2E 比纯黑亮一档，
+        // 浅色下 #FBFBFD 只靠描边和 80 的留白分界）
+        .cardStyle(elevation: 0, surface: .elevated)
     }
 }
 

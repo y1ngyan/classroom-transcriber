@@ -447,12 +447,14 @@ private struct GlossaryContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(spacing: 0) {
+            // 每条术语是一张 elevation 0 的小卡片：术语表是逐行编辑的清单，
+            // 卡片只负责把「一条」和上下一条分开，不浮起来
+            VStack(spacing: Theme.Spacing.sm) {
                 ForEach($store.entries) { $entry in
                     GlossaryEntryRow(entry: $entry) {
                         store.remove(entry)
                     }
-                    Separator()
+                    .cardStyle(elevation: 0)
                 }
             }
         }
@@ -506,8 +508,6 @@ private struct GlossaryEntryRow: View {
                 .help("删除这个术语")
             }
         }
-        .padding(.horizontal, Theme.Spacing.md)
-        .padding(.vertical, Theme.Spacing.sm)
         .onHover { isHovering = $0 }
         .onAppear { aliasesText = entry.aliases.joined(separator: "、") }
         // 恢复默认会整批换掉条目（含 id），本地镜像要跟着重置

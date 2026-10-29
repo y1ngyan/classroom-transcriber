@@ -67,6 +67,13 @@ final class FactCheckStore {
     private var index: [String: Int] = [:]
     private var inFlight: Set<String> = []
 
+    /// 预置结果（无头快照/预览用）。默认空 = 生产路径完全不变。
+    /// 不建 `index`：它只在 `submit` 的同一段文字去重时用，
+    /// 快照只读 `results`，没必要伪造一份索引
+    init(results: [FactCheckResult] = []) {
+        self.results = results
+    }
+
     var pendingCount: Int {
         results.filter { $0.phase == .searching || $0.phase == .analyzing }.count
     }

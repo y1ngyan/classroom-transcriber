@@ -124,14 +124,25 @@ struct RecordingsView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Text("还没有录音")
-                .textStyle(Theme.Text.body)
-                .foregroundStyle(Theme.textSecondary)
-            Text("在转录页点「开始录制」，录完的内容会自动出现在这里。")
-                .textStyle(Theme.Text.caption)
+        VStack(spacing: Theme.Spacing.md) {
+            Image(systemName: "waveform")
+                .font(.system(size: 22))
                 .foregroundStyle(Theme.textTertiary)
+
+            // 页头副标题已经写了「还没有录音」，这里不再重复一遍标题
+            Text("在转录页点「开始录制」，录完的内容会自动出现在这里。")
+                .textStyle(Theme.Text.body)
+                .foregroundStyle(Theme.textTertiary)
+                .multilineTextAlignment(.center)
+
+            // 空状态只说明「该去哪」不够：用户还得自己去找标签页。
+            // 这里直接把他送到那一页，不新开窗口
+            PillButton(title: "去转录页录制", systemImage: "mic") {
+                appState.selectedTab = .transcription
+            }
         }
+        .frame(maxWidth: 520)
+        .cardStyle(elevation: 1)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -442,10 +453,11 @@ private struct RecoveryRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // 「未完成」也是列表里的一行，和正式录音同一个卡片语言——
-        // 但层级仍是 1：它比正式录音更需要注意力，那份注意力由
-        // 顶上的 warning 标记和「恢复」按钮给，不靠把卡片画得更重
-        .cardStyle(elevation: 1, isHighlighted: isHovering)
+        // 「未完成」也是列表里的一行，和正式录音同一个卡片语言。
+        // **层级是 2**（P13-2 附 3）：整页正式录音都是 elevation 1，同屏
+        // 再开一档才分得出主次——这一组要用户做决定，是唯一该被「抬起来」
+        // 的那类条目；两档是上限，别再往下加
+        .cardStyle(elevation: 2, isHighlighted: isHovering)
         .onHover { hovering in
             isHovering = hovering
         }

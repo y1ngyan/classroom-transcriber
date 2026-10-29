@@ -24,29 +24,34 @@ struct StudyNotesPanelView: View {
                 .textStyle(Theme.Text.title)
                 .foregroundStyle(Theme.textPrimary)
 
-            statusRow
-            actionRow
+            // 面板内容（状态、操作、正文）是一个整体，用一张卡片圈住。
+            // 原来底部那条 Separator 由卡片的 0.5pt 描边接替
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                statusRow
+                actionRow
 
-            if state.showsExistingNotes,
-               let markdown = store.markdown(sessionID: session.id) {
-                MarkdownWebView(markdown: markdown)
-                    .frame(height: StudyNotesPanelState.notesViewportHeight(
-                        itemCount: store.notes[session.id]?.items.count ?? 0
-                    ))
+                if state.showsExistingNotes,
+                   let markdown = store.markdown(sessionID: session.id) {
+                    MarkdownWebView(markdown: markdown)
+                        .frame(height: StudyNotesPanelState.notesViewportHeight(
+                            itemCount: store.notes[session.id]?.items.count ?? 0
+                        ))
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle(elevation: 1)
         }
         // 磁盘上那份笔记只在进页面时读一次。放在 `.task` 而不是 `init`：
         // 这是个磁盘读，不该发生在 SwiftUI 求值 body 的过程里
         .task { store.load(sessionID: session.id) }
-        .overlay(alignment: .bottom) { Separator() }
     }
 
     // MARK: - 状态行
 
     /// 每一档都有可见文案（派单书要求「别只灰着」）。
     ///
-    /// 分组靠留白和分隔线，不靠容器——区块的头是 `Theme.Text.title`，
-    /// 底部一条发丝线（见设计规范：不要卡片、不要阴影、不要边框）
+    /// P13-2 起面板内容整体进了一张卡片（见 `body`），这里只负责状态文案，
+    /// 不再自己画分隔线
     @ViewBuilder
     private var statusRow: some View {
         switch state.phase {

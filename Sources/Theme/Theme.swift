@@ -122,10 +122,27 @@ enum Theme {
         let shadow: [Shadow.Layer]
     }
 
-    static func cardTokens(elevation: Int, scheme: ColorScheme) -> CardTokens {
+    /// 卡片底色该用哪一档表面。
+    enum CardSurface {
+        /// 按层级自动：深色下 elevation > 0 用 `cardElevated`，否则 `card`
+        case automatic
+        /// 强制用 `cardElevated`。设置页那种「分组底板」用它——
+        /// 分组是铺在页面上的盆地，不是浮起来的卡片
+        case elevated
+    }
+
+    static func cardTokens(elevation: Int,
+                           scheme: ColorScheme,
+                           surface: CardSurface = .automatic) -> CardTokens {
         let level = min(max(elevation, 0), 2)
         // 深色下「抬起来」= 更亮的底。elevation 0 是平铺的、不需要抬
-        let fill = (scheme == .dark && level > 0) ? Surface.cardElevated : Surface.card
+        let fill: Color
+        switch surface {
+        case .elevated:
+            fill = Surface.cardElevated
+        case .automatic:
+            fill = (scheme == .dark && level > 0) ? Surface.cardElevated : Surface.card
+        }
         return CardTokens(
             fill: fill,
             border: Surface.cardBorder,
@@ -284,24 +301,29 @@ extension View {
     /// 用法上的一条规矩：**卡片是分组的边界，不是布局的容器**。两张卡片
     /// 之间的间距走 `Theme.Spacing.lg` 以上，别拿卡片去拼网格——那会退化成
     /// 「什么都要框一下」，与原规范要反对的东西是同一件事。
-    func cardStyle(elevation: Int = 1, isHighlighted: Bool = false) -> some View {
-        modifier(CardStyleModifier(elevation: elevation, isHighlighted: isHighlighted))
+    func cardStyle(elevation: Int = 1,
+                   surface: Theme.CardSurface = .automatic,
+                   isHighlighted: Bool = false) -> some View {
+        modifier(CardStyleModifier(elevation: elevation,
+                                   surface: surface,
+                                   isHighlighted: isHighlighted))
     }
 }
 
-/// `.cardStyle(elevation:isHighlighted:)` 的实现。
+/// `.cardStyle(elevation:surface:isHighlighted:)` 的实现。
 ///
-/// 取值全部来自 `Theme.cardTokens(elevation:scheme:)`，这里只负责画——
+/// 取值全部来自 `Theme.cardTokens(elevation:scheme:surface:)`，这里只负责画——
 /// 阴影在深色下由那边返回空数组，所以深色**连一层 shadow 都不会加上**
 /// （不是「加一层透明的」：那在像素上一样，但会让下一个人以为深色也有阴影）
 private struct CardStyleModifier: ViewModifier {
     let elevation: Int
+    let surface: Theme.CardSurface
     let isHighlighted: Bool
 
     @Environment(\.colorScheme) private var scheme
 
     func body(content: Content) -> some View {
-        let token = Theme.cardTokens(elevation: elevation, scheme: scheme)
+        let token = Theme.cardTokens(elevation: elevation, scheme: scheme, surface: surface)
         let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
 
         content

@@ -72,20 +72,33 @@ struct NotesView: View {
     private var content: some View {
         Group {
             if store.hasNotes {
+                // 笔记正文是一整块产出，用一张卡片圈住它（elevation 1）——
+                // 卡片在这里表达「这一坨是一个东西」，不是给它加装饰。
+                // 注意：正文是 `WKWebView`，快照（离屏渲染）拍不到它加载后
+                // 的内容，见 `UISnapshot` 的说明
                 MarkdownWebView(markdown: store.markdown)
                     .background(Color.clear)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .cardStyle(elevation: 1)
             } else {
-                VStack(spacing: Theme.Spacing.sm) {
+                VStack(spacing: Theme.Spacing.md) {
+                    Image(systemName: "text.page")
+                        .font(.system(size: 22))
+                        .foregroundStyle(Theme.textTertiary)
+
                     Text(segments.isEmpty
                          ? "先转录一些内容，再回来生成笔记。"
                          : "点击「生成笔记」，把转录整理成带时间戳的结构化笔记。")
                         .textStyle(Theme.Text.body)
                         .foregroundStyle(Theme.textTertiary)
+                        .multilineTextAlignment(.center)
 
                     Text("将包含：核心知识点大纲 · 关键术语解释 · 行动项")
                         .textStyle(Theme.Text.caption)
                         .foregroundStyle(Theme.textTertiary)
                 }
+                .frame(maxWidth: 520)
+                .cardStyle(elevation: 1)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }

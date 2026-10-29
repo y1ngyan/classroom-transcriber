@@ -188,6 +188,16 @@ struct TranscriptLine: View {
     /// 是要能离线自检的规则，散进 View 就测不到了
     var speakerLabel: String?
 
+    /// 卡片层级。nil = 不加卡片（录音详情页的只读预览沿旧样式）。
+    ///
+    /// 转录页传 0：这一屏是流式内容，卡片只负责把「一段」圈出来，
+    /// 不该像列表项那样浮起来（浮起来等于在说「这些是各自独立的条目」，
+    /// 而转录读的是一条连续的流）
+    var cardElevation: Int?
+    /// 正在转写的那一行。给一个轻的 `isHighlighted` 态：
+    /// 最后一段还没定稿时，用户要能一眼找到「现在写到哪了」
+    var isActive = false
+
     @State private var isHovering = false
 
     /// 该段是否已完成过核查（决定按钮措辞）
@@ -196,7 +206,34 @@ struct TranscriptLine: View {
         return false
     }
 
+    @ViewBuilder
     var body: some View {
+        if let cardElevation {
+            content
+                .cardStyle(elevation: cardElevation,
+                           isHighlighted: isActive || isHovering)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+                }
+        } else {
+            content
+                // 悬停反馈是一条 2pt 左侧竖条（设计规范），不是背景填充。
+                // 画在 overlay 里不占布局，指针进出时列表不会抖
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
+                        .frame(width: 2)
+                        .offset(x: -Theme.Spacing.sm)
+                }
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+                }
+        }
+    }
+
+    private var content: some View {
         VStack(alignment: .trailing, spacing: Theme.Spacing.sm) {
             // 提问标记：小图标 + 颜色（设计规范的状态表达方式），不加底色块。
             // L2 是确认的提问，L1 只是点名/祈使预警——颜色和措辞都分开，
@@ -306,18 +343,6 @@ struct TranscriptLine: View {
                     .monospacedDigit()
                     .foregroundStyle(Theme.textTertiary)
             }
-        }
-        // 悬停反馈是一条 2pt 左侧竖条（设计规范），不是背景填充。
-        // 画在 overlay 里不占布局，指针进出时列表不会抖
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
-                .offset(x: -Theme.Spacing.sm)
-        }
-        .contentShape(Rectangle())
-        .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
         }
     }
 
