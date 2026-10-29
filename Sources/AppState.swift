@@ -33,13 +33,24 @@ final class AppState {
     /// 那个 `Task` 就没人持有了，用户以为还在下，其实已经断了
     let modelDownload = ModelDownloadCenter()
 
-    init() {
+    /// - Parameter sessionsDirectory: 录音库（`sessions/`）落在哪。默认 nil =
+    ///   用户真实那个目录，**行为一个字节没变**。存在的理由是 `--ui-snapshot`：
+    ///   无头快照要拿固定夹具渲列表，而夹具绝不能写进用户真实的库
+    /// - Parameter audioDirectory: `recordings/`（wav）落在哪，同上
+    init(sessionsDirectory: URL? = nil, audioDirectory: URL? = nil) {
         // `recordings` 从「带默认值的存储属性」改成在 init 里建：说话人识别的
         // 落盘要用**这一个** store 实例（它带内存缓存和 index 同步），
         // 而默认值表达式里引用不到 `self`。两个 store 必须是指向同一份
         // sessions/ 的同一个对象——各自建一个的话，识别写完盘列表页也不刷新，
         // 而且两次 `loadIndex` 会互相覆盖
-        let recordings = RecordingsStore()
+        //
+        // audioDirectory 也要能指向夹具：`RecordingsStore.init` 里的
+        // `refreshRecovery()` 会扫这个目录找「无会话的录音」，用真实目录的话
+        // 快照会被用户库里的残留污染，而快照必须可复现
+        let recordings = RecordingsStore(
+            directory: sessionsDirectory,
+            recordingsDirectory: audioDirectory ?? RecordingStorage.directory
+        )
         self.recordings = recordings
         self.diarization = DiarizationStore(save: { recordings.save($0) })
 

@@ -6,8 +6,9 @@ import SwiftUI
 /// 关掉就没了；recordings/ 下的 wav 和转录文本之间也没有任何关联。
 /// 一学期下来录音攒了几十条，却没有任何入口能回去看某一天讲了什么。
 ///
-/// 布局按设计规范：不用卡片、不用底色块，分组靠留白和 `Separator()`；
-/// 悬停反馈是一条 2pt 左侧竖条（画在 overlay 里不占布局）。
+/// 布局（P13-1 起）：列表行是**卡片**（`.cardStyle(elevation: 1)`）——
+/// 这一屏是卡片设计的试点，其余屏还是旧的「靠留白分组」。分组的课程/日期
+/// 标题仍靠留白分层，卡片只负责「一条录音」这个最小单位。
 struct RecordingsView: View {
     @Environment(AppState.self) private var appState
 
@@ -281,7 +282,7 @@ private struct RecordingRow: View {
                     // title 为空时才另外补一个时间——否则「9月21日 11:12」
                     // 会被显示两次
                     Text(summary.displayTitle)
-                        .textStyle(Theme.Text.body)
+                        .textStyle(Theme.Text.rowTitle)
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
 
@@ -299,8 +300,9 @@ private struct RecordingRow: View {
 
                     Spacer()
 
-                    // 删除入口：悬停才出现。常驻的话每行都挂一个按钮，
-                    // 一屏几十条全是控件，扫列表反而被挤没了
+                    // 右侧只放一件事：悬停时是删除，平时是质量状态。
+                    // 删除常驻的话每行都挂一个按钮，一屏几十条全是控件，
+                    // 扫列表反而被挤没了
                     if isHovering {
                         Button(action: onDelete) {
                             Text("删除")
@@ -310,6 +312,8 @@ private struct RecordingRow: View {
                         }
                         .buttonStyle(.plain)
                         .transition(.opacity)
+                    } else {
+                        qualityMark
                     }
                 }
 
@@ -321,18 +325,13 @@ private struct RecordingRow: View {
                 }
 
                 // 读数行，只在实际有内容的项上出现——「0 个提问 0 段存疑」
-                // 这种占位读数没有任何信息量，只会把列表撑高
+                // 这种占位读数没有任何信息量，只会把列表撑高。
+                // 质量相关的两条已经移到右上角（`qualityMark`），这里不再重复
                 HStack(spacing: Theme.Spacing.md) {
                     if summary.partCount > 1 {
                         Label("\(summary.partCount) 段录音", systemImage: "square.stack")
                     }
                     Text("\(summary.segmentCount) 段转录")
-                    if summary.poorCount > 0 {
-                        StatusMark(kind: .error, text: "\(summary.poorCount) 段不可信")
-                    }
-                    if summary.fairCount > 0 {
-                        StatusMark(kind: .warning, text: "\(summary.fairCount) 段存疑")
-                    }
                     if summary.questionCount > 0 {
                         Label("\(summary.questionCount) 个提问", systemImage: "questionmark.bubble")
                     }
@@ -340,19 +339,39 @@ private struct RecordingRow: View {
                 .textStyle(Theme.Text.caption)
                 .foregroundStyle(Theme.textTertiary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // 卡片外观必须套在**按钮的 label 里**，不能套在按钮外面：
+            // `cardStyle` 自带 16pt 内边距，套在外面时那圈内边距落在按钮
+            // 的命中区之外——悬停会亮（`onHover` 在外层），点到卡片边缘
+            // 却不打开。`contentShape` 放在 `cardStyle` 之后，把包括内边距
+            // 在内的整张卡片都算成命中区
+            .cardStyle(elevation: 1, isHighlighted: isHovering)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // 悬停反馈是 2pt 左侧竖条，不是背景填充
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
-                .offset(x: -Theme.Spacing.md)
-        }
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+            isHovering = hovering
         }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
+    }
+
+    /// 右上角的质量状态：有坏段优先报坏段，其次是存疑，都没有就是一个绿勾。
+    /// 绿勾不带文字——每行都写一遍「全部可信」会把列表读成一排公告
+    private var qualityMark: StatusMark {
+        // 两种段可以并存（是两个独立计数），所以不能写成「有坏段就只说坏段」——
+        // 那样有 1 段不可信 + 20 段存疑时，用户只看得到那个 1
+        let poor = summary.poorCount
+        let fair = summary.fairCount
+        if poor > 0 && fair > 0 {
+            return StatusMark(kind: .error, text: "\(poor) 段不可信 · \(fair) 段存疑")
+        }
+        if poor > 0 {
+            return StatusMark(kind: .error, text: "\(poor) 段不可信")
+        }
+        if fair > 0 {
+            return StatusMark(kind: .warning, text: "\(fair) 段存疑")
+        }
+        return StatusMark(kind: .ok, text: nil)
     }
 }
 
@@ -423,15 +442,14 @@ private struct RecoveryRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
-                .offset(x: -Theme.Spacing.md)
-        }
+        // 「未完成」也是列表里的一行，和正式录音同一个卡片语言——
+        // 但层级仍是 1：它比正式录音更需要注意力，那份注意力由
+        // 顶上的 warning 标记和「恢复」按钮给，不靠把卡片画得更重
+        .cardStyle(elevation: 1, isHighlighted: isHovering)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+            isHovering = hovering
         }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
     }
 
     private static let time: DateFormatter = {
