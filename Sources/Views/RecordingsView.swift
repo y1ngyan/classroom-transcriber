@@ -359,7 +359,7 @@ private struct RecordingRow: View {
                             .buttonStyle(.plain)
                             .transition(.opacity)
                         } else {
-                            qualityBadge
+                            qualityBadges
                         }
                     }
 
@@ -417,37 +417,57 @@ private struct RecordingRow: View {
         return items.joined(separator: " · ")
     }
 
-    /// 右上角状态角标（P14-2）：胶囊 + 状态色 12% 底 + 11/600 角标色文字。
-    /// 文案由 `RecordingBadge` 统一生成（形状、顺序、超长处理都在那边），
-    /// 这里只按最严重的状态选颜色——有不可信就不该用存疑的橙色报
-    private var qualityBadge: QualityBadge {
+    /// 右上角状态角标（P14-3）：一种状态一个胶囊，各用各的颜色。
+    /// 顺序、个数、超长合并都在 `RecordingBadge` 里定；这里只负责上色。
+    /// **红胶囊里只放异常**——把「已核实」和「不可信」装进同一个红底，
+    /// 等于告诉用户已核实也算异常（P14-2 的原文如此，评审点掉了）
+    private var qualityBadges: some View {
         let poor = summary.poorCount
         let fair = summary.fairCount
         let verified = max(0, summary.segmentCount - poor - fair)
-        let color = poor > 0 ? Theme.errorBadge
-            : (fair > 0 ? Theme.warningBadge : Theme.successBadge)
-        return QualityBadge(
-            text: RecordingBadge.text(verified: verified, fair: fair, poor: poor),
-            color: color
-        )
+        return HStack(spacing: Theme.Spacing.xs) {
+            ForEach(Array(RecordingBadge.items(verified: verified, fair: fair, poor: poor)
+                .enumerated()), id: \.offset) { _, item in
+                switch item.kind {
+                case .verified:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.successBadge,
+                                 fillColor: Theme.successBadge.opacity(0.12))
+                case .fair:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.warningBadge,
+                                 fillColor: Theme.warningBadge.opacity(0.12))
+                case .poor:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.errorBadge,
+                                 fillColor: Theme.errorBadge.opacity(0.12))
+                case .overflow:
+                    // 灰底：被合并掉的状态不在主叙述里，颜色让位给彩色胶囊
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.textSupporting,
+                                 fillColor: Theme.textSecondary.opacity(0.12))
+                }
+            }
+        }
     }
 }
 
-/// 状态角标。底色用状态色 12% 透明——不是不透明色块：
-/// 它是注释，不是警告牌，面积大了会盖过标题。
-/// 文案本身由 `RecordingBadge.text` 收口；这里只保证**不换行**
+/// 单个状态角标。底色用文字色 12% 透明——不是不透明色块：
+/// 它是注释，不是警告牌，面积大了会盖过标题。文案由 `RecordingBadge`
+/// 拆好；这里只保证**不换行**
 private struct QualityBadge: View {
     let text: String
-    let color: Color
+    let textColor: Color
+    let fillColor: Color
 
     var body: some View {
         Text(text)
             .font(Theme.Text.footnote.font.weight(.semibold))
-            .foregroundStyle(color)
+            .foregroundStyle(textColor)
             .lineLimit(1)
             .padding(.horizontal, Theme.RecordingLayout.badgePaddingH)
             .padding(.vertical, Theme.RecordingLayout.badgePaddingV)
-            .background(Capsule().fill(color.opacity(0.12)))
+            .background(Capsule().fill(fillColor))
     }
 }
 

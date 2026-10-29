@@ -364,8 +364,6 @@ enum Theme {
         static let playIcon: CGFloat = 13
         /// P14-2：13 → 14，并换成 `textSecondary`（三级色在黑底上看不见）
         static let chevronSize: CGFloat = 14
-        /// 角标一格的最大宽度。超过就退成「N 段异常」，不换行、不截字
-        static let badgeMaxWidth: CGFloat = 150
 
         /// 自检用：上面所有间距类数值，必须全部落在 `Spacing.rhythm` 里
         static let spacingValues: [CGFloat] = [

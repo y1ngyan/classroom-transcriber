@@ -417,32 +417,56 @@ enum UISnapshot {
             failure.check(false, "深色卡片底能解析成 sRGB")
         }
 
-        // ── 自检 ⑫：角标文案形状（P14-2）──
+        // ── 自检 ⑫：角标拆分成形状正确的胶囊（P14-3）──
         //
-        // 形状必须是「数字 + 段 + 状态」；多状态用 ` · `、顺序固定
-        // （已核实 → 存疑 → 不可信）；放不下时退成「N 段异常」。
-        // 变异实验：把文案改回 P14-1 的「1 不可信」或「已核实 4 段」，
-        // 正则与期望值这两条都会红
+        // 每个胶囊都必须是「数字 + 段 + 状态」；一种状态一个胶囊，
+        // 顺序固定（已核实 → 存疑 → 不可信）；最多两个彩色胶囊，
+        // 第三个状态并进灰底「N 段异常」。**红胶囊里只许有异常**——
+        // P14-2 的「2 段已核实 · 1 段不可信」整句塞进红底，语义上把
+        // 已核实也说成异常，这一组判据就是钉住它别再回来
         let badgePattern = try? NSRegularExpression(
-            pattern: #"^\d+ 段(已核实|存疑|不可信|异常)( · \d+ 段(已核实|存疑|不可信)){0,2}$"#
+            pattern: #"^\d+ 段(已核实|存疑|不可信|异常)$"#
         )
-        let badgeCases: [(String, String)] = [
-            (RecordingBadge.text(verified: 4, fair: 0, poor: 0), "4 段已核实"),
-            (RecordingBadge.text(verified: 0, fair: 1, poor: 0), "1 段存疑"),
-            (RecordingBadge.text(verified: 0, fair: 0, poor: 1), "1 段不可信"),
-            (RecordingBadge.text(verified: 1, fair: 1, poor: 1), "2 段异常"),
-        ]
-        for (actual, expected) in badgeCases {
-            let range = NSRange(actual.startIndex..., in: actual)
-            let matches = badgePattern?.firstMatch(in: actual, range: range) != nil
-            failure.check(matches && actual == expected,
-                          "角标文案「\(expected)」形状合规",
-                          detail: actual == expected ? "" : "（实得「\(actual)」）")
+        func badgeTexts(_ verified: Int, _ fair: Int, _ poor: Int) -> [String] {
+            RecordingBadge.items(verified: verified, fair: fair, poor: poor).map(\.text)
         }
-        let ordered = RecordingBadge.text(verified: 3, fair: 1, poor: 0)
-        failure.check(ordered == "3 段已核实 · 1 段存疑",
-                      "多状态用 ` · ` 连、顺序固定（已核实 → 存疑 → 不可信）",
-                      detail: "（实得「\(ordered)」）")
+        let badgeCases: [(String, [String], Int)] = [
+            ("全部可信", badgeTexts(4, 0, 0), 1),
+            ("只有存疑", badgeTexts(0, 1, 0), 1),
+            ("只有不可信", badgeTexts(0, 0, 1), 1),
+            ("已核实 + 不可信", badgeTexts(2, 0, 1), 2),
+            ("三种状态并存", badgeTexts(1, 1, 1), 3),
+        ]
+        for (label, texts, expectedCount) in badgeCases {
+            failure.check(texts.count == expectedCount,
+                          "\(label)：拆成 \(expectedCount) 个胶囊",
+                          detail: "（实得 \(texts.count) 个：\(texts.joined(separator: "、"))）")
+        }
+        let allBadgeTexts = badgeCases.flatMap(\.1)
+        let badShape = allBadgeTexts.filter { text in
+            let range = NSRange(text.startIndex..., in: text)
+            return badgePattern?.firstMatch(in: text, range: range) == nil
+        }
+        failure.check(badShape.isEmpty, "每个胶囊都是「数字 + 段 + 状态」形状",
+                      detail: badShape.isEmpty ? "" : "（越界 \(badShape.joined(separator: "、"))）")
+        failure.check(badgeTexts(1, 1, 1) == ["1 段已核实", "1 段存疑", "1 段异常"],
+                      "三种状态：顺序固定，第三个并入灰底",
+                      detail: "（实得 \(badgeTexts(1, 1, 1).joined(separator: "、"))）")
+        failure.check(badgeTexts(2, 0, 1) == ["2 段已核实", "1 段不可信"],
+                      "已核实与不可信分属两个胶囊（顺序固定）",
+                      detail: "（实得 \(badgeTexts(2, 0, 1).joined(separator: "、"))）")
+        let mixed = RecordingBadge.items(verified: 1, fair: 1, poor: 1)
+        let colored = mixed.filter { $0.kind != .overflow }
+        failure.check(colored.count <= 2, "彩色胶囊最多 2 个",
+                      detail: "（实得 \(colored.count) 个）")
+        failure.check(mixed.last?.kind == .overflow && mixed.last?.text == "1 段异常",
+                      "超出的状态并入灰底「N 段异常」",
+                      detail: "（实得「\(mixed.last?.text ?? "无")」）")
+        let redTexts = RecordingBadge.items(verified: 2, fair: 0, poor: 1)
+            .filter { $0.kind == .poor }
+            .map(\.text)
+        failure.check(redTexts == ["1 段不可信"], "不可信胶囊里只放异常",
+                      detail: "（实得 \(redTexts.joined(separator: "、"))）")
 
         // ── 自检 ⑬：这一包只渲 4 张 ──
         if onlyRecordings {

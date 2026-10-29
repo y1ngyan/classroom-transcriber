@@ -411,36 +411,51 @@ struct Thumbnail: View {
 
 // MARK: - 录音状态角标
 
-/// 录音列表右上角状态角标的文案（P14-2）。
+/// 录音列表右上角状态角标（P14-3）。
+///
+/// **按状态分开口子，不混在一个胶囊里**：P14-2 把「2 段已核实 · 1 段不可信」
+/// 整句装进一个红底角标，语义上等于说「已核实也算异常」。现在一种状态
+/// 一个胶囊、各用自己的颜色，红角标里只放不可信的段数。
 ///
 /// 文案形状钉死成「数字 + 段 + 状态」：`4 段已核实` / `1 段存疑` /
-/// `1 段不可信`。多状态用 ` · ` 连、顺序固定（已核实 → 存疑 → 不可信），
-/// 这样「有几段怎么回事」永远按同一个方向读。
+/// `1 段不可信`。顺序固定（已核实 → 存疑 → 不可信）：同一份数据每次
+/// 都按同一个方向读。
 ///
-/// 一格放不下时整句退成「N 段异常」（N = 存疑 + 不可信），**不换行也不截字**：
-/// 换行会把旁边的标题挤到第二行，截字则会把「不可信」截成「不可」——
-/// 两种都比说实话的粗粒度更糟。
+/// **最多两个彩色胶囊**；再多的状态合并成一个灰底「N 段异常」
+/// （N = 被合并掉的段数），右上角不会无限横长。胶囊本身不换行。
 ///
 /// 放在这里而不是 View 私有：快照自检要拿真实逻辑跑正则
 /// （「不许出现 `1 不可信` 这种」），私有函数测不到
 enum RecordingBadge {
-    static func text(verified: Int, fair: Int, poor: Int) -> String {
-        var parts: [String] = []
-        if verified > 0 { parts.append("\(verified) 段已核实") }
-        if fair > 0 { parts.append("\(fair) 段存疑") }
-        if poor > 0 { parts.append("\(poor) 段不可信") }
-        guard !parts.isEmpty else { return "0 段已核实" }
-        let full = parts.joined(separator: " · ")
-        return measuredWidth(full) <= Theme.RecordingLayout.badgeMaxWidth
-            ? full
-            : "\(fair + poor) 段异常"
+    struct Item: Equatable {
+        let text: String
+        let kind: Kind
+
+        enum Kind: Equatable {
+            case verified, fair, poor
+            /// 合并掉的次要状态。灰底，不和彩色状态抢注意力
+            case overflow
+        }
     }
 
-    /// 按角标同字号、同字重量宽度，不按字符数估——
-    /// 「1」和「段」的宽度差一倍，按字数估会在中英混排上判错
-    static func measuredWidth(_ text: String) -> CGFloat {
-        let font = NSFont.systemFont(ofSize: Theme.Text.footnote.size, weight: .semibold)
-        return (text as NSString).size(withAttributes: [.font: font]).width
+    /// 按状态拆成若干胶囊。`verified` 由段总数减去两类异常算好传进来。
+    static func items(verified: Int, fair: Int, poor: Int) -> [Item] {
+        var statuses: [(Int, Item.Kind, String)] = []
+        if verified > 0 { statuses.append((verified, .verified, "\(verified) 段已核实")) }
+        if fair > 0 { statuses.append((fair, .fair, "\(fair) 段存疑")) }
+        if poor > 0 { statuses.append((poor, .poor, "\(poor) 段不可信")) }
+        guard !statuses.isEmpty else {
+            return [Item(text: "0 段已核实", kind: .verified)]
+        }
+        if statuses.count <= 2 {
+            return statuses.map { Item(text: $0.2, kind: $0.1) }
+        }
+        // 三个状态并存：前两个按顺序保留，第三个的段数并进灰底。
+        // 这里「异常」只数被并掉的那一类——已经单独显示的不可信不在里面，
+        // 否则同一段会被数两遍
+        let head = statuses.prefix(2).map { Item(text: $0.2, kind: $0.1) }
+        let merged = statuses.dropFirst(2).map(\.0).reduce(0, +)
+        return head + [Item(text: "\(merged) 段异常", kind: .overflow)]
     }
 }
 
