@@ -414,14 +414,14 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Separator()
             Text("配置文件位置")
-                .font(.system(size: 11, weight: .medium))
+                .font(Theme.Text.footnote.font.weight(.medium))
                 .foregroundStyle(Theme.textSecondary)
             Text(store.configFilePath)
-                .font(.system(size: 11, design: .monospaced))
+                .font(Theme.Text.footnote.font.monospaced())
                 .foregroundStyle(Theme.textSupporting)
                 .textSelection(.enabled)
             Text("权限已设为 600（仅本人可读）。这个文件里有密钥，别拷贝到别的机器，也别提交进任何仓库。")
-                .font(.system(size: 11))
+                .font(Theme.Text.footnote.font)
                 .foregroundStyle(Theme.textSupporting)
         }
         .padding(.top, 8)
@@ -682,7 +682,7 @@ private struct LabeledField<Content: View>: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Text.footnote.font.weight(.medium))
                 if let hint {
                     Text(hint)
                         .font(.system(size: 10))

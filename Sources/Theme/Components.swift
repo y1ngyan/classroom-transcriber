@@ -363,7 +363,7 @@ struct TranscriptLine: View {
         case .done(.disputed):
             return (.error, "已核查：存疑")
         case .done(.unverifiable):
-            return (.neutral, "已核查：无法核实")
+            return (.unknown, "已核查：无法核实")
         }
     }
 }
@@ -414,6 +414,10 @@ struct Thumbnail: View {
 struct StatusMark: View {
     enum Kind {
         case ok, warning, error, neutral
+        /// 「查不到依据」。不是错误：问号 + warning 橙，和事实核查屏的
+        /// 「无法核实」用同一套符号语言（P13-3 只改了核查屏，转录行还是
+        /// 空心圆；同一状态两屏两个符号，读起来像两回事）
+        case unknown
         /// 进行中（正在录制）。不是「出错」：用实心点，和红点录制指示
         /// 灯是同一个符号语言
         case live
@@ -424,6 +428,7 @@ struct StatusMark: View {
             case .warning: return "exclamationmark.triangle.fill"
             case .error: return "xmark.circle.fill"
             case .neutral: return "circle"
+            case .unknown: return "questionmark.circle"
             case .live: return "circle.fill"
             }
         }
@@ -436,6 +441,7 @@ struct StatusMark: View {
             // 中性状态旁边常跟着一行说明文字（「下次录制：…」「已核查：…」），
             // 它们和正文同处一张卡里；用 textTertiary 会跟文字一起淡到看不清
             case .neutral: return Theme.textSupporting
+            case .unknown: return Theme.warning
             case .live: return Theme.error
             }
         }

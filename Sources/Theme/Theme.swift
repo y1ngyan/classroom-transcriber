@@ -266,6 +266,13 @@ enum Theme {
         static let mono = TextStyle(
             name: "mono", size: 15, weight: .regular, tracking: 0, lineHeight: 20, monospaced: true
         )
+        /// 设置页脚注 11pt。五档里最小的是 caption 14，但设置页的配置文件
+        /// 路径、权限说明、缓存状态是**辅助信息**，不是正文：用 14 会把一屏
+        /// 说明撑成两屏、压过真正要读的字段；11 与系统设置页的脚注同高。
+        /// 这是目前唯一需要 11pt 的场景，别在视图里再就地写数字
+        static let footnote = TextStyle(
+            name: "footnote", size: 11, weight: .regular, tracking: 0, lineHeight: 16
+        )
         /// `body` 的粗体变体。字号不动（17 那档），只把字重提到 semibold——
         /// 术语表卡片里「词条名」要压过「误转写 / 释义」两行，
         /// 而 `rowTitle` 的 medium 在同一张卡里分不出「条目名」和「条目说明」
