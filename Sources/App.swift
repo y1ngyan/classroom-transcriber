@@ -721,6 +721,15 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 时间轴节点自检：--timeline-selftest（纯函数；不读库、不联网、
+        // 不碰界面）。状态→颜色的映射和 live 标记在这里验，竖线覆盖
+        // 只能看像素，那条在 `--ui-snapshot` 的 p15-3 模式里
+        if CommandLine.arguments.contains("--timeline-selftest") {
+            let result = TimelineNodeStatus.selfTest()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 提问数据层自检：--questions-selftest（B 包 §4 / §6.2 / §6.3 / §4.6）
         // （离线：临时目录夹具；不联网、不调模型、不碰麦克风、不发声、不读真实库）
         //

@@ -214,7 +214,10 @@ struct TranscriptionView: View {
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: Theme.segmentSpacing) {
+                // P15-3：卡片的间距不再由 LazyVStack 给，改由每一行自己的
+                // 底部 padding 给（12，最后一行 0）——时间轴的竖线要贯穿
+                // 行与行之间的空隙，`spacing` 是不画线的一段真空
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if engine.segments.isEmpty {
                         Text(engine.isRunning ? "正在聆听…" : "点击右上角「开始录制」")
                             .textStyle(Theme.Text.summary)
@@ -223,21 +226,26 @@ struct TranscriptionView: View {
                             .padding(.top, 120)
                     }
 
-                    ForEach(engine.segments) { segment in
-                        TranscriptLine(
+                    ForEach(Array(engine.segments.enumerated()), id: \.element.id) { index, segment in
+                        let checkState = appState.factCheck.state(for: segment.id)
+                        // 最后一段还没定稿 = 模型正在写它
+                        let isActive = index == engine.segments.count - 1 && !segment.isFinal
+                        TranscriptTimelineRow(
                             segment: segment,
+                            status: TimelineNodeStatus.resolve(segment: segment,
+                                                               checkState: checkState,
+                                                               isActive: isActive),
+                            isFirst: index == 0,
+                            isLast: index == engine.segments.count - 1,
                             attachments: appState.attachments.attachments(for: segment),
+                            checkState: checkState,
                             onRemoveAttachment: { appState.attachments.remove($0) },
-                            checkState: appState.factCheck.state(for: segment.id),
                             // 手动核查无视全局 autoFactCheck 开关——那一条
                             // 管的是「自动跑不跑」，这里管的是「我现在想查
                             // 这一段」。定稿后才能查：未定稿的文字还在被
                             // 模型改写，拿去核查既浪费请求又会得到错结论
                             onCheck: { appState.factCheck.submit(segment: segment) },
-                            // 流式内容用 0：段与段是同一股流的切分，不是独立条目
-                            cardElevation: 0,
-                            // 最后一段还没定稿 = 模型正在写它
-                            isActive: segment.id == engine.segments.last?.id && !segment.isFinal
+                            isActive: isActive
                         )
                         .id(segment.id)
                     }

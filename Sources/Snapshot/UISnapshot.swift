@@ -141,12 +141,14 @@ enum UISnapshot {
         //   · `p14-5`：P14-5 只改设置页，只渲 settings 亮/暗 2 张；
         //   · `p15-1`：P15-1 只改录音卡片，只渲有数据的 recordings 亮/暗 2 张
         //     （空态屏不验波形，不浪费一次渲染）；
-        //   · `p15-2`：P15-2 加概览条，同样只要 recordings 亮/暗 2 张
+        //   · `p15-2`：P15-2 加概览条，同样只要 recordings 亮/暗 2 张；
+        //   · `p15-3`：P15-3 改转录页为时间轴，只要 transcription 亮/暗 2 张
         let only = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
         let onlyRecordings = only == "recordings"
         let onlyFive = only == "p14-4"
         let onlySettings = only == "p14-5"
         let onlyRecordingsTwo = only == "p15-1" || only == "p15-2"
+        let onlyTimeline = only == "p15-3"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
@@ -159,6 +161,9 @@ enum UISnapshot {
             }
             if onlyRecordingsTwo {
                 return allScreens.filter { $0.name == "recordings" }
+            }
+            if onlyTimeline {
+                return allScreens.filter { $0.name == "transcription" }
             }
             return allScreens
         }()
@@ -176,6 +181,10 @@ enum UISnapshot {
         }
         if onlyRecordingsTwo {
             print("  模式：只渲录音屏 2 张（UI_SNAPSHOT_ONLY=\(only ?? "")）")
+            print("")
+        }
+        if onlyTimeline {
+            print("  模式：只渲转录屏 2 张（UI_SNAPSHOT_ONLY=p15-3）")
             print("")
         }
 
@@ -297,7 +306,9 @@ enum UISnapshot {
 
         // ── 自检 ⑦：亮暗真的渲成了两套（色板没被忽略）──
         // 两种分屏模式各挑一张同时在两种外观下都存在的屏
-        let schemePair = (onlyFive || onlySettings) ? "settings" : "recordings"
+        let schemePair = onlyTimeline
+            ? "transcription"
+            : ((onlyFive || onlySettings) ? "settings" : "recordings")
         if let light = written["\(schemePair)-light.png"],
            let dark = written["\(schemePair)-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
@@ -525,6 +536,155 @@ enum UISnapshot {
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
 
+        // ── 自检 ⑭：时间轴（P15-3）──
+        //
+        // 三条判据按派单来：节点颜色映射、竖线覆盖（节点纵坐标递增、
+        // 首末都盖住）、live 标记存在。
+        //   · 颜色映射是纯函数，不依赖像素——快照没渲出来它也能验；
+        //   · 覆盖与 live 标记只能看像素：竖线是 Canvas 画的，节点是
+        //     overlay 里的 Circle，布局对不对唯独这一层能抓到
+        if onlyTimeline {
+            failure.check(expected.count == 2,
+                          "只渲转录屏 2 张（亮/暗）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+
+            let nodeTest = TimelineNodeStatus.selfTest()
+            failure.check(nodeTest.failed == 0,
+                          "节点颜色映射自检 \(nodeTest.passed) 条全绿（5 种状态 + live 标记）",
+                          detail: nodeTest.failed == 0 ? "" : "（红 \(nodeTest.failed) 条）")
+
+            // 轨道中心在页面 x = 24（页边距）+ 4（轨道半宽）= 28pt
+            let spineX = Int(28 * scale)
+            let expectedNodes = populated.transcription.segments.count
+            for schemeName in ["light", "dark"] {
+                let imageName = "transcription-\(schemeName).png"
+                guard let rep = bitmap(at: output.appendingPathComponent(imageName)),
+                      let pixels = Pixels(rep) else {
+                    failure.check(false, "\(imageName) 能读成像素")
+                    continue
+                }
+                let bg = pixels.backgroundLuminance()
+                let spineXs = (spineX - 2)...(spineX + 2)
+
+                // 竖线：1pt 线在 @2x 上落在两三个像素列里，只认正中间
+                // 那一列会随光栅化相位漂移，所以取邻域里最偏离背景的值
+                // 浅色下卡片投影（10% / 20pt）会漏到轨道这一列，亮度差
+                // 约 0.02，和深色竖线自身的 0.026 同量级——所以浅色用
+                // 更高的阈值（竖线 35% 叠 #F1F1F4 后约 0.044），深色没有阴影
+                let spineThreshold = schemeName == "light" ? 0.03 : 0.015
+                var covered = [Bool](repeating: false, count: pixels.height)
+                for y in 0..<pixels.height {
+                    var worst = 0.0
+                    for x in spineXs where x >= 0 && x < pixels.width {
+                        worst = max(worst, abs(pixels.luma(x, y) - bg))
+                    }
+                    covered[y] = worst > spineThreshold
+                }
+
+                // 节点：8pt 圆只有轨道这一列有颜色，正文/时间戳都从 x=44pt
+                // 之后才开始，所以按「这一列是否发色」就能把节点单独找出来。
+                // 灰色节点（未核查）和竖线同色，这里数不出来——夹具的四段
+                // 恰好四色都不灰，数量对得上；未核查节点由纯函数自检兜。
+                //
+                // 页头里也有 accent 色的文字链接（「上传云端」「本节课提问」），
+                // 其中一部分正好落在轨道这一列上。节点是实心圆，圆心上
+                // 横向有 8pt（16px）连续同色；文字笔画只有 8px 左右。
+                // 所以「横向连续发色宽度 ≥ 12px」才是节点，只按纵向高度
+                // 过滤会把 13px 高的字也数进来
+                func chromatic(_ x: Int, _ y: Int) -> Bool {
+                    let (r, g, b) = pixels.rgb(x, y)
+                    return max(r, g, b) - min(r, g, b) > 0.22
+                }
+                func chromaticRunWidth(_ y: Int) -> Int {
+                    var low = spineX, high = spineX
+                    while low > 0, chromatic(low - 1, y) { low -= 1 }
+                    while high < pixels.width - 1, chromatic(high + 1, y) { high += 1 }
+                    return high - low + 1
+                }
+                var blobs: [(low: Int, high: Int)] = []
+                var blobStart: Int?
+                for y in 0..<pixels.height {
+                    let hasColor = spineXs.contains { x in
+                        x >= 0 && x < pixels.width && chromatic(x, y)
+                    }
+                    if hasColor {
+                        if blobStart == nil { blobStart = y }
+                    } else if let start = blobStart {
+                        let center = (start + y - 1) / 2
+                        if y - start >= 6, chromaticRunWidth(center) >= 12 {
+                            blobs.append((start, y - 1))
+                        }
+                        blobStart = nil
+                    }
+                }
+                if let start = blobStart, pixels.height - start >= 6 {
+                    let center = (start + pixels.height - 1) / 2
+                    if chromaticRunWidth(center) >= 12 {
+                        blobs.append((start, pixels.height - 1))
+                    }
+                }
+                let centers = blobs.map { ($0.low + $0.high) / 2 }
+
+                failure.check(blobs.count == expectedNodes,
+                              "\(imageName) 轨道上 \(expectedNodes) 个状态节点",
+                              detail: "（实得 \(blobs.count) 个）")
+                let ascending = zip(centers, centers.dropFirst()).allSatisfy { $0 < $1 }
+                failure.check(ascending && centers.count >= 2,
+                              "\(imageName) 节点纵坐标自上而下递增",
+                              detail: "（节点中心 \(centers.map { "\($0)" }.joined(separator: " → "))）")
+
+                // 竖线必须是一条不断的线把首末节点都串起来：允许 4px
+                // 的缝（节点与线的抗锯齿交界），超过就算断
+                var runs: [(Int, Int)] = []
+                var runStart: Int?
+                var lastY = -100
+                for y in 0..<pixels.height where covered[y] {
+                    if let start = runStart, y - lastY > 4 {
+                        runs.append((start, lastY))
+                        runStart = y
+                    } else if runStart == nil {
+                        runStart = y
+                    }
+                    lastY = y
+                }
+                if let start = runStart { runs.append((start, lastY)) }
+                let spine = runs.first { run in
+                    centers.allSatisfy { $0 >= run.0 && $0 <= run.1 }
+                }
+                let coversEnds = spine.map { run in
+                    guard let first = blobs.first, let last = blobs.last else { return false }
+                    return run.0 >= first.low
+                        && run.1 >= last.high + Int(8 * scale)
+                } ?? false
+                failure.check(spine != nil && coversEnds,
+                              "\(imageName) 竖线从首节点贯穿到末节点（中间不断、不越过首节点）",
+                              detail: spine.map { "（线 \($0.0)–\($0.1)px）" } ?? "（没有贯穿的线）")
+
+                // live 标记：末尾那个正在转写的节点必须是对比度最强的那支
+                // accent 蓝（#0071E3）。三个通道的判法与别色无歧义：
+                // 橙/红 b 很低，绿 b−r 只有 0.16，都不满足 b−r > 0.4
+                let accentIndex = centers.firstIndex { y in
+                    let (r, _, b) = pixels.rgb(spineX, y)
+                    return b - r > 0.4 && b > 0.6
+                }
+                failure.check(accentIndex == centers.indices.last,
+                              "\(imageName) live 标记是最后一个节点的 accent 蓝",
+                              detail: accentIndex.map { "（第 \($0 + 1) 个节点）" } ?? "（没找到 accent 节点）")
+
+                // 两种橙要能分开：夹具第 2 个节点是「存疑」warning、
+                // 第 3 个是「无法核实」unknown。派单把两者都定成橙，
+                // 那就只能靠明度差——两个 token 的亮度差不到 0.05 时，
+                // 8pt 的圆点是两个一样的点（深色最初用 #FFB340 就是这个毛病）
+                if centers.count >= 3 {
+                    let warningLuma = lumaOf(pixels.rgb(spineX, centers[1]))
+                    let unknownLuma = lumaOf(pixels.rgb(spineX, centers[2]))
+                    failure.check(abs(warningLuma - unknownLuma) >= 0.05,
+                                  "\(imageName) 存疑与无法核实两种橙分得开",
+                                  detail: String(format: "（亮度 %.3f vs %.3f）", warningLuma, unknownLuma))
+                }
+            }
+        }
+
         for line in failure.lines { print(line) }
         print("")
         print(failure.count == 0
@@ -562,11 +722,17 @@ enum UISnapshot {
         }
 
         func luma(_ x: Int, _ y: Int) -> Double {
+            let (r, g, b) = rgb(x, y)
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b
+        }
+
+        /// 0–1 的 sRGB 三通道。时间轴的节点颜色判据要分「蓝/绿/橙」，
+        /// 亮度分不开（accent 蓝和未知橙在深色下亮度接近）
+        func rgb(_ x: Int, _ y: Int) -> (Double, Double, Double) {
             let offset = y * bytesPerRow + x * bytesPerPixel
-            let r = Double(data[offset])
-            let g = Double(data[offset + 1])
-            let b = Double(data[offset + 2])
-            return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+            return (Double(data[offset]) / 255,
+                    Double(data[offset + 1]) / 255,
+                    Double(data[offset + 2]) / 255)
         }
 
         /// 左上角 8×8 的平均亮度。三张屏在这个位置都是页面底
@@ -650,6 +816,11 @@ enum UISnapshot {
             }
             return result
         }
+    }
+
+    /// 0–1 的 sRGB 三通道 → 亮度。时间轴两种橙靠明度区分，判据要能算它
+    private static func lumaOf(_ rgb: (Double, Double, Double)) -> Double {
+        0.2126 * rgb.0 + 0.7152 * rgb.1 + 0.0722 * rgb.2
     }
 
     /// 一组亮度里出现最多的那个（按 0.005 分箱）。卡片底色的几百行会压倒

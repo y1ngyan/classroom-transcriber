@@ -308,6 +308,9 @@ struct TranscriptLine: View {
     /// 正在转写的那一行。给一个轻的 `isHighlighted` 态：
     /// 最后一段还没定稿时，用户要能一眼找到「现在写到哪了」
     var isActive = false
+    /// 是否在卡片里画时间戳。时间轴（P15-3）把它搬到了节点那一行，
+    /// 这里传 false——同一段时间戳画两次，卡内那一个会和节点行的错位
+    var showsTimestamp = true
 
     @State private var isHovering = false
 
@@ -350,9 +353,11 @@ struct TranscriptLine: View {
             // 收在右端。P14-4 把原来「正文下面那一行长文本」整段搬上来：
             // 核查结论是个状态，不是正文的第二行
             HStack(alignment: .center, spacing: Theme.Spacing.s6) {
-                Text(segment.formattedTimestamp)
-                    .font(Theme.Text.meta.font.monospacedDigit())
-                    .foregroundStyle(Theme.textSupporting)
+                if showsTimestamp {
+                    Text(segment.formattedTimestamp)
+                        .font(Theme.Text.meta.font.monospacedDigit())
+                        .foregroundStyle(Theme.textSupporting)
+                }
 
                 // 说话人是内容（用户要知道谁说的），时间戳是定位用的刻度：
                 // 时间戳用 textSupporting 之后，说话人必须提到正文色，
