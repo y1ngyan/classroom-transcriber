@@ -18,6 +18,8 @@ struct RecordingsOverview: View {
         static let width: CGFloat = 6
         static let spacing: CGFloat = Theme.Spacing.xs
         static let height: CGFloat = 36
+        /// 空天占位柱高：只够让那一格在横轴上仍然存在
+        static let baselineHeight: CGFloat = 2
         static let cornerRadius: CGFloat = 2
     }
 
@@ -41,13 +43,20 @@ struct RecordingsOverview: View {
 
             HStack(alignment: .bottom, spacing: Bar.spacing) {
                 ForEach(Array(stats.dailyValues.enumerated()), id: \.offset) { index, value in
+                    let isToday = index == stats.dailyValues.count - 1
+                    let isEmptyDay = value <= 0
                     RoundedRectangle(cornerRadius: Bar.cornerRadius)
                         // 当天用 accent；其余三级色 50%，不与当天争视觉重量。
-                        // 空天高度为 0（归一化判据要求），不画最小高度去假装有数据
-                        .fill(index == stats.dailyValues.count - 1
+                        // 空天画 2pt 基线小柱、再压一档不透明度：高度为 0 时
+                        // 那一格什么都不画，7 根变 3 根，横轴日期就错位了——
+                        // 用户会以为概览只有 3 天，而不是「那几天没录音」
+                        .fill(isToday
                               ? Theme.accent
-                              : Theme.textTertiary.opacity(0.5))
-                        .frame(width: Bar.width, height: Bar.height * max(0, min(1, value)))
+                              : Theme.textTertiary.opacity(isEmptyDay ? 0.2 : 0.5))
+                        .frame(width: Bar.width,
+                               height: isEmptyDay
+                                   ? Bar.baselineHeight
+                                   : Bar.height * max(0, min(1, value)))
                 }
             }
             // 柱高只在容器底部对齐；给容器固定的 36 高，空天就不会把整排压扁
