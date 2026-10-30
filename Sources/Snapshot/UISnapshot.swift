@@ -682,6 +682,18 @@ enum UISnapshot {
                                   "\(imageName) 存疑与无法核实两种橙分得开",
                                   detail: String(format: "（亮度 %.3f vs %.3f）", warningLuma, unknownLuma))
                 }
+
+                // P15-4：四张卡片底色必须一致。live 段只由节点表达，
+                // 原来透传 isActive 会叠 4% highlight，最后一张卡变成浅灰。
+                // 取卡片内一块没有文字的区域（x=800pt；正文最长也只到
+                // 约 550pt），y 取节点中心往下 40px——节点行 + 卡片内边距之后
+                if centers.count == expectedNodes {
+                    let fills = centers.map { pixels.luma(1600, $0 + 40) }
+                    let spread = (fills.max() ?? 0) - (fills.min() ?? 0)
+                    failure.check(spread <= 0.005,
+                                  "\(imageName) 四张卡片底色一致（live 不改卡片底）",
+                                  detail: String(format: "（亮度 %@）", fills.map { String(format: "%.4f", $0) }.joined(separator: " / ")))
+                }
             }
         }
 

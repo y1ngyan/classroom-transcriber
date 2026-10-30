@@ -115,6 +115,15 @@ enum TimelineNodeStatus: String, CaseIterable, Equatable {
               "只有 live 状态带 animating 标记",
               "（实得 \(TimelineNodeStatus.allCases.filter(\.isLive).map(\.rawValue))）")
 
+        // P15-4：卡片是「挂在轴上」，不是浮起来的列表项——elevation 必须
+        // 是 0（浅色下一级就会出两层阴影），且离轴 16
+        check(TimelineMetrics.cardElevation == 0,
+              "卡片 elevation = 0（时间轴上不出阴影）",
+              "（实得 \(TimelineMetrics.cardElevation)）")
+        check(TimelineMetrics.contentInset == 16,
+              "轨道到卡片 16",
+              "（实得 \(TimelineMetrics.contentInset)）")
+
         lines.append("")
         lines.append(failed == 0
                      ? "✅ 时间轴节点自检通过（\(passed) 条）"
@@ -132,8 +141,13 @@ enum TimelineMetrics {
     static let lineOpacity: Double = 0.35
     /// 节点中心离行顶 8：时间戳是 11pt/16 行高，节点正中对着它的中线
     static let nodeCenterY: CGFloat = 8
-    /// 竖线到卡片左沿 16。节点中心在竖线上（x=4），所以内容从 20 开始
-    static let contentInset: CGFloat = 20
+    /// 轨道左沿到卡片左沿 16。节点中心在 x=4（线也在那），所以卡片离
+    /// 竖线中心 12——P15-4 评审嫌 20 太大、卡片像散落的独立块，收到 16
+    static let contentInset: CGFloat = 16
+    /// 时间轴上的卡片**不带阴影**（elevation 0）。卡片是挂在轴上的一个
+    /// 段落，不是浮起来的列表项；浅色下哪怕只给一级阴影，一排卡片也会
+    /// 各自投出影子，把一条连续的流读成互不相干的条目
+    static let cardElevation = 0
     /// 相邻段之间 12
     static let rowSpacing: CGFloat = Theme.Spacing.s12
     /// 节点行与正文 6
@@ -157,7 +171,6 @@ struct TranscriptTimelineRow: View {
     let checkState: SegmentCheckState
     var onRemoveAttachment: ((ImageAttachment) -> Void)?
     var onCheck: (() -> Void)?
-    let isActive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: TimelineMetrics.nodeToBody) {
@@ -175,8 +188,11 @@ struct TranscriptTimelineRow: View {
                 onRemoveAttachment: onRemoveAttachment,
                 checkState: checkState,
                 onCheck: onCheck,
-                cardElevation: 0,
-                isActive: isActive,
+                cardElevation: TimelineMetrics.cardElevation,
+                // P15-4：live 只由节点（accent 呼吸点）表达。原来把
+                // `isActive` 透传给卡片，会叠一层 4% 的 highlight 底，
+                // 最后一段看起来像被单独选中的浅灰卡——它不是选中项
+                isActive: false,
                 showsTimestamp: false
             )
         }

@@ -244,8 +244,7 @@ struct TranscriptionView: View {
                             // 管的是「自动跑不跑」，这里管的是「我现在想查
                             // 这一段」。定稿后才能查：未定稿的文字还在被
                             // 模型改写，拿去核查既浪费请求又会得到错结论
-                            onCheck: { appState.factCheck.submit(segment: segment) },
-                            isActive: isActive
+                            onCheck: { appState.factCheck.submit(segment: segment) }
                         )
                         .id(segment.id)
                     }
