@@ -115,14 +115,16 @@ enum TimelineNodeStatus: String, CaseIterable, Equatable {
               "只有 live 状态带 animating 标记",
               "（实得 \(TimelineNodeStatus.allCases.filter(\.isLive).map(\.rawValue))）")
 
-        // P15-4：卡片是「挂在轴上」，不是浮起来的列表项——elevation 必须
-        // 是 0（浅色下一级就会出两层阴影），且离轴 16
-        check(TimelineMetrics.cardElevation == 0,
-              "卡片 elevation = 0（时间轴上不出阴影）",
-              "（实得 \(TimelineMetrics.cardElevation)）")
+        // P15-5：段落必须是透明的（无卡片底/圆角/描边），段间靠
+        // 12pt 空白 + 0.5pt 发丝线分开。视图层的 `.plain` 走像素判据，
+        // 这里钉住数字
         check(TimelineMetrics.contentInset == 16,
-              "轨道到卡片 16",
+              "轨道到段落 16",
               "（实得 \(TimelineMetrics.contentInset)）")
+        check(TimelineMetrics.dividerHeight == 0.5
+              && TimelineMetrics.dividerOpacity < 1,
+              "段间发丝线 0.5pt 且不是实色",
+              "（实得 \(TimelineMetrics.dividerHeight)pt / \(TimelineMetrics.dividerOpacity)）")
 
         lines.append("")
         lines.append(failed == 0
@@ -141,13 +143,13 @@ enum TimelineMetrics {
     static let lineOpacity: Double = 0.35
     /// 节点中心离行顶 8：时间戳是 11pt/16 行高，节点正中对着它的中线
     static let nodeCenterY: CGFloat = 8
-    /// 轨道左沿到卡片左沿 16。节点中心在 x=4（线也在那），所以卡片离
-    /// 竖线中心 12——P15-4 评审嫌 20 太大、卡片像散落的独立块，收到 16
+    /// 轨道左沿到段落左沿 16。节点中心在 x=4（线也在那），所以段落
+    /// 离竖线中心 12
     static let contentInset: CGFloat = 16
-    /// 时间轴上的卡片**不带阴影**（elevation 0）。卡片是挂在轴上的一个
-    /// 段落，不是浮起来的列表项；浅色下哪怕只给一级阴影，一排卡片也会
-    /// 各自投出影子，把一条连续的流读成互不相干的条目
-    static let cardElevation = 0
+    /// 段与段之间的发丝线：0.5pt（@2x 上正好一个物理像素），
+    /// separator 再压到 60%——P15-5 的「极淡」
+    static let dividerHeight: CGFloat = 0.5
+    static let dividerOpacity: Double = 0.6
     /// 相邻段之间 12
     static let rowSpacing: CGFloat = Theme.Spacing.s12
     /// 节点行与正文 6
@@ -173,35 +175,72 @@ struct TranscriptTimelineRow: View {
     var onCheck: (() -> Void)?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TimelineMetrics.nodeToBody) {
-            // 时间戳从卡片里搬到这里（P15-3）：它定位的是**这一行**，
-            // 不是卡片内部的一行元数据
-            Text(segment.formattedTimestamp)
-                .font(Theme.Text.footnote.font
-                    .weight(.semibold)
-                    .monospacedDigit())
-                .foregroundStyle(Theme.textSupporting)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: TimelineMetrics.nodeToBody) {
+                // 时间戳从卡片里搬到这里（P15-3）：它定位的是**这一行**，
+                // 不是段落内部的一行元数据
+                Text(segment.formattedTimestamp)
+                    .font(Theme.Text.footnote.font
+                        .weight(.semibold)
+                        .monospacedDigit())
+                    .foregroundStyle(Theme.textSupporting)
 
-            TranscriptLine(
-                segment: segment,
-                attachments: attachments,
-                onRemoveAttachment: onRemoveAttachment,
-                checkState: checkState,
-                onCheck: onCheck,
-                cardElevation: TimelineMetrics.cardElevation,
-                // P15-4：live 只由节点（accent 呼吸点）表达。原来把
-                // `isActive` 透传给卡片，会叠一层 4% 的 highlight 底，
-                // 最后一段看起来像被单独选中的浅灰卡——它不是选中项
-                isActive: false,
-                showsTimestamp: false
-            )
+                TranscriptLine(
+                    segment: segment,
+                    attachments: attachments,
+                    onRemoveAttachment: onRemoveAttachment,
+                    checkState: checkState,
+                    onCheck: onCheck,
+                    // P15-4/P15-5：不含底盘、不含边框、不含阴影。
+                    // live 只由节点（accent 呼吸点）表达，不叠整段高亮
+                    surface: .plain,
+                    showsTimestamp: false
+                )
+            }
+
+            // 段与段之间：12pt 空白 + 一条 0.5pt 极淡发丝线，线在空白正中。
+            // 线是「这条流还是这个流」的最小提示——没有它，去掉了卡片之后
+            // 四段之间只剩空白，读起来像四个孤立段落
+            if !isLast {
+                HairlineDivider(
+                    height: TimelineMetrics.rowSpacing,
+                    lineWidth: TimelineMetrics.dividerHeight,
+                    color: Theme.separator.opacity(TimelineMetrics.dividerOpacity)
+                )
+            }
         }
         .padding(.leading, TimelineMetrics.contentInset)
-        .padding(.bottom, isLast ? 0 : TimelineMetrics.rowSpacing)
         .overlay(alignment: .topLeading) {
             TimelineRail(status: status, isFirst: isFirst, isLast: isLast)
                 .frame(width: TimelineMetrics.nodeDiameter)
         }
+    }
+}
+
+/// 段间发丝线。
+///
+/// **不能写成 `Rectangle().frame(height: 0.5)`**：0.5pt 在 @2x 上只有
+/// 1 个物理像素，矩形是按设备像素对齐的——行的总高是小数时，这条 1px
+/// 的矩形会落在两个像素中间，对齐后高度被四舍五入成 0，整条线
+/// **一个像素都不画**（实测四段里第二段的线就这样消失了，另外两条
+/// 恰好落在像素边界上所以画出来了）。按行高奇偶随机丢线，最难查。
+///
+/// Canvas 的描边走抗锯齿，不往像素网格上对齐：0.5pt 的线会分染到
+/// 相邻两个像素行上，密度减半但一定看得见——「极淡」本来就允许。
+private struct HairlineDivider: View {
+    let height: CGFloat
+    let lineWidth: CGFloat
+    let color: Color
+
+    var body: some View {
+        Canvas { context, size in
+            var path = Path()
+            let y = size.height / 2
+            path.move(to: CGPoint(x: 0, y: y))
+            path.addLine(to: CGPoint(x: size.width, y: y))
+            context.stroke(path, with: .color(color), lineWidth: lineWidth)
+        }
+        .frame(height: height)
     }
 }
 

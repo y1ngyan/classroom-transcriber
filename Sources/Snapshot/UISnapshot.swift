@@ -339,6 +339,12 @@ enum UISnapshot {
                           "\(name) 像素非空",
                           detail: String(format: "（非背景 %.2f%%）", fraction * 100))
 
+            // P15-5 起转录页没有卡片（时间轴上的段落是透明的），
+            // 卡片分离那两条在 p15-3 模式下没有对象可判——替代判据
+            // 「段落透明」「发丝线在」在下面的自检 ⑭ 里
+            if onlyTimeline {
+                continue
+            }
             if name.hasSuffix("-dark.png") {
                 let runs = pixels.longestRunLuminances(minLength: 200, tolerance: 0.012)
                 // 卡片底是一大片同色；描边是**两三条**同色长横线。
@@ -683,17 +689,46 @@ enum UISnapshot {
                                   detail: String(format: "（亮度 %.3f vs %.3f）", warningLuma, unknownLuma))
                 }
 
-                // P15-4：四张卡片底色必须一致。live 段只由节点表达，
-                // 原来透传 isActive 会叠 4% highlight，最后一张卡变成浅灰。
-                // 取卡片内一块没有文字的区域（x=800pt；正文最长也只到
-                // 约 550pt），y 取节点中心往下 40px——节点行 + 卡片内边距之后
+                // P15-5：段落必须透明——没有卡片底、没有圆角、没有描边。
+                // 取段内一块没有文字的区域（x=800pt；正文最长也只到约
+                // 550pt），y 取节点中心往下 40px（时间戳行 + 内边距之后），
+                // 要求它和页面底**逐像素相同**。上一版的 #1C1C1E 卡片底
+                // 亮度 0.11、高亮卡 0.96，都逃不过这一条
                 if centers.count == expectedNodes {
-                    let fills = centers.map { pixels.luma(1600, $0 + 40) }
-                    let spread = (fills.max() ?? 0) - (fills.min() ?? 0)
-                    failure.check(spread <= 0.005,
-                                  "\(imageName) 四张卡片底色一致（live 不改卡片底）",
-                                  detail: String(format: "（亮度 %@）", fills.map { String(format: "%.4f", $0) }.joined(separator: " / ")))
+                    let samples = centers.map { pixels.luma(1600, $0 + 40) }
+                    let worst = samples.map { abs($0 - bg) }.max() ?? 0
+                    failure.check(worst <= 0.01,
+                                  "\(imageName) 四段底板透明（= 页面底，无卡片）",
+                                  detail: String(format: "（页面底 %.4f，段内 %@）",
+                                                 bg, samples.map { String(format: "%.4f", $0) }.joined(separator: " / ")))
                 }
+
+                // 段与段之间的 0.5pt 发丝线：横向贯穿整个内容宽
+                // （1052pt 内容区 - 16 左缩进 ≈ 2072px），只出现在
+                // 首末节点之间。判定不走 `longestRunLuminances`：它记的是
+                // 「最长同色段」的起始值，文字行里的抗锯齿像素会把整行
+                // 背景也包进 0.012 的容差里，一屏文字能刷出二十来条假线。
+                // 这里直接要求「整行几乎同色，且与页面底差得明显」
+                func dividerRow(_ y: Int) -> Bool {
+                    let color = pixels.luma(1600, y)
+                    // 浅色 0.02、深色 0.01：低于这个就只是抗锯齿，不是线
+                    let threshold = schemeName == "light" ? 0.02 : 0.01
+                    guard abs(color - bg) > threshold else { return false }
+                    var same = 0, total = 0
+                    // 从 x=200 起：左边 128px 内有竖线/节点，不给它们算数
+                    for x in stride(from: 200, to: min(2000, pixels.width), by: 7) {
+                        total += 1
+                        if abs(pixels.luma(x, y) - color) < 0.01 { same += 1 }
+                    }
+                    return total > 0 && Double(same) / Double(total) > 0.9
+                }
+                let listRange = (blobs.first?.low ?? 0)...(blobs.last?.high ?? pixels.height)
+                let dividerRows = (listRange).filter(dividerRow)
+                var groups = 0
+                for y in dividerRows where !dividerRows.contains(y - 1) { groups += 1 }
+                failure.check(groups == expectedNodes - 1,
+                              "\(imageName) 段间发丝线 \(expectedNodes - 1) 条",
+                              detail: "（实得 \(groups) 条：\(dividerRows.map { "\($0)" }.joined(separator: "、"))）")
             }
         }
 

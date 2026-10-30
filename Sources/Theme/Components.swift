@@ -280,6 +280,18 @@ struct Separator: View {
 
 // MARK: - TranscriptLine
 
+/// 一段转录外面的容器（P15-5）。
+///
+/// **时间轴上不许有卡片**：白底 + 圆角 + 描边挨着一条半透明竖线，是两块
+/// 并列的图形，读不成一根轴。所以转录页用 `.plain`（透明，只留内边距），
+/// 段与段之间靠间距 + 发丝线分开。卡片（`.card`）仍给录音列表这类
+/// 「一个个独立条目」的屏；`.bare` 是录音详情里连内边距都不要的只读预览
+enum TranscriptSurface {
+    case card(elevation: Int)
+    case plain
+    case bare
+}
+
 /// 一行转录：中英混排（英文走 accent 色），时间戳右对齐灰色小字。
 struct TranscriptLine: View {
     let segment: TranscriptSegment
@@ -299,12 +311,8 @@ struct TranscriptLine: View {
     /// 是要能离线自检的规则，散进 View 就测不到了
     var speakerLabel: String?
 
-    /// 卡片层级。nil = 不加卡片（录音详情页的只读预览沿旧样式）。
-    ///
-    /// 转录页传 0：这一屏是流式内容，卡片只负责把「一段」圈出来，
-    /// 不该像列表项那样浮起来（浮起来等于在说「这些是各自独立的条目」，
-    /// 而转录读的是一条连续的流）
-    var cardElevation: Int?
+    /// 段落外面的容器。见 `TranscriptSurface`
+    var surface: TranscriptSurface = .bare
     /// 正在转写的那一行。给一个轻的 `isHighlighted` 态：
     /// 最后一段还没定稿时，用户要能一眼找到「现在写到哪了」
     var isActive = false
@@ -322,15 +330,29 @@ struct TranscriptLine: View {
 
     @ViewBuilder
     var body: some View {
-        if let cardElevation {
+        switch surface {
+        case .card(let elevation):
             content
-                .cardStyle(elevation: cardElevation,
+                .cardStyle(elevation: elevation,
                            isHighlighted: isActive || isHovering)
                 .contentShape(Rectangle())
                 .onHover { hovering in
                     withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
                 }
-        } else {
+        case .plain:
+            // 透明底，只留内边距（P15-5 时间轴）。
+            //
+            // **为什么连悬停底色都不给**：白色圆角卡挨着半透明竖线时，
+            // 两者是两块并列的图形，时间轴读不成一条轴；悬停时再铺一层
+            // 4% 的底，等于在指针经过时把盒子又画回来一次。悬停仍有反馈——
+            // 「核查」按钮只在这时出现（见 `content` 里的 isHovering）
+            content
+                .padding(Theme.Spacing.md)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+                }
+        case .bare:
             content
                 // 悬停反馈是一条 2pt 左侧竖条（设计规范），不是背景填充。
                 // 画在 overlay 里不占布局，指针进出时列表不会抖
