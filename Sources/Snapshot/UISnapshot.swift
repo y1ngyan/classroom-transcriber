@@ -140,12 +140,13 @@ enum UISnapshot {
         //   · `p14-4`：P14-4 的五屏 × 亮暗共 10 张，跳过录音列表；
         //   · `p14-5`：P14-5 只改设置页，只渲 settings 亮/暗 2 张；
         //   · `p15-1`：P15-1 只改录音卡片，只渲有数据的 recordings 亮/暗 2 张
-        //     （空态屏不验波形，不浪费一次渲染）
+        //     （空态屏不验波形，不浪费一次渲染）；
+        //   · `p15-2`：P15-2 加概览条，同样只要 recordings 亮/暗 2 张
         let only = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
         let onlyRecordings = only == "recordings"
         let onlyFive = only == "p14-4"
         let onlySettings = only == "p14-5"
-        let onlyWaveform = only == "p15-1"
+        let onlyRecordingsTwo = only == "p15-1" || only == "p15-2"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
@@ -156,7 +157,7 @@ enum UISnapshot {
             if onlySettings {
                 return allScreens.filter { $0.name == "settings" }
             }
-            if onlyWaveform {
+            if onlyRecordingsTwo {
                 return allScreens.filter { $0.name == "recordings" }
             }
             return allScreens
@@ -173,8 +174,8 @@ enum UISnapshot {
             print("  模式：只渲设置屏 2 张（UI_SNAPSHOT_ONLY=p14-5）")
             print("")
         }
-        if onlyWaveform {
-            print("  模式：只渲录音屏 2 张（UI_SNAPSHOT_ONLY=p15-1）")
+        if onlyRecordingsTwo {
+            print("  模式：只渲录音屏 2 张（UI_SNAPSHOT_ONLY=\(only ?? "")）")
             print("")
         }
 
@@ -375,22 +376,27 @@ enum UISnapshot {
             }
         }
 
-        // ── 自检 ⑨：圆角与字号五档（P14-1 定死）──
+        // ── 自检 ⑨：圆角与字号档位（P14-1 定死五档，P15-2 批准新增 metric）──
         //
-        // 这些是「规格里的数」而不是观感判据：派单把 32/17/15/13/11 和圆角 16
-        // 写死了，谁哪天顺手把标题调回 48、或给卡片新开一档 14pt，这里必须红
+        // 这些是「规格里的数」而不是观感判据：派单把字号和圆角写死了，
+        // 谁哪天顺手把标题调回 48、或又给某处新开一档数字，这里必须红。
+        // P15-2 的概览读数明确要求 28/700，于是这一档从五档变六档——
+        // 不是把判据放松成「随便几档」，新值仍然要写进这个集合
         failure.check(Theme.Radius.card == 16, "卡片圆角 = 16",
                       detail: "（实得 \(Theme.Radius.card)）")
         failure.check(Theme.Spacing.cardPaddingH == 20 && Theme.Spacing.cardPaddingV == 16,
                       "卡片内边距 = 水平 20 / 垂直 16",
                       detail: "（实得 \(Theme.Spacing.cardPaddingH) / \(Theme.Spacing.cardPaddingV)）")
         let styleSizes: Set<CGFloat> = [
-            Theme.Text.largeTitle.size, Theme.Text.bodyEmphasized.size,
-            Theme.Text.summary.size, Theme.Text.meta.size, Theme.Text.footnote.size,
+            Theme.Text.largeTitle.size, Theme.Text.metric.size,
+            Theme.Text.bodyEmphasized.size, Theme.Text.summary.size,
+            Theme.Text.meta.size, Theme.Text.footnote.size,
         ]
-        failure.check(styleSizes == Set<CGFloat>([32, 17, 15, 13, 11]),
-                      "字号正好五档 32/17/15/13/11",
+        failure.check(styleSizes == Set<CGFloat>([32, 28, 17, 15, 13, 11]),
+                      "字号正好六档 32/28/17/15/13/11",
                       detail: "（实得 \(styleSizes.sorted().map { "\($0)" }.joined(separator: "/"))）")
+        failure.check(Theme.Text.metric.weight == .bold,
+                      "概览读数 28/700")
         failure.check(Theme.Text.largeTitle.weight == .bold,
                       "页面标题 32/700")
         failure.check(Theme.Text.bodyEmphasized.weight == .semibold,
@@ -513,7 +519,7 @@ enum UISnapshot {
                           "只渲设置屏 2 张（亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
-        if onlyWaveform {
+        if onlyRecordingsTwo {
             failure.check(expected.count == 2,
                           "只渲录音屏 2 张（亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")

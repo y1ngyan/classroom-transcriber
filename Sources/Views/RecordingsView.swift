@@ -87,6 +87,19 @@ struct RecordingsView: View {
             if store.summaries.isEmpty && store.recoveryItems.isEmpty {
                 emptyState
             } else {
+                // 本周概览（P15-2）。放在标题与第一个分组之间，用留白 +
+                // 分隔线和列表分开。它是**读数**，不是一条录音，所以不套卡片。
+                // 没有数据时整条不渲染（见 `overviewStats`）
+                if let stats = overviewStats {
+                    RecordingsOverview(stats: stats)
+                        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+                        .padding(.top, Theme.Spacing.s20)
+
+                    Separator()
+                        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+                        .padding(.top, Theme.Spacing.s20)
+                }
+
                 ScrollView {
                     LazyVStack(alignment: .leading,
                                spacing: Theme.RecordingLayout.groupSpacing) {
@@ -156,8 +169,17 @@ struct RecordingsView: View {
         .frame(height: Theme.RecordingLayout.toolbarHeight)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: Theme.Spacing.md) {
+    /// 概览读数。生产路径只对内存里的 summaries 求和（不扫盘）；
+    /// 快照路径用固定值，理由见 `RecordingStats.snapshotFixture`。
+    /// 复用 `WaveformEnvelope.isSnapshotMode` 是因为两者判的都是同一个
+    /// `--ui-snapshot` 进程标志，不该再各写一份参数解析
+    private var overviewStats: RecordingStats? {
+        WaveformEnvelope.isSnapshotMode
+            ? .snapshotFixture
+            : RecordingStats.make(from: store.summaries)
+    }
+
+    private var emptyState: some View {        VStack(spacing: Theme.Spacing.md) {
             Image(systemName: "waveform")
                 .font(.system(size: 22))
                 .foregroundStyle(Theme.textSupporting)

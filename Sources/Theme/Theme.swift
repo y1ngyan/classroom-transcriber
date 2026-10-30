@@ -323,6 +323,15 @@ enum Theme {
         static let meta = TextStyle(
             name: "meta", size: 13, weight: .regular, tracking: 0, lineHeight: 18
         )
+        /// 读数 28/700（P15-2）：录音页顶部「本周概览」的三个数字。
+        ///
+        /// 为什么新开一档而不是复用 32 的 `largeTitle`：那档是页面标题，
+        /// 同屏出现会把「本周 4h 46m」读成第二个标题。28 比标题低一级、
+        /// 又比 17 的正文重得多，正好是「一眼看到读数」的层级。
+        /// 行高按 28pt 字号留 34，留给中文数字混排的下沉
+        static let metric = TextStyle(
+            name: "metric", size: 28, weight: .bold, tracking: -0.3, lineHeight: 34
+        )
     }
 
     // MARK: - 控件尺寸

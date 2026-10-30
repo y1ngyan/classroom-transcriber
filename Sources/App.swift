@@ -713,6 +713,14 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 录音概览聚合自检：--recording-stats-selftest（固定日历 + 内存夹具；
+        // 不读真实库、不联网、不碰界面）
+        if CommandLine.arguments.contains("--recording-stats-selftest") {
+            let result = RecordingStats.selfTest()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 提问数据层自检：--questions-selftest（B 包 §4 / §6.2 / §6.3 / §4.6）
         // （离线：临时目录夹具；不联网、不调模型、不碰麦克风、不发声、不读真实库）
         //
