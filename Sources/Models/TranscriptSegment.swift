@@ -147,11 +147,16 @@ struct FactCheckResult: Identifiable, Equatable {
         }
 
         /// verified 用 #30D158，unverifiable 用 #FF9F0A
+        ///
+        /// 「无法核实」用问号而不是 ✗：✗ 在通用认知里是「错」，
+        /// 而这一档是「查不到依据」，不是「说错了」——它配 warning 橙，
+        /// 若再挂一个 ✗，颜色和符号会一起把人往「内容有错」上推。
+        /// 「存疑」才是真的被证据反驳，✗ 归它
         var symbol: String {
             switch self {
             case .verified: return "✓"
-            case .disputed: return "?"
-            case .unverifiable: return "✗"
+            case .disputed: return "✗"
+            case .unverifiable: return "?"
             }
         }
     }

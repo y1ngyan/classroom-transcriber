@@ -6,8 +6,9 @@ import SwiftUI
 /// 关掉就没了；recordings/ 下的 wav 和转录文本之间也没有任何关联。
 /// 一学期下来录音攒了几十条，却没有任何入口能回去看某一天讲了什么。
 ///
-/// 布局按设计规范：不用卡片、不用底色块，分组靠留白和 `Separator()`；
-/// 悬停反馈是一条 2pt 左侧竖条（画在 overlay 里不占布局）。
+/// 布局（P13-1 起）：列表行是**卡片**（`.cardStyle(elevation: 1)`）——
+/// 这一屏是卡片设计的试点，其余屏还是旧的「靠留白分组」。分组的课程/日期
+/// 标题仍靠留白分层，卡片只负责「一条录音」这个最小单位。
 struct RecordingsView: View {
     @Environment(AppState.self) private var appState
 
@@ -87,7 +88,8 @@ struct RecordingsView: View {
                 emptyState
             } else {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
+                    LazyVStack(alignment: .leading,
+                               spacing: Theme.RecordingLayout.groupSpacing) {
                         // 「未完成」排在最前：它是**要用户做决定**的一组，
                         // 压在一屏历史录音底下等于没提。做完决定这一组就消失
                         if !store.recoveryItems.isEmpty {
@@ -97,40 +99,83 @@ struct RecordingsView: View {
                             courseGroup(name: group.0, sessions: group.1)
                         }
                     }
-                    .padding(.horizontal, Theme.pagePadding)
-                    .padding(.top, Theme.Spacing.lg)
-                    .padding(.bottom, Theme.Spacing.xxl)
+                    .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+                    .padding(.top, Theme.RecordingLayout.toolbarToGroup)
+                    .padding(.bottom, Theme.RecordingLayout.listBottom)
                 }
             }
         }
     }
 
+    /// 页头：标题 + 右侧工具栏（P14-1）。
+    ///
+    /// 标题下那条分割线删掉了：工具栏已经给出「这一屏有操作」的分界，
+    /// 再加一条线就是两层分界叠在一起。数量副标题也一并收走——
+    /// 每个分组标题都带着计数，页头再报一遍总数是重复信息
     private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+        HStack(alignment: .center, spacing: Theme.RecordingLayout.titleToToolbar) {
             Text("录音")
                 .textStyle(Theme.Text.largeTitle)
                 .foregroundStyle(Theme.textPrimary)
 
-            let total = store.summaries.count
-            Text(total == 0 ? "还没有录音" : "共 \(total) 条录音")
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textSecondary)
+            Spacer()
+
+            toolbar
         }
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.top, Theme.Spacing.md)
-        .padding(.bottom, Theme.Spacing.md)
-        .overlay(alignment: .bottom) { Separator() }
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.Spacing.lg)
+    }
+
+    /// 顶部工具栏：搜索 / 筛选 / 新建。
+    ///
+    /// **搜索和筛选这一包只做了视觉**，没接任何逻辑（派单要求不改功能逻辑）。
+    /// 它们在 `help` 里照实说「尚未接入」，不做成点了没反应的假按钮观感
+    private var toolbar: some View {
+        HStack(spacing: Theme.Spacing.xs) {
+            ToolbarIconButton(symbol: "magnifyingglass", help: "搜索（尚未接入）") {}
+            ToolbarIconButton(symbol: "line.3.horizontal.decrease", help: "筛选（尚未接入）") {}
+
+            Button {
+                // 新建录音 = 去转录页录制。沿用空状态那个入口，不新造逻辑
+                appState.selectedTab = .transcription
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: Theme.RecordingLayout.playIcon, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: Theme.RecordingLayout.newButton,
+                           height: Theme.RecordingLayout.newButton)
+                    .background(Circle().fill(Theme.accent))
+                    // 44 的热区套在 28 的圆外面，视觉小、可点范围大
+                    .frame(width: Theme.RecordingLayout.iconButton,
+                           height: Theme.RecordingLayout.iconButton)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PressOpacityButtonStyle())
+            .help("新建录音（去转录页）")
+        }
+        .frame(height: Theme.RecordingLayout.toolbarHeight)
     }
 
     private var emptyState: some View {
-        VStack(spacing: Theme.Spacing.sm) {
-            Text("还没有录音")
-                .textStyle(Theme.Text.body)
-                .foregroundStyle(Theme.textSecondary)
+        VStack(spacing: Theme.Spacing.md) {
+            Image(systemName: "waveform")
+                .font(.system(size: 22))
+                .foregroundStyle(Theme.textSupporting)
+
+            // 页头不再有副标题，这里就是空状态唯一的那句话
             Text("在转录页点「开始录制」，录完的内容会自动出现在这里。")
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .textStyle(Theme.Text.summary)
+                .foregroundStyle(Theme.textSupporting)
+                .multilineTextAlignment(.center)
+
+            // 空状态只说明「该去哪」不够：用户还得自己去找标签页。
+            // 这里直接把他送到那一页，不新开窗口
+            PillButton(title: "去转录页录制", systemImage: "mic") {
+                appState.selectedTab = .transcription
+            }
         }
+        .frame(maxWidth: 520)
+        .cardStyle(elevation: 1)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -221,36 +266,39 @@ struct RecordingsView: View {
     }
 
     private func courseGroup(name: String, sessions: [SessionSummary]) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
-            // 课程名用 body 字号 + 主色，比日期组标题（caption + 次级色）
-            // 高一级：两级标题必须能一眼分出层级，同一档字号会读成平级
-            HStack(spacing: Theme.Spacing.sm) {
+        VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupTitleToCard) {
+            // 课程名是这一屏的第二级标题（页面标题是 32）：17/600 + 主色。
+            // 计数靠右且低一档（13 + supporting）——挨在名字后面会被读成上标
+            HStack(spacing: Theme.Spacing.s6) {
                 Text(name)
-                    .textStyle(Theme.Text.body)
+                    .textStyle(Theme.Text.bodyEmphasized)
                     .foregroundStyle(Theme.textPrimary)
-                Text("\(sessions.count)")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Text("\(sessions.count) 条")
+                    .textStyle(Theme.Text.meta)
+                    .monospacedDigit()
+                    .foregroundStyle(Theme.textSupporting)
             }
 
-            VStack(alignment: .leading, spacing: Theme.Spacing.lg) {
+            // 日期和卡片**不再缩进**（P14-2）：分组标题、日期、卡片共用
+            // 页面边距那一条左基线；两级归属只靠字号和颜色区分
+            VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupSpacing) {
                 ForEach(daysWithin(sessions), id: \.0) { day in
                     dayGroup(title: day.0, items: day.1)
                 }
             }
-            // 课程内部缩进一档，让两级归属在视觉上成立
-            .padding(.leading, Theme.Spacing.md)
         }
     }
 
     private func dayGroup(title: String, items: [SessionSummary]) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            // 分组标题小一号、次级色：它管的是分组，不该和条目本身抢注意力
+        VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupTitleToCard) {
+            // 日期是定位刻度，不是内容：13/500 + supporting，比课程名低一级
             Text(title)
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textSecondary)
+                .textStyle(Theme.Text.meta)
+                .fontWeight(.medium)
+                .foregroundStyle(Theme.textSupporting)
 
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            VStack(alignment: .leading, spacing: Theme.RecordingLayout.cardSpacing) {
                 ForEach(items) { item in
                     RecordingRow(
                         summary: item,
@@ -275,84 +323,180 @@ private struct RecordingRow: View {
 
     var body: some View {
         Button(action: onOpen) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
-                    // 显示名：用户起过就用它，没起过回落成时间。
-                    // title 为空时才另外补一个时间——否则「9月21日 11:12」
-                    // 会被显示两次
-                    Text(summary.displayTitle)
-                        .textStyle(Theme.Text.body)
-                        .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1)
+            HStack(spacing: Theme.RecordingLayout.cardContentSpacing) {
+                // 播放键是**装饰**，不是第二个按钮：整张卡已经是按钮，
+                // 里面再套一个按钮会变成嵌套命中区，点中间那圈行为不确定。
+                // 点它走的是同一个 `onOpen`，和点卡片其它地方没有区别。
+                // P14-2：图标 15→13、底 8%→6%，让「能点进去」比「能播放」显眼
+                Image(systemName: "play.fill")
+                    .font(.system(size: Theme.RecordingLayout.playIcon))
+                    .foregroundStyle(Theme.accent)
+                    .frame(width: Theme.RecordingLayout.playButton,
+                           height: Theme.RecordingLayout.playButton)
+                    .background(Circle().fill(Theme.accent.opacity(0.06)))
 
-                    if !summary.title.isEmpty {
-                        Text(summary.formattedTime)
-                            .textStyle(Theme.Text.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(Theme.textSecondary)
-                    }
+                VStack(alignment: .leading, spacing: Theme.RecordingLayout.cardTextSpacing) {
+                    // 标题行。角标钉在右上角（第一行基线），不跟元数据挤一行
+                    HStack(alignment: .top, spacing: Theme.RecordingLayout.cardTextSpacing) {
+                        // 显示名：用户起过就用它，没起过回落成时间。
+                        // 标题**永远**是课程/讲次，日期时间在元信息行里
+                        Text(summary.displayTitle)
+                            .textStyle(Theme.Text.bodyEmphasized)
+                            .foregroundStyle(Theme.textPrimary)
+                            .lineLimit(1)
 
-                    Text(summary.formattedDuration)
-                        .textStyle(Theme.Text.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(Theme.textSecondary)
+                        Spacer(minLength: Theme.RecordingLayout.cardTextSpacing)
 
-                    Spacer()
-
-                    // 删除入口：悬停才出现。常驻的话每行都挂一个按钮，
-                    // 一屏几十条全是控件，扫列表反而被挤没了
-                    if isHovering {
-                        Button(action: onDelete) {
-                            Text("删除")
-                                .textStyle(Theme.Text.caption)
-                                .foregroundStyle(Theme.error)
-                                .contentShape(Rectangle())
+                        // 右侧只放一件事：悬停时是删除，平时是质量角标。
+                        // 删除常驻的话每行都挂一个按钮，一屏几十条全是控件
+                        if isHovering {
+                            Button(action: onDelete) {
+                                Text("删除")
+                                    .textStyle(Theme.Text.meta)
+                                    .foregroundStyle(Theme.error)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .transition(.opacity)
+                        } else {
+                            qualityBadges
                         }
-                        .buttonStyle(.plain)
-                        .transition(.opacity)
+                    }
+
+                    if !summary.firstText.isEmpty {
+                        Text(summary.firstText)
+                            .textStyle(Theme.Text.summary)
+                            .foregroundStyle(Theme.textSupporting)
+                            .lineLimit(1)
+                    }
+
+                    // 读数行，只在实际有内容的项上出现——「0 个提问」这种
+                    // 占位读数没有任何信息量，只会把列表撑高。
+                    // P14-2：各项用 ` · ` 连起来，否则四个读数会糊成一串
+                    HStack(spacing: 0) {
+                        Text(metadataText)
+                            .textStyle(Theme.Text.meta)
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textSupporting)
+                            .lineLimit(1)
                     }
                 }
 
-                if !summary.firstText.isEmpty {
-                    Text(summary.firstText)
-                        .textStyle(Theme.Text.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .lineLimit(1)
-                }
-
-                // 读数行，只在实际有内容的项上出现——「0 个提问 0 段存疑」
-                // 这种占位读数没有任何信息量，只会把列表撑高
-                HStack(spacing: Theme.Spacing.md) {
-                    if summary.partCount > 1 {
-                        Label("\(summary.partCount) 段录音", systemImage: "square.stack")
-                    }
-                    Text("\(summary.segmentCount) 段转录")
-                    if summary.poorCount > 0 {
-                        StatusMark(kind: .error, text: "\(summary.poorCount) 段不可信")
-                    }
-                    if summary.fairCount > 0 {
-                        StatusMark(kind: .warning, text: "\(summary.fairCount) 段存疑")
-                    }
-                    if summary.questionCount > 0 {
-                        Label("\(summary.questionCount) 个提问", systemImage: "questionmark.bubble")
-                    }
-                }
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                // 「这行能点」的暗示。P14-2：13→14pt 且提到 textSecondary，
+                // 三级色压在黑底上几乎看不见，而它正是这一行最重要的提示
+                Image(systemName: "chevron.right")
+                    .font(.system(size: Theme.RecordingLayout.chevronSize, weight: .semibold))
+                    .foregroundStyle(Theme.textSecondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // 卡片外观必须套在**按钮的 label 里**，不能套在按钮外面：
+            // `cardStyle` 自带内边距，套在外面时那圈内边距落在按钮
+            // 的命中区之外——悬停会亮（`onHover` 在外层），点到卡片边缘
+            // 却不打开。`contentShape` 放在 `cardStyle` 之后，把包括内边距
+            // 在内的整张卡片都算成命中区
+            .cardStyle(elevation: 1, isHighlighted: isHovering)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // 悬停反馈是 2pt 左侧竖条，不是背景填充
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
-                .offset(x: -Theme.Spacing.md)
-        }
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+            isHovering = hovering
         }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
+    }
+
+    /// 元信息一行：`09:00 · 1:36:00 · 4 段转录 · 1 个提问`（P14-2）。
+    /// 时间固定第一项（标题不再兼任日期）；没有标题的旧数据里标题本身
+    /// 就是日期时间，这里不再重复一遍。空项不占位——「0 个提问」没有信息量
+    private var metadataText: String {
+        var items: [String] = []
+        if !summary.title.isEmpty { items.append(summary.formattedTime) }
+        items.append(summary.formattedDuration)
+        if summary.partCount > 1 { items.append("\(summary.partCount) 段录音") }
+        items.append("\(summary.segmentCount) 段转录")
+        if summary.questionCount > 0 { items.append("\(summary.questionCount) 个提问") }
+        return items.joined(separator: " · ")
+    }
+
+    /// 右上角状态角标（P14-3）：一种状态一个胶囊，各用各的颜色。
+    /// 顺序、个数、超长合并都在 `RecordingBadge` 里定；这里只负责上色。
+    /// **红胶囊里只放异常**——把「已核实」和「不可信」装进同一个红底，
+    /// 等于告诉用户已核实也算异常（P14-2 的原文如此，评审点掉了）
+    private var qualityBadges: some View {
+        let poor = summary.poorCount
+        let fair = summary.fairCount
+        let verified = max(0, summary.segmentCount - poor - fair)
+        return HStack(spacing: Theme.Spacing.xs) {
+            ForEach(Array(RecordingBadge.items(verified: verified, fair: fair, poor: poor)
+                .enumerated()), id: \.offset) { _, item in
+                switch item.kind {
+                case .verified:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.successBadge,
+                                 fillColor: Theme.successBadge.opacity(0.12))
+                case .fair:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.warningBadge,
+                                 fillColor: Theme.warningBadge.opacity(0.12))
+                case .poor:
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.errorBadge,
+                                 fillColor: Theme.errorBadge.opacity(0.12))
+                case .overflow:
+                    // 灰底：被合并掉的状态不在主叙述里，颜色让位给彩色胶囊
+                    QualityBadge(text: item.text,
+                                 textColor: Theme.textSupporting,
+                                 fillColor: Theme.textSecondary.opacity(0.12))
+                }
+            }
+        }
+    }
+}
+
+/// 单个状态角标。底色用文字色 12% 透明——不是不透明色块：
+/// 它是注释，不是警告牌，面积大了会盖过标题。文案由 `RecordingBadge`
+/// 拆好；这里只保证**不换行**
+private struct QualityBadge: View {
+    let text: String
+    let textColor: Color
+    let fillColor: Color
+
+    var body: some View {
+        Text(text)
+            .font(Theme.Text.footnote.font.weight(.semibold))
+            .foregroundStyle(textColor)
+            .lineLimit(1)
+            .padding(.horizontal, Theme.RecordingLayout.badgePaddingH)
+            .padding(.vertical, Theme.RecordingLayout.badgePaddingV)
+            .background(Capsule().fill(fillColor))
+    }
+}
+
+/// 工具栏图标按钮：44×44 热区、次级色、按下 0.9（P14-1）。
+private struct ToolbarIconButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(Theme.Text.summary.font)
+                .frame(width: Theme.RecordingLayout.iconButton,
+                       height: Theme.RecordingLayout.iconButton)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PressOpacityButtonStyle())
+        .help(help)
+    }
+}
+
+/// 图标按钮的按下态。只改透明度，不缩放——列表头部的图标缩一下
+/// 会比旁边的文字先动，看起来像点歪了
+private struct PressOpacityButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Theme.textSecondary)
+            .opacity(configuration.isPressed ? 0.9 : 1)
     }
 }
 
@@ -423,15 +567,15 @@ private struct RecoveryRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlay(alignment: .leading) {
-            Rectangle()
-                .fill(isHovering ? Theme.textPrimary.opacity(0.22) : Color.clear)
-                .frame(width: 2)
-                .offset(x: -Theme.Spacing.md)
-        }
+        // 「未完成」也是列表里的一行，和正式录音同一个卡片语言。
+        // **层级是 2**（P13-2 附 3）：整页正式录音都是 elevation 1，同屏
+        // 再开一档才分得出主次——这一组要用户做决定，是唯一该被「抬起来」
+        // 的那类条目；两档是上限，别再往下加
+        .cardStyle(elevation: 2, isHighlighted: isHovering)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
+            isHovering = hovering
         }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
     }
 
     private static let time: DateFormatter = {

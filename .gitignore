@@ -7,6 +7,10 @@ build/
 # `CLASSROOM_BUILD_DIR=build-verify ./build.sh` 编到别处，这个目录同样是生成物
 build-verify/
 
+# UI 线的构建目录（P13-1）。和 build-verify 同一条理由：这条线会在
+# worktree 里反复重编，产物不该跟源码混在一起，也不该进提交
+build-ui/
+
 # SwiftPM 的构建目录（Vendor/DiarizeHelper/.build/）。二进制不进仓库——
 # 进 bundle 的那一份是 build.sh 从这里拷过去的
 .build/

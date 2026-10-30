@@ -38,8 +38,8 @@ private struct GlossaryContent: View {
                 editor
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, Theme.pagePadding)
-            .padding(.top, Theme.Spacing.xl)
+            .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+            .padding(.top, Theme.RecordingLayout.pagePadding)
             .padding(.bottom, Theme.Spacing.xxl)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -51,12 +51,22 @@ private struct GlossaryContent: View {
     // MARK: - 标题区
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text("术语表")
-                .textStyle(Theme.Text.largeTitle)
-                .foregroundStyle(Theme.textPrimary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // 44pt 工具栏：主操作「新增术语」在右上角（P14-4）
+            HStack(alignment: .center, spacing: Theme.Spacing.md) {
+                Text("术语表")
+                    .textStyle(Theme.Text.largeTitle)
+                    .foregroundStyle(Theme.textPrimary)
 
-            HStack(spacing: Theme.Spacing.sm) {
+                Spacer(minLength: Theme.Spacing.md)
+
+                ToolbarActionButton(title: "新增术语", systemImage: "plus") {
+                    store.addEntry()
+                }
+            }
+            .frame(height: Theme.RecordingLayout.toolbarHeight)
+
+            HStack(spacing: Theme.Spacing.s6) {
                 Text("\(store.entries.count) 个术语")
                 Text("·")
                 Text("\(engine.segments.count) 段转录")
@@ -66,14 +76,16 @@ private struct GlossaryContent: View {
                         .foregroundStyle(Theme.accent)
                 }
             }
-            .textStyle(Theme.Text.caption)
-            .foregroundStyle(Theme.textSecondary)
+            .textStyle(Theme.Text.meta)
+            .foregroundStyle(Theme.textSupporting)
 
             if !store.isConfigured {
                 StatusMark(kind: .warning, text: "未配置 DeepSeek 密钥，校正功能不可用")
             }
 
-            HStack(spacing: Theme.Spacing.sm) {
+            HStack(spacing: Theme.Spacing.md) {
+                // 这一行只留一个胶囊（主操作已经进了工具栏）；「恢复默认」
+                // 是三级操作，退化成文字链
                 PillButton(
                     title: store.isRunning ? "校正中…" : "术语校正",
                     systemImage: "text.badge.checkmark",
@@ -83,26 +95,19 @@ private struct GlossaryContent: View {
                     Task { await store.run(segments: engine.segments) }
                 }
 
-                PillButton(title: "添加术语", systemImage: "plus", style: .quiet) {
-                    store.addEntry()
-                }
-
-                // 三级操作用文字链，不再多一个胶囊——一排三个胶囊按钮
-                // 等于这一行没有主次
                 Button("恢复默认") { store.resetToDefaults() }
                     .buttonStyle(.plain)
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textTertiary)
 
                 Spacer()
             }
-            .padding(.top, Theme.Spacing.xs)
 
             if !store.statusMessage.isEmpty {
                 Text(store.statusMessage)
-                    .font(.system(size: Theme.Text.caption.size, design: .monospaced))
+                    .font(Theme.Text.meta.font.monospaced())
                     .foregroundStyle(store.statusMessage.hasPrefix("❌")
-                        ? Theme.error : Theme.textSecondary)
+                        ? Theme.error : Theme.textSupporting)
                     .textSelection(.enabled)
             }
         }
@@ -115,19 +120,27 @@ private struct GlossaryContent: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             Separator()
 
+            let courseExplanation = "术语表是喂给识别器的先验，只能在开录之前定下来——"
+                + "录完再改，对已经录好的那场没有任何影响。所以上课前先选一包对得上的词。"
+                + "第一节课拿不准就随便挑一个，下课用下面的「从转录提取」把这场课真正的术语捞出来，"
+                + "下次上课前就有对得上的词表了。"
+
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("按课程选词表")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textPrimary)
+                HStack(spacing: Theme.Spacing.xs) {
+                    Text("按课程选词表")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.textPrimary)
+                    // 完整说明放进问号气泡：这段是「课前怎么准备」的长解释，
+                    // 页面上留三行提示，剩下的按需看（P14-4）
+                    InfoBubble(text: courseExplanation)
+                }
 
                 // 注意：这里不能用 `**加粗**`。SwiftUI 只在字符串**字面量**上
                 // 解析 Markdown，拼接出来的 String 走的是另一个 init，星号会原样显示。
-                Text("术语表是喂给识别器的先验，只能在开录之前定下来——"
-                     + "录完再改，对已经录好的那场没有任何影响。所以上课前先选一包对得上的词。"
-                     + "第一节课拿不准就随便挑一个，下课用下面的「从转录提取」把这场课真正的术语捞出来，"
-                     + "下次上课前就有对得上的词表了。")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                Text(courseExplanation)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -162,7 +175,7 @@ private struct GlossaryContent: View {
                     Task { await store.extract(segments: engine.segments) }
                 }
                 .buttonStyle(.plain)
-                .textStyle(Theme.Text.caption)
+                .textStyle(Theme.Text.meta)
                 .foregroundStyle(engine.segments.isEmpty ? Theme.textTertiary : Theme.accent)
                 .disabled(engine.segments.isEmpty || !store.isConfigured || store.isExtracting)
 
@@ -180,13 +193,13 @@ private struct GlossaryContent: View {
             // 以为录到一半点一下能让识别变准。
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Text("没有对得上的预设？填课程名，联网生成一包")
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textTertiary)
 
                 HStack(spacing: Theme.Spacing.sm) {
                     TextField("课程名（例如：生物化学）", text: $courseInput)
                         .textFieldStyle(.plain)
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textPrimary)
                         .frame(maxWidth: 220)
                         .onSubmit { generateFromWeb() }
@@ -210,7 +223,7 @@ private struct GlossaryContent: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(GlossarySuggestionService.cleanCourseName(courseInput).isEmpty
                             ? Theme.textTertiary : Theme.accent)
                         .disabled(GlossarySuggestionService.cleanCourseName(courseInput).isEmpty)
@@ -222,14 +235,14 @@ private struct GlossaryContent: View {
                 // 实际用了哪些检索式。结果不对时，用户第一眼看的就是这一行
                 if store.candidateSource == .web, !store.lastQueries.isEmpty {
                     Text("检索式：" + store.lastQueries.joined(separator: " / "))
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if !presets.statusMessage.isEmpty {
                     Text(presets.statusMessage)
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(presets.statusMessage.hasPrefix("❌")
                             ? Theme.error : Theme.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -252,17 +265,23 @@ private struct GlossaryContent: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
             Separator()
 
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                Text("LLM 补标点")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textPrimary)
+            let punctuationExplanation = "识别引擎原生不产出标点，长段转录是一整坨无标点文字。"
+                + "这一步把整场转录发给 DeepSeek 补标点，每段返回都要过校验——剥掉标点后必须和原文"
+                + "逐字一致才落地，不一致的段保持原文。要联网，只在你点按钮时跑；"
+                + "补过标点的段落，展示时会严格按标点断句。"
 
-                Text("识别引擎原生不产出标点，长段转录是一整坨无标点文字。这一步把整场转录发给 "
-                     + "DeepSeek 补标点，每段返回都要过校验——剥掉标点后必须和原文逐字一致才落地，"
-                     + "不一致的段保持原文。要联网，只在你点按钮时跑；补过标点的段落，展示时会"
-                     + "严格按标点断句。")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+                HStack(spacing: Theme.Spacing.xs) {
+                    Text("LLM 补标点")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.textPrimary)
+                    InfoBubble(text: punctuationExplanation)
+                }
+
+                Text(punctuationExplanation)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
+                    .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -281,9 +300,9 @@ private struct GlossaryContent: View {
 
             if !punctuation.statusMessage.isEmpty {
                 Text(punctuation.statusMessage)
-                    .font(.system(size: Theme.Text.caption.size, design: .monospaced))
+                    .font(Theme.Text.meta.font.monospaced())
                     .foregroundStyle(punctuation.statusMessage.hasPrefix("❌")
-                        ? Theme.error : Theme.textSecondary)
+                        ? Theme.error : Theme.textSupporting)
                     .textSelection(.enabled)
             }
         }
@@ -311,25 +330,25 @@ private struct GlossaryContent: View {
                    + "模型从资料里挑的词不一定对，逐条看一眼再采纳。"
                  : "提取发生在录完之后，所以改不了已经录好的这场——它救的是下一场同类课，"
                    + "以及马上要跑的术语校正。模型猜的词不一定对，逐条看一眼再采纳。")
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textSupporting)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 ForEach(store.candidates) { candidate in
                     HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
                         Text(candidate.term)
-                            .font(.system(size: Theme.Text.caption.size, weight: .medium))
+                            .font(Theme.Text.meta.font.weight(.medium))
                             .foregroundStyle(Theme.textPrimary)
 
                         if let alias = candidate.aliases.first {
                             Text("← \(alias)")
-                                .textStyle(Theme.Text.caption)
+                                .textStyle(Theme.Text.meta)
                                 .foregroundStyle(Theme.textTertiary)
                         }
                         if !candidate.note.isEmpty {
                             Text(candidate.note)
-                                .textStyle(Theme.Text.caption)
+                                .textStyle(Theme.Text.meta)
                                 .foregroundStyle(Theme.textSecondary)
                                 .lineLimit(1)
                         }
@@ -338,7 +357,7 @@ private struct GlossaryContent: View {
 
                         Button("采纳") { store.accept(candidate) }
                             .buttonStyle(.plain)
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                             .foregroundStyle(Theme.accent)
                     }
                 }
@@ -370,17 +389,17 @@ private struct GlossaryContent: View {
                 ForEach(store.corrections) { correction in
                     VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                         Text(correction.timestamp)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(Theme.Text.footnote.font.monospaced())
                             .foregroundStyle(Theme.textTertiary)
 
                         Text(correction.before)
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                             .foregroundStyle(Theme.textSecondary)
                             .strikethrough(color: Theme.error.opacity(0.6))
                             .fixedSize(horizontal: false, vertical: true)
 
                         Text(correction.after)
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                             .foregroundStyle(Theme.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -411,16 +430,16 @@ private struct GlossaryContent: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 Separator()
                 Text("上次校正的改动")
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textPrimary)
 
                 ForEach(store.corrections) { correction in
                     HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                         Text(correction.timestamp)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(Theme.Text.footnote.font.monospaced())
                             .foregroundStyle(Theme.textTertiary)
                         Text(correction.after)
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                             .foregroundStyle(Theme.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -437,26 +456,48 @@ private struct GlossaryContent: View {
             VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                 Separator()
                 Text("术语（正确写法 / 实测误转写）")
-                    .textStyle(Theme.Text.caption)
+                    .textStyle(Theme.Text.meta)
                     .foregroundStyle(Theme.textPrimary)
 
                 Text("误转写留空也能用——模型会自己判断，填了更准。中文说法不要填进来，"
                      + "否则模型会把转录里本来正确的中文改写成英文。")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            VStack(spacing: 0) {
+            // 每条术语一张 elevation 1 的卡片：它和录音列表的行是同一种
+            // 「一条」单位，P14-4 定死的卡片规则（亮色带阴影）就该照抄。
+            // 曾经写成 0——亮色下白卡压在 #F1F1F4 上只剩一条约 0.94 的
+            // 描边，和页面底（0.946）几乎同亮，自检「亮色卡片有描边」直接红
+            VStack(spacing: Theme.Spacing.sm) {
                 ForEach($store.entries) { $entry in
-                    GlossaryEntryRow(entry: $entry) {
+                    GlossaryEntryRow(entry: $entry, source: sourceLabel(for: entry)) {
                         store.remove(entry)
                     }
-                    Separator()
+                    .cardStyle(elevation: 1)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 词条的「来源」。条目本身没有来源字段（不改数据结构），这里从
+    /// 「它和哪一包预设里的词条同名」反推：自建词库优先，其次是内置预设，
+    /// 都对不上就是手动加的。改过词条名之后会显示「手动添加」——这是实话，
+    /// 它确实不再来自任何预设
+    private func sourceLabel(for entry: GlossaryEntry) -> String {
+        if let custom = presets.custom.first(where: { preset in
+            preset.entries.contains { $0.term == entry.term }
+        }) {
+            return "我的 · \(custom.name)"
+        }
+        if let builtin = CoursePresets.all.first(where: { preset in
+            preset.entries.contains { $0.term == entry.term }
+        }) {
+            return builtin.name
+        }
+        return "手动添加"
     }
 }
 
@@ -464,6 +505,8 @@ private struct GlossaryContent: View {
 
 private struct GlossaryEntryRow: View {
     @Binding var entry: GlossaryEntry
+    /// 来源文案（11pt 显示在右上角）
+    let source: String
     let onDelete: () -> Void
 
     /// 误转写这一栏在编辑期用本地字符串，避免每敲一个分隔符就被切分重组、
@@ -474,15 +517,15 @@ private struct GlossaryEntryRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
-            VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                 TextField("正确写法", text: $entry.term)
                     .textFieldStyle(.plain)
-                    .font(.system(size: Theme.Text.caption.size, weight: .medium))
+                    .textStyle(Theme.Text.bodyEmphasized)
 
                 TextField("误转写，用「、」分隔（可留空）", text: $aliasesText)
                     .textFieldStyle(.plain)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
                     .focused($aliasesFocused)
                     .onSubmit { commitAliases() }
                     .onChange(of: aliasesFocused) { _, focused in
@@ -491,23 +534,30 @@ private struct GlossaryEntryRow: View {
 
                 TextField("说明（可选）", text: $entry.note)
                     .textFieldStyle(.plain)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
             }
+            // 输入区吃掉剩余宽度；来源那一列只占自己的固有宽度
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            if isHovering {
-                Button(action: onDelete) {
-                    Image(systemName: "minus.circle.fill")
-                        .font(.system(size: 13))
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(Theme.textSecondary, Theme.separator)
+            VStack(alignment: .trailing, spacing: Theme.Spacing.xs) {
+                Text("来源 · \(source)")
+                    .textStyle(Theme.Text.footnote)
+                    .foregroundStyle(Theme.textSupporting)
+                    .lineLimit(1)
+
+                if isHovering {
+                    Button(action: onDelete) {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.system(size: Theme.Text.meta.size))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(Theme.textSecondary, Theme.separator)
+                    }
+                    .buttonStyle(.plain)
+                    .help("删除这个术语")
                 }
-                .buttonStyle(.plain)
-                .help("删除这个术语")
             }
         }
-        .padding(.horizontal, Theme.Spacing.md)
-        .padding(.vertical, Theme.Spacing.sm)
         .onHover { isHovering = $0 }
         .onAppear { aliasesText = entry.aliases.joined(separator: "、") }
         // 恢复默认会整批换掉条目（含 id），本地镜像要跟着重置

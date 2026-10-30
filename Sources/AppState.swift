@@ -7,14 +7,14 @@ import Observation
 @MainActor
 @Observable
 final class AppState {
-    let transcription = TranscriptionEngine()
-    let factCheck = FactCheckStore()
+    let transcription: TranscriptionEngine
+    let factCheck: FactCheckStore
     let notes = NotesStore()
     /// 课后学习笔记（6a）。和 `notes` 是两回事：那个是转录页那份
     /// 「核心知识点大纲」，活在内存里；这个是按会话落盘的课后产出
     let studyNotes = StudyNotesStore()
     let attachments = AttachmentStore()
-    let glossary = GlossaryStore()
+    let glossary: GlossaryStore
     /// 用户自建的课程词库（联网生成后存下来的那些）。和 `glossary` 分开：
     /// 前者是「备着以后用的」，后者是「这节课要用的」
     let presets = CoursePresetStore()
@@ -33,13 +33,40 @@ final class AppState {
     /// 那个 `Task` 就没人持有了，用户以为还在下，其实已经断了
     let modelDownload = ModelDownloadCenter()
 
-    init() {
+    /// 当前标签页。放在 AppState 而不是 `RootView` 的 `@State`：
+    /// 录音空状态里的「去转录页录制」要能从 RecordingsView 切走标签页，
+    /// 而那个视图拿不到 RootView 的局部状态
+    var selectedTab: RootView.Tab = .transcription
+
+    /// - Parameter sessionsDirectory: 录音库（`sessions/`）落在哪。默认 nil =
+    ///   用户真实那个目录，**行为一个字节没变**。存在的理由是 `--ui-snapshot`：
+    ///   无头快照要拿固定夹具渲列表，而夹具绝不能写进用户真实的库
+    /// - Parameter audioDirectory: `recordings/`（wav）落在哪，同上
+    /// - Parameter transcription/factCheck/glossary: 预置好数据的 store。
+    ///   默认值就是正常构造，**生产路径的取值一个字节没变**；存在的理由是
+    ///   `--ui-snapshot` 要给转录/核查/术语表三屏喂固定假数据，而三个 store
+    ///   的产出字段都是 `private(set)`，不给入口就只能拍空页
+    init(sessionsDirectory: URL? = nil,
+         audioDirectory: URL? = nil,
+         transcription: TranscriptionEngine = TranscriptionEngine(),
+         factCheck: FactCheckStore = FactCheckStore(),
+         glossary: GlossaryStore = GlossaryStore()) {
+        self.transcription = transcription
+        self.factCheck = factCheck
+        self.glossary = glossary
         // `recordings` 从「带默认值的存储属性」改成在 init 里建：说话人识别的
         // 落盘要用**这一个** store 实例（它带内存缓存和 index 同步），
         // 而默认值表达式里引用不到 `self`。两个 store 必须是指向同一份
         // sessions/ 的同一个对象——各自建一个的话，识别写完盘列表页也不刷新，
         // 而且两次 `loadIndex` 会互相覆盖
-        let recordings = RecordingsStore()
+        //
+        // audioDirectory 也要能指向夹具：`RecordingsStore.init` 里的
+        // `refreshRecovery()` 会扫这个目录找「无会话的录音」，用真实目录的话
+        // 快照会被用户库里的残留污染，而快照必须可复现
+        let recordings = RecordingsStore(
+            directory: sessionsDirectory,
+            recordingsDirectory: audioDirectory ?? RecordingStorage.directory
+        )
         self.recordings = recordings
         self.diarization = DiarizationStore(save: { recordings.save($0) })
 

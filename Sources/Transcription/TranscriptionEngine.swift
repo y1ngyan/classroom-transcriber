@@ -259,6 +259,15 @@ final class TranscriptionEngine {
         let language: String
     }
 
+    // MARK: - 初始化
+
+    /// 仅用于无头快照/预览：构造时就带一段固定转录。
+    /// `init()` 仍然存在且行为不变（segments 从空开始）；这个参数不改变
+    /// 任何运行逻辑，只是让快照能拍到「有内容」的转录页
+    init(segments: [TranscriptSegment] = []) {
+        self.segments = segments
+    }
+
     // MARK: - 权限
 
     func requestPermissions() async {

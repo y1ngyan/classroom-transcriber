@@ -11,6 +11,28 @@ import CryptoKit
 @main
 struct ClassroomTranscriberApp: App {
     init() {
+        // 界面快照：--ui-snapshot <输出目录>（P13-1）
+        //
+        // **不起 GUI**：不进 `NSApplicationMain`、不开窗口、不装 run loop，
+        // 渲染完直接退出。用离屏 `NSHostingView` 而不是 `ImageRenderer`：
+        // 后者会静默不画 ScrollView 里的内容（详见 `UISnapshot` 的注释）。
+        // 色板确实换了亮/暗两套，由入口自带的自检 ⑤ 用角落像素钉住。
+        //
+        // 排在所有会构造 `AppState` 的分支之前：快照自己按夹具建 store，
+        // 不该顺带把用户真实的录音库读进来
+        if let i = CommandLine.arguments.firstIndex(of: "--ui-snapshot") {
+            // 缺参数时**不能静默落回正常启动**：那样会直接起 GUI，调用方
+            // 以为在拍无头快照，实际弹出一个窗口。宁可报用法然后退出
+            guard i + 1 < CommandLine.arguments.count else {
+                FileHandle.standardError.write(
+                    Data("用法：ClassroomTranscriber --ui-snapshot <输出目录>\n".utf8)
+                )
+                exit(64)
+            }
+            setvbuf(stdout, nil, _IONBF, 0)
+            UISnapshot.run(outputDirectory: CommandLine.arguments[i + 1])
+        }
+
         // 无头自检模式：把能力探测结果打到 stdout 后退出，用于终端 / CI 验证
         if CommandLine.arguments.contains("--selftest") {
             for line in EnvironmentChecks.run() {

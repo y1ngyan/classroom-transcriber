@@ -28,20 +28,9 @@ struct TranscriptionView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 0) {
-                header
-                transcript
-            }
-
-            // 底部悬浮胶囊按钮。**后端提示紧贴在它上面**——「这次会用
-            // 哪个后端、为什么」这个问题是在按下按钮的那一刻问的，
-            // 放到别处（比如设置页）等于让人先切走再回来
-            VStack(spacing: Theme.Spacing.sm) {
-                backendIndicator
-                recordButton
-            }
-            .padding(.bottom, Theme.Spacing.xl)
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            transcript
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
@@ -50,12 +39,28 @@ struct TranscriptionView: View {
     // MARK: - 标题区
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-            Text("课堂转录")
-                .textStyle(Theme.Text.largeTitle)
-                .foregroundStyle(Theme.textPrimary)
+        VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+            // 44pt 工具栏（P14-4）：主操作收进右上角，底部那枚悬浮胶囊
+            // 去掉。悬浮按钮在整屏文字上压着最后一段，而「开始录制」是
+            // 页面级主操作，本来就该在页头
+            HStack(alignment: .center, spacing: Theme.Spacing.md) {
+                Text("课堂转录")
+                    .textStyle(Theme.Text.largeTitle)
+                    .foregroundStyle(Theme.textPrimary)
 
-            HStack(spacing: Theme.Spacing.sm) {
+                Spacer(minLength: Theme.Spacing.md)
+
+                ToolbarActionButton(
+                    title: engine.isRunning ? "停止录制" : "开始录制",
+                    systemImage: engine.isRunning ? "stop.fill" : "record.circle"
+                ) {
+                    toggleRecording()
+                }
+                .animation(.easeInOut(duration: 0.18), value: engine.isRunning)
+            }
+            .frame(height: Theme.RecordingLayout.toolbarHeight)
+
+            HStack(spacing: Theme.Spacing.s6) {
                 Text(currentDate)
                 Text("·")
                 Text(courseName)
@@ -64,63 +69,67 @@ struct TranscriptionView: View {
                     Text("转录中").foregroundStyle(Theme.accent)
                 }
             }
-            .textStyle(Theme.Text.caption)
-            .foregroundStyle(Theme.textSecondary)
+            .textStyle(Theme.Text.meta)
+            .foregroundStyle(Theme.textSupporting)
 
-            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.md) {
-                Text(engine.statusMessage)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
-                    .lineLimit(2)
+            // 采集读数收成一张细条卡片（一行 13pt 中点分隔）。
+            // `statusMessage`（还没开始采集 / 正在聆听…）也挪进这一行：
+            // 它和那些计数是同一类东西——「现在采集链走到哪了」
+            CaptureDiagnostics()
 
-                Spacer()
+            // 后端提示紧跟着采集读数：「这次会用哪个后端、为什么」这个问题
+            // 是在按下开始录制的那一刻问的，放到别处等于让人先切走再回来
+            backendIndicator
 
-                PillButton(
-                    title: "上传云端",
-                    systemImage: "icloud.and.arrow.up",
-                    style: .quiet,
-                    isEnabled: engine.recordingURL != nil && appState.upload.isConfigured
-                ) {
+            // 次要操作退化成文字链接（P14-4）：工具条已经有一个主操作，
+            // 这一行再放两枚胶囊按钮，整页就没有主次了
+            HStack(spacing: Theme.Spacing.s20) {
+                Button {
                     if let url = engine.recordingURL {
                         appState.upload.enqueue(fileURL: url)
                     }
+                } label: {
+                    Text("上传云端")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(canUpload ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .disabled(!canUpload)
                 .help(engine.recordingURL == nil
                     ? "录完一段后才有音频可上传"
                     : (appState.upload.isConfigured
                         ? "上传 \(engine.recordingURL?.lastPathComponent ?? "")"
                         : "COS 缺凭证：去「设置」填 cosSecretID + cosSecretKey（或填 cosSTSURL）"))
 
-                PillButton(
-                    title: "添加图片",
-                    systemImage: "photo.badge.plus",
-                    style: .quiet,
-                    isEnabled: !engine.isRunning && !engine.segments.isEmpty
-                ) {
+                Button {
                     isImporting = true
+                } label: {
+                    Text("添加图片")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(canAddImage ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .disabled(!canAddImage)
+
+                Spacer(minLength: 0)
             }
-            .padding(.top, Theme.Spacing.xs)
 
-            // 区块之间用 80 的留白拉开，而不是加个卡片框（设计规范要求）
-            CaptureDiagnostics()
-                .padding(.top, Theme.Spacing.md)
-
-            // 提问汇总入口：次要操作，按设计规范退化成文字链接而不是按钮
+            // 提问汇总入口：次要操作，退化成文字链接而不是按钮
             if !questionSegments.isEmpty {
                 Button {
                     isShowingQuestions = true
                 } label: {
-                    HStack(spacing: 5) {
+                    HStack(spacing: Theme.Spacing.xs) {
                         Image(systemName: "questionmark.bubble")
-                            .font(.system(size: 11))
+                            .font(.system(size: Theme.Text.footnote.size))
                         Text("本节课提问 \(questionSegments.count) 条")
-                            .textStyle(Theme.Text.caption)
+                            .textStyle(Theme.Text.meta)
                     }
                     .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
-                .padding(.top, Theme.Spacing.sm)
             }
 
             // 质量汇总：整场转录可不可信，用户不该靠逐段翻标记去数。
@@ -133,12 +142,11 @@ struct TranscriptionView: View {
                         ? "本次转录 \(quality.poor) 段不可信、\(quality.fair) 段存疑（共 \(engine.segments.count) 段）"
                         : "本次转录 \(quality.fair) 段存疑（共 \(engine.segments.count) 段）"
                 )
-                .padding(.top, Theme.Spacing.sm)
             }
 
             if !appState.upload.items.isEmpty {
                 UploadQueuePanel()
-                    .padding(.top, Theme.Spacing.lg)
+                    .padding(.top, Theme.Spacing.sm)
             }
         }
         .fileImporter(
@@ -171,9 +179,27 @@ struct TranscriptionView: View {
             QuestionListView(questions: questionSegments)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.pagePadding)
-        .padding(.top, Theme.Spacing.xl)
-        .padding(.bottom, Theme.Spacing.lg)
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.RecordingLayout.pagePadding)
+        .padding(.bottom, Theme.Spacing.md)
+    }
+
+    private var canUpload: Bool {
+        engine.recordingURL != nil && appState.upload.isConfigured
+    }
+
+    private var canAddImage: Bool {
+        !engine.isRunning && !engine.segments.isEmpty
+    }
+
+    private func toggleRecording() {
+        Task {
+            if engine.isRunning {
+                engine.stop()
+            } else {
+                await appState.startTranscription()
+            }
+        }
     }
 
     private var currentDate: String {
@@ -190,8 +216,8 @@ struct TranscriptionView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Theme.segmentSpacing) {
                     if engine.segments.isEmpty {
-                        Text(engine.isRunning ? "正在聆听…" : "点击下方按钮开始录制")
-                            .textStyle(Theme.Text.body)
+                        Text(engine.isRunning ? "正在聆听…" : "点击右上角「开始录制」")
+                            .textStyle(Theme.Text.summary)
                             .foregroundStyle(Theme.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.top, 120)
@@ -207,16 +233,21 @@ struct TranscriptionView: View {
                             // 管的是「自动跑不跑」，这里管的是「我现在想查
                             // 这一段」。定稿后才能查：未定稿的文字还在被
                             // 模型改写，拿去核查既浪费请求又会得到错结论
-                            onCheck: { appState.factCheck.submit(segment: segment) }
+                            onCheck: { appState.factCheck.submit(segment: segment) },
+                            // 流式内容用 0：段与段是同一股流的切分，不是独立条目
+                            cardElevation: 0,
+                            // 最后一段还没定稿 = 模型正在写它
+                            isActive: segment.id == engine.segments.last?.id && !segment.isFinal
                         )
                         .id(segment.id)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, Theme.pagePadding)
+                .padding(.horizontal, Theme.RecordingLayout.pagePadding)
                 .padding(.top, Theme.Spacing.sm)
-                // 给悬浮按钮留出空间，避免遮住最后一段
-                .padding(.bottom, 120)
+                // P14-4：底部悬浮栏连同 `safeAreaInset` 一起去掉，
+                // 列表末尾只留一级留白，不再为「压在上面的按钮」预留高度
+                .padding(.bottom, Theme.Spacing.s32)
             }
             .onChange(of: engine.segments.count) {
                 guard let last = engine.segments.last else { return }
@@ -225,28 +256,6 @@ struct TranscriptionView: View {
                 }
             }
         }
-    }
-
-    // MARK: - 录制按钮
-
-    /// 设计规范要求不使用阴影。这个按钮原本靠阴影从滚动的文字上"浮"起来，
-    /// 去掉之后改用实心填充 + 留白来拉开层次——它下面那 120pt 的留白
-    /// 就是干这个的。
-    private var recordButton: some View {
-        PillButton(
-            title: engine.isRunning ? "停止录制" : "开始录制",
-            dotColor: engine.isRunning ? .white : Theme.error,
-            style: .filled
-        ) {
-            Task {
-                if engine.isRunning {
-                    engine.stop()
-                } else {
-                    await appState.startTranscription()
-                }
-            }
-        }
-        .animation(.easeInOut(duration: 0.18), value: engine.isRunning)
     }
 
     /// 「这一条录音走的是哪条链路」。
@@ -310,24 +319,24 @@ private struct QuestionListView: View {
                         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
                             HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
                                 Text(segment.formattedTimestamp)
-                                    .textStyle(Theme.Text.caption)
+                                    .textStyle(Theme.Text.meta)
                                     .monospacedDigit()
                                     .foregroundStyle(Theme.textTertiary)
                                 if segment.questionLevel < 2 {
                                     Text("点名")
-                                        .textStyle(Theme.Text.caption)
+                                        .textStyle(Theme.Text.meta)
                                         .foregroundStyle(Theme.warning)
                                 }
                             }
                             Text(segment.coreQuestion ?? segment.text)
-                                .textStyle(Theme.Text.body)
+                                .textStyle(Theme.Text.summary)
                                 .foregroundStyle(Theme.textPrimary)
                                 .textSelection(.enabled)
                             // 核心问题是剥出来的，和原句可能差很远——
                             // 剥错了的时候，没有对照就不知道是检测错了还是记错了
                             if let core = segment.coreQuestion, core != segment.text {
                                 Text(segment.text)
-                                    .textStyle(Theme.Text.caption)
+                                    .textStyle(Theme.Text.meta)
                                     .foregroundStyle(Theme.textSecondary)
                                     .textSelection(.enabled)
                             }

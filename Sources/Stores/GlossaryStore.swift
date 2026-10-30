@@ -118,8 +118,14 @@ final class GlossaryStore {
         )
     }
 
-    init() {
-        load()
+    /// 预置词表（无头快照/预览用）。`nil` = 从磁盘读，**生产路径不变**；
+    /// 传数组时**不读也不写磁盘**——快照的夹具绝不能覆盖用户真实的词表文件
+    init(entries: [GlossaryEntry]? = nil) {
+        if let entries {
+            self.entries = entries
+        } else {
+            load()
+        }
     }
 
     // MARK: - 术语表维护

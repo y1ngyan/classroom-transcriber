@@ -11,7 +11,8 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            // 区块之间靠 80 的留白分开，不放卡片框（设计规范要求）
+            // 每个分组是一张 elevation 0 的卡片（P14-4 起底板统一 #FFF / #1C1C1E），
+            // 卡片之间仍用 80 的留白拉开——卡片是分组的边界，不是布局容器
             VStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 header
                 audioSection()
@@ -21,10 +22,19 @@ struct SettingsView: View {
                 diagnosticsSection()
                 fileFooter
             }
-            .padding(.horizontal, Theme.pagePadding)
-            .padding(.top, Theme.Spacing.xl)
+            .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+            .padding(.top, Theme.RecordingLayout.pagePadding)
             .padding(.bottom, Theme.Spacing.xxl)
+            // 720 是**内容栏宽**，不是居中的浮岛：ScrollView 里只写
+            // maxWidth 会让整栏居中、左基线跑到 187 去（P14-4 要求 24）。
+            // 外层的 infinity 把这一栏按左边对齐
             .frame(maxWidth: 720, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        // 工具栏不放主操作（P14-4），保存挪到底部安全区：表单改完
+        // 顺手就能存，不用先滚回页头
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            saveBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Theme.pageBackground)
@@ -39,40 +49,65 @@ struct SettingsView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("设置")
-                    .textStyle(Theme.Text.largeTitle)
-                    .foregroundStyle(Theme.textPrimary)
-
-                Spacer()
-
-                if store.hasUnsavedChanges {
-                    Text("有未保存的改动")
-                        .textStyle(Theme.Text.caption)
-                        .foregroundStyle(Theme.warning)
-                }
-
-                PillButton(title: "保存", isEnabled: store.hasUnsavedChanges) {
-                    store.save()
-                    // 刚把后端保存成 Whisper：立刻开始预热模型。用户接下来多半
-                    // 就是切到转录页点开始录制，十几秒的准备时间正好花在
-                    // 「切页面、摆设备」这段里，而不是花在他盯着按钮的时候
-                    if store.backend == .whisper {
-                        appState.transcription.whisper.warmUp()
-                    }
-                }
-            }
+            // 44pt 工具栏，右侧无主操作（P14-4）：这一屏的主操作是
+            // 底部那枚「保存」，页头只留标题
+            Text("设置")
+                .textStyle(Theme.Text.largeTitle)
+                .foregroundStyle(Theme.textPrimary)
+                .frame(height: Theme.RecordingLayout.toolbarHeight, alignment: .center)
 
             Text("填完点「保存」，再点各部分里的「测试」当场验证。密钥只存在本机的配置文件里，不会上传到任何地方。")
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textSecondary)
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textSupporting)
                 .fixedSize(horizontal: false, vertical: true)
 
             if !store.saveMessage.isEmpty {
                 Text(store.saveMessage)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Theme.Text.meta.font.monospaced())
                     .foregroundStyle(store.saveMessage.hasPrefix("✅") ? Theme.success : Theme.error)
             }
+        }
+    }
+
+    // MARK: - 底部保存栏
+
+    /// 保存旁边直接写「有未保存的改动」：禁用态不能是不说话的按钮，
+    /// 用户读到的会和「按钮坏了」一样
+    private var saveBar: some View {
+        HStack(spacing: Theme.Spacing.md) {
+            if store.hasUnsavedChanges {
+                Text("有未保存的改动")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.warning)
+            }
+
+            Spacer()
+
+            // 有改动 → accent 实心；干净 → 灰底灰字（`.neutral`），
+            // 不做「蓝按钮降透明度」——那在浅色页面上还像一颗蓝按钮
+            PillButton(title: "保存",
+                       isEnabled: store.hasUnsavedChanges,
+                       disabledStyle: .neutral) {
+                save()
+            }
+        }
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.Spacing.md)
+        .padding(.bottom, Theme.Spacing.lg)
+        // 和正文同一栏宽、同一条左基线：保存按钮压在卡片右边缘上，
+        // 不往页面最右边跑（那会让它离表单隔着一大片空白）
+        .frame(maxWidth: 720, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.background)
+    }
+
+    private func save() {
+        store.save()
+        // 刚把后端保存成 Whisper：立刻开始预热模型。用户接下来多半
+        // 就是切到转录页点开始录制，十几秒的准备时间正好花在
+        // 「切页面、摆设备」这段里，而不是花在他盯着按钮的时候
+        if store.backend == .whisper {
+            appState.transcription.whisper.warmUp()
         }
     }
 
@@ -81,65 +116,90 @@ struct SettingsView: View {
     /// 这一节和页面其他部分不同：它不需要配置任何东西，默认就是可用的。
     /// 放在最前面是因为它是唯一一个直接决定「录下来能不能认出来」的开关，
     /// 而其余几节配不配只影响附加能力。
+    /// P14-5：原来整段挤在一张「录音与识别」大卡里，四个互不相干的分组
+    /// （后端 / 增益 / 提问 / 三个开关）被同一个框罩着，扫一眼分不出边界。
+    /// 现在一个分组一张卡，卡内行与行之间用 0.5pt 发丝线——卡片是分组的
+    /// 边界，不是「什么都要框一下」的容器
     private func audioSection() -> some View {
         @Bindable var store = appState.settings
-        return SettingsSection(
-            title: "录音与识别",
-            subtitle: "决定「录下来的声音怎么变成文字」。识别后端和增益都从下一段录音开始生效；"
-                + "录音存档存的始终是未加增益的原始音频，不受这里影响。",
-        ) {
-            VStack(alignment: .leading, spacing: 12) {
-                LabeledField(label: "识别后端") {
-                    Picker("", selection: $store.backend) {
-                        ForEach(TranscriptionBackend.allCases) { backend in
-                            Text(backend.label).tag(backend)
+        return VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupSpacing) {
+            // ── 识别后端 ──
+            SettingsSection(
+                title: "识别后端",
+                subtitle: "决定「录下来的声音怎么变成文字」。从下一段录音开始生效。"
+            ) {
+                // 行与行之间是 0.5pt 发丝线，**最后一行下面不画**
+                VStack(alignment: .leading, spacing: Theme.Spacing.s12) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+                        Picker("", selection: $store.backend) {
+                            ForEach(TranscriptionBackend.allCases) { backend in
+                                Text(backend.label).tag(backend)
+                            }
                         }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        // 定宽 + **左对齐**：分段控件在固定宽的框里默认居中，
+                        // 两个分段的「识别后端」就会比五段的「麦克风增益」
+                        // 往右缩一截（P14-5 用户挑出来的那条）
+                        .frame(width: 360, alignment: .leading)
+
+                        Text(store.backend.hint)
+                            .textStyle(Theme.Text.meta)
+                            .foregroundStyle(Theme.textSupporting)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        note(
+                            "Whisper 后端跑的是本地模型：不联网、不上传，但要在「开始录制」之前先把模型读进内存。"
+                                + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
+                        )
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 360)
+
+                    // 模型这一段只在选了 Whisper 时出现。默认（Apple）走的是系统
+                    // 识别，模型在不在和这次录音无关——把一条无关的信息摆在
+                    // 默认路径上，只会让真正的错误更难被看见
+                    if store.backend == .whisper {
+                        Separator()
+                        modelRow()
+                    }
+
+                    // 课后重转要的 large-v3。**和后端选择无关**（P11-1 目标 2）：
+                    // 重转是对已经录好的音频做事，走的是自己那条路，用户哪怕
+                    // 选了 Apple 也照样能重转——把它藏在 `backend == .whisper`
+                    // 后面，就会出现「提示我去下 large，可设置里没有这一行」
+                    //
+                    // 分隔线跟着行一起出现：就位之后这一行是空的，先画线
+                    // 就会留下一条悬空的分隔线（P14-5 第一版快照里就是）
+                    if showsRetranscribeRow {
+                        Separator()
+                        retranscribeModelRow()
+                    }
+
+                    // 未完成的下载残留。**和后端选择无关**：用户下一半切回 Apple，
+                    // 那几百 MB 的 `.part` 照样占着盘。它只在自己存在时出现——
+                    // 没有残留时不占一行，这是常态
+                    if appState.modelDownload.shouldShowCacheRow {
+                        Separator()
+                        cacheRow()
+                    }
+
+                    // 预热结果只在这一节里显示：模型路径、准备用时、「不可用」的原因
+                    // 都只对「选了 Whisper 的人」有意义，默认（Apple）时这一行不出现
+                    if let line = appState.transcription.whisper.statusLine {
+                        Separator()
+                        Text(line)
+                            .textStyle(Theme.Text.meta)
+                            .foregroundStyle(line.hasPrefix("❌") ? Theme.error : Theme.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
+            }
 
-                Text(store.backend.hint)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                note(
-                    "Whisper 后端跑的是本地模型：不联网、不上传，但要在「开始录制」之前先把模型读进内存。"
-                        + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
-                )
-
-                // 模型这一段只在选了 Whisper 时出现。默认（Apple）走的是系统
-                // 识别，模型在不在和这次录音无关——把一条无关的信息摆在
-                // 默认路径上，只会让真正的错误更难被看见
-                if store.backend == .whisper {
-                    modelRow()
-                }
-
-                // 课后重转要的 large-v3。**和后端选择无关**（P11-1 目标 2）：
-                // 重转是对已经录好的音频做事，走的是自己那条路，用户哪怕
-                // 选了 Apple 也照样能重转——把它藏在 `backend == .whisper`
-                // 后面，就会出现「提示我去下 large，可设置里没有这一行」
-                retranscribeModelRow()
-
-                // 未完成的下载残留。**和后端选择无关**：用户下一半切回 Apple，
-                // 那几百 MB 的 `.part` 照样占着盘。它只在自己存在时出现——
-                // 没有残留时不占一行，这是常态
-                if appState.modelDownload.shouldShowCacheRow {
-                    cacheRow()
-                }
-
-                // 预热结果只在这一节里显示：模型路径、准备用时、「不可用」的原因
-                // 都只对「选了 Whisper 的人」有意义，默认（Apple）时这一行不出现
-                if let line = appState.transcription.whisper.statusLine {
-                    Text(line)
-                        .textStyle(Theme.Text.caption)
-                        .foregroundStyle(line.hasPrefix("❌") ? Theme.error : Theme.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                LabeledField(label: "麦克风增益") {
+            // ── 麦克风增益 ──
+            SettingsSection(
+                title: "麦克风增益",
+                subtitle: "录音存档存的始终是未加增益的原始音频；改动从下一段录音开始生效。"
+            ) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                     Picker("", selection: $store.micGain) {
                         ForEach(MicGainMode.allCases) { mode in
                             Text(mode.label).tag(mode)
@@ -147,22 +207,29 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 360)
+                    .frame(width: 360, alignment: .leading)
+
+                    // 选中的那一档到底做什么，写在下面而不是让用户去猜档位名。
+                    // 「自动」和「5 倍」听上去都像「会放大」，区别全在噪声门上，
+                    // 而那个区别从名字上一点也看不出来
+                    Text(store.micGain.hint)
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.textSupporting)
+
+                    note(
+                        "增益档决定的是整段录音的处理方式，"
+                            + "中途换档会让同一段录音的前后两截用上不同的增益曲线。"
+                    )
                 }
+            }
 
-                // 选中的那一档到底做什么，写在下面而不是让用户去猜档位名。
-                // 「自动」和「5 倍」听上去都像「会放大」，区别全在噪声门上，
-                // 而那个区别从名字上一点也看不出来
-                Text(store.micGain.hint)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
-
-                note(
-                    "改动从下一段录音开始生效。增益档决定的是整段录音的处理方式，"
-                        + "中途换档会让同一段录音的前后两截用上不同的增益曲线。"
-                )
-
-                LabeledField(label: "提问检测") {
+            // ── 提问检测 ──
+            SettingsSection(
+                title: "提问检测",
+                subtitle: "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
+                    + "纯本地规则判定，不联网、不调模型。"
+            ) {
+                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                     Picker("", selection: $store.questionSensitivity) {
                         ForEach(QuestionSensitivity.allCases) { level in
                             Text(level.label).tag(level)
@@ -170,61 +237,53 @@ struct SettingsView: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
-                    .frame(width: 360)
+                    .frame(width: 360, alignment: .leading)
+
+                    Text(store.questionSensitivity.hint)
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.textSupporting)
                 }
+            }
 
-                Text(store.questionSensitivity.hint)
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+            // ── 三个开关 ──
+            // 每个开关一行，行间 0.5pt 发丝线，最后一行下面不画。
+            // 不另起总标题：开关的标签本身就说清了它管什么，
+            // 再加一行「转录行为」只是给同一件事起第二个名字
+            VStack(alignment: .leading, spacing: Theme.Spacing.s12) {
+                ToggleRow(
+                    label: "自动核查",
+                    isOn: $store.autoFactCheck,
+                    description: "开启后每段转录定稿会自动联网核查（消耗检索与模型额度）；关闭时可在核查页手动核查"
+                )
 
-                LabeledField(label: "自动核查") {
-                    Toggle("", isOn: $store.autoFactCheck)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .frame(width: 360, alignment: .leading)
-                }
-
-                Text("开启后每段转录定稿会自动联网核查（消耗检索与模型额度）；关闭时可在核查页手动核查")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                Separator()
 
                 // 只对 whisper 后端有效。**不把这一项藏在「后端 = whisper」后面**：
                 // 那一栏是可以随时改的，而这一项一藏，用户切到 whisper 之后
                 // 会以为这一页里根本没有这个词表开关
-                LabeledField(label: "术语前移") {
-                    Toggle("", isOn: $store.glossaryPrompt)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .frame(width: 360, alignment: .leading)
-                }
+                ToggleRow(
+                    label: "术语前移",
+                    isOn: $store.glossaryPrompt,
+                    description: "开启后把术语表作为先验送进 whisper（不联网、不调模型）；顶部是 Apple 后端时不生效"
+                )
 
-                Text("开启后把术语表作为先验送进 whisper（不联网、不调模型）；顶部是 Apple 后端时不生效")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
+                Separator()
 
                 // 静音窗跳过（P12-3）。**不藏在「后端 = whisper」后面**：这条只看
                 // 转录走没走 whisper，和「录不录」无关；藏起来会让默认的后端用户
                 // 以为设置页里根本没有这个开关。措辞必须写出代价——「关掉」是
                 // 一次显式选择，不是免费的：静音窗会重新送进模型，而那正是
                 // 幻觉句的来源
-                LabeledField(label: "静音窗跳过（省算力）") {
-                    Toggle("", isOn: $store.skipSilentWindows)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                        .frame(width: 360, alignment: .leading)
-                }
-
-                Text("开启后整窗都判为静音（没人说话）的窗口不进模型，省算力；"
+                ToggleRow(
+                    label: "静音窗跳过（省算力）",
+                    isOn: $store.skipSilentWindows,
+                    description: "开启后整窗都判为静音（没人说话）的窗口不进模型，省算力；"
                         + "关闭后静音窗也会送进模型，可能重新长出「像真话的幻觉句」，"
-                        + "但不会因为门控判错而漏掉小声说话")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textSecondary)
-
-                note(
-                    "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
-                        + "纯本地规则判定，不联网、不调模型。"
+                        + "但不会因为门控判错而漏掉小声说话"
                 )
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle(elevation: 0)
         }
         // 进设置页扫一次模型目录。**挂在这里而不是写在 `body` 的求值路径上**：
         // 扫盘是副作用，而 `body` 一次渲染会被走好几遍。残留那一行只在自己
@@ -250,7 +309,7 @@ struct SettingsView: View {
             LabeledField(label: "API 密钥", hint: "sk- 开头") {
                 SecureField("sk-…", text: $store.deepSeekAPIKey)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(Theme.Text.meta.font.monospaced())
             }
         }
     }
@@ -268,7 +327,7 @@ struct SettingsView: View {
                 "复制那串（tvly- 开头），粘到下面",
             ]
         ) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
                 LabeledField(label: "服务商") {
                     Picker("", selection: $store.searchProvider) {
                         Text("Tavily（推荐）").tag("tavily")
@@ -278,14 +337,18 @@ struct SettingsView: View {
                     .frame(width: 200)
                 }
 
+                Separator()
+
                 LabeledField(
                     label: "API 密钥",
                     hint: store.searchProvider == "tavily" ? "tvly- 开头" : "Serper 的 key"
                 ) {
                     SecureField("tvly-…", text: $store.searchAPIKey)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(Theme.Text.meta.font.monospaced())
                 }
+
+                Separator()
 
                 TestRow(
                     title: "测试搜索",
@@ -311,43 +374,47 @@ struct SettingsView: View {
                 "再搜「访问管理」→「API 密钥管理」→ 新建密钥，得到 SecretId 和 SecretKey",
             ]
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                HStack(alignment: .top, spacing: Theme.Spacing.md) {
                     LabeledField(label: "存储桶名", hint: "含 APPID 后缀") {
                         TextField("classroom-1300000000", text: $store.cosBucket)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(Theme.Text.meta.font.monospaced())
                     }
                     LabeledField(label: "地域", hint: "如 ap-guangzhou") {
                         TextField("ap-guangzhou", text: $store.cosRegion)
                             .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12, design: .monospaced))
+                            .font(Theme.Text.meta.font.monospaced())
                             .frame(width: 180)
                     }
                 }
 
+                Separator()
+
                 LabeledField(label: "SecretId", hint: "AKID 开头") {
                     TextField("AKID…", text: $store.cosSecretID)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(Theme.Text.meta.font.monospaced())
                 }
 
+                Separator()
+
                 LabeledField(label: "SecretKey", hint: "新建密钥时只显示一次") {
-                    HStack(spacing: 6) {
+                    HStack(spacing: Theme.Spacing.s6) {
                         if showsSecretKey {
                             TextField("", text: $store.cosSecretKey)
                                 .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(Theme.Text.meta.font.monospaced())
                         } else {
                             SecureField("", text: $store.cosSecretKey)
                                 .textFieldStyle(.roundedBorder)
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(Theme.Text.meta.font.monospaced())
                         }
                         Button {
                             showsSecretKey.toggle()
                         } label: {
                             Image(systemName: showsSecretKey ? "eye.slash" : "eye")
-                                .font(.system(size: 11))
+                                .font(.system(size: Theme.Text.footnote.size))
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(Theme.textSecondary)
@@ -358,6 +425,8 @@ struct SettingsView: View {
                     "这个密钥等于账号的钥匙，权限很大。想要更稳妥，去「访问管理 → 用户 → 新建子用户」，"
                         + "只给它 COS 的读写权限，用子用户的密钥填在这里。"
                 )
+
+                Separator()
 
                 TestRow(
                     title: "测试上传",
@@ -413,15 +482,15 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
             Separator()
             Text("配置文件位置")
-                .font(.system(size: 11, weight: .medium))
+                .font(Theme.Text.footnote.font.weight(.medium))
                 .foregroundStyle(Theme.textSecondary)
             Text(store.configFilePath)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(Theme.textTertiary)
+                .font(Theme.Text.footnote.font.monospaced())
+                .foregroundStyle(Theme.textSupporting)
                 .textSelection(.enabled)
             Text("权限已设为 600（仅本人可读）。这个文件里有密钥，别拷贝到别的机器，也别提交进任何仓库。")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.textTertiary)
+                .font(Theme.Text.footnote.font)
+                .foregroundStyle(Theme.textSupporting)
         }
         .padding(.top, 8)
     }
@@ -444,7 +513,7 @@ struct SettingsView: View {
         // 这一行也就跟着翻到「已就位」
         let decision = TranscriptionBackend.decide(backend: .whisper)
 
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             if center.phase.isBusy {
                 StatusMark(kind: .live, text: center.progressLine)
                 if let retry = center.retryNote {
@@ -472,8 +541,8 @@ struct SettingsView: View {
             }
 
             Text("模型位置：\(center.destination.path)")
-                .textStyle(Theme.Text.caption)
-                .foregroundStyle(Theme.textTertiary)
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textSupporting)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -510,6 +579,22 @@ struct SettingsView: View {
     ///
     /// 它**不挂在 `backend == .whisper` 后面**：重转是对已经录好的音频做事，
     /// 走自己那条路，用户选了 Apple 后端也照样能重转。
+    /// 课后重转那一行有没有内容。分支和 `retranscribeModelRow()` 一一对应：
+    /// 「就位且没在下载」时它什么也不画，卡片里就不该先画一条分隔线。
+    /// 两处必须一起改——判据只负责让线别悬空
+    private var showsRetranscribeRow: Bool {
+        let center = appState.modelDownload
+        let engine = RetranscribeEngine.large
+        let activeHere = center.activeFile == engine.fileName
+        if center.phase.isBusy && activeHere { return true }
+        switch RetranscribeRequirement.resolve(engine: engine) {
+        case .blocked: return true
+        case .ready:
+            if case .done = center.phase, activeHere { return true }
+            return false
+        }
+    }
+
     @ViewBuilder
     private func retranscribeModelRow() -> some View {
         let center = appState.modelDownload
@@ -518,7 +603,7 @@ struct SettingsView: View {
         let activeHere = center.activeFile == engine.fileName
         let busyHere = center.phase.isBusy && activeHere
 
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             if busyHere {
                 StatusMark(kind: .live, text: "正在下载重转模型 · \(center.progressLine)")
                 if let retry = center.retryNote {
@@ -527,8 +612,8 @@ struct SettingsView: View {
                 // 同 modelRow：一次只放一个 PillButton，下完之前那一个位置是取消
                 PillButton(title: "取消下载", style: .quiet) { center.cancel() }
                 Text("模型位置：\(center.destination.path)")
-                    .textStyle(Theme.Text.caption)
-                    .foregroundStyle(Theme.textTertiary)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSupporting)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
@@ -563,13 +648,13 @@ struct SettingsView: View {
     @ViewBuilder
     private func cacheRow() -> some View {
         let center = appState.modelDownload
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             if let plan = center.freeablePlan {
                 StatusMark(kind: .warning,
                            text: "未完成的下载 \(plan.items.count) 项 · 占用 \(ModelCache.byteText(plan.totalBytes))")
                 ForEach(plan.items) { item in
                     Text("· \(item.url.lastPathComponent) · \(ModelCache.byteText(item.bytes))")
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textTertiary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -604,9 +689,8 @@ struct SettingsView: View {
 
 /// 一个设置区块：标题、说明、「去哪儿拿」的步骤，然后是表单。
 ///
-/// 没有外框。分组靠上面那条发丝分隔线和 80 的留白——这是设计规范要的
-/// 苹果产品页那种做法，框和阴影都不要。
-///
+/// P13-2 起整节包成一张 `elevation 0 + cardElevated` 的卡片：分组终于有了
+/// 可见的边界，但它是「盆地」不是「浮起来的卡片」——不阴影、不抢页面标题。
 /// 步骤直接印在界面上而不是只写在文档里：用户卡住的那一刻他人就在
 /// 这个页面，不会去翻 README。
 private struct SettingsSection<Content: View>: View {
@@ -621,11 +705,9 @@ private struct SettingsSection<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-            Separator()
-
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
-                    .textStyle(Theme.Text.title)
+                    .textStyle(Theme.Text.bodyEmphasized)
                     .foregroundStyle(Theme.textPrimary)
 
                 Spacer()
@@ -635,13 +717,13 @@ private struct SettingsSection<Content: View>: View {
                 if !steps.isEmpty {
                     Button(showsSteps ? "隐藏步骤" : "显示步骤") { showsSteps.toggle() }
                         .buttonStyle(.plain)
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textTertiary)
                 }
             }
 
             Text(subtitle)
-                .textStyle(Theme.Text.caption)
+                .textStyle(Theme.Text.meta)
                 .foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -650,17 +732,17 @@ private struct SettingsSection<Content: View>: View {
                     ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
                         HStack(alignment: .top, spacing: Theme.Spacing.sm) {
                             Text("\(index + 1).")
-                                .textStyle(Theme.Text.caption)
+                                .textStyle(Theme.Text.meta)
                                 .monospacedDigit()
                                 .foregroundStyle(Theme.textTertiary)
                             Text(step)
-                                .textStyle(Theme.Text.caption)
+                                .textStyle(Theme.Text.meta)
                                 .foregroundStyle(Theme.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
-                // 靠缩进区分层级，不靠底色：底色就是「卡片」的另一种形态
+                // 靠缩进区分层级，不靠底色：底色在这里是卡片的，不是步骤的
                 .padding(.leading, Theme.Spacing.md)
             }
 
@@ -668,6 +750,10 @@ private struct SettingsSection<Content: View>: View {
                 .padding(.top, Theme.Spacing.xs)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        // 分组用 elevation 0 的卡片：它是铺在页面上的分组盆地，不是浮起来的
+        // 卡片。P14-4 起底板统一走 `Surface.card`（深色 #1C1C1E）——
+        // 之前这里用 cardElevated，#2C2C2E 比全站卡片亮一档
+        .cardStyle(elevation: 0)
     }
 }
 
@@ -677,17 +763,47 @@ private struct LabeledField<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(spacing: Theme.Spacing.s6) {
                 Text(label)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(Theme.Text.summary.font.weight(.medium))
                 if let hint {
                     Text(hint)
-                        .font(.system(size: 10))
+                        .textStyle(Theme.Text.footnote)
                         .foregroundStyle(Theme.textTertiary)
                 }
             }
             content
+        }
+    }
+}
+
+/// 开关行的规格（P14-4）：标签 15pt 靠左、`Toggle` 靠右，
+/// 说明文字 11pt 脚注放在标签下方。和 `LabeledField` 分开是因为
+/// 开关行的控件在**同一行右侧**，而输入框行的控件在标签下面
+private struct ToggleRow: View {
+    let label: String
+    @Binding var isOn: Bool
+    let description: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(spacing: Theme.Spacing.md) {
+                Text(label)
+                    .textStyle(Theme.Text.summary)
+                    .foregroundStyle(Theme.textPrimary)
+
+                Spacer(minLength: Theme.Spacing.md)
+
+                Toggle("", isOn: $isOn)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+
+            Text(description)
+                .textStyle(Theme.Text.footnote)
+                .foregroundStyle(Theme.textSupporting)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -709,7 +825,7 @@ private struct TestRow: View {
                 HStack(spacing: Theme.Spacing.sm) {
                     ProgressView().controlSize(.small)
                     Text("测试中…")
-                        .textStyle(Theme.Text.caption)
+                        .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textSecondary)
                 }
             } else {
