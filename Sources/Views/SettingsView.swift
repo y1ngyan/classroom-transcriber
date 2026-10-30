@@ -83,7 +83,11 @@ struct SettingsView: View {
 
             Spacer()
 
-            PillButton(title: "保存", isEnabled: store.hasUnsavedChanges) {
+            // 有改动 → accent 实心；干净 → 灰底灰字（`.neutral`），
+            // 不做「蓝按钮降透明度」——那在浅色页面上还像一颗蓝按钮
+            PillButton(title: "保存",
+                       isEnabled: store.hasUnsavedChanges,
+                       disabledStyle: .neutral) {
                 save()
             }
         }
@@ -112,17 +116,21 @@ struct SettingsView: View {
     /// 这一节和页面其他部分不同：它不需要配置任何东西，默认就是可用的。
     /// 放在最前面是因为它是唯一一个直接决定「录下来能不能认出来」的开关，
     /// 而其余几节配不配只影响附加能力。
+    /// P14-5：原来整段挤在一张「录音与识别」大卡里，四个互不相干的分组
+    /// （后端 / 增益 / 提问 / 三个开关）被同一个框罩着，扫一眼分不出边界。
+    /// 现在一个分组一张卡，卡内行与行之间用 0.5pt 发丝线——卡片是分组的
+    /// 边界，不是「什么都要框一下」的容器
     private func audioSection() -> some View {
         @Bindable var store = appState.settings
-        return SettingsSection(
-            title: "录音与识别",
-            subtitle: "决定「录下来的声音怎么变成文字」。识别后端和增益都从下一段录音开始生效；"
-                + "录音存档存的始终是未加增益的原始音频，不受这里影响。",
-        ) {
-            // 卡内每一行之间用 0.5pt 分隔线（P14-4）；间距只走节奏表
-            VStack(alignment: .leading, spacing: Theme.Spacing.md) {
-                VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    LabeledField(label: "识别后端") {
+        return VStack(alignment: .leading, spacing: Theme.RecordingLayout.groupSpacing) {
+            // ── 识别后端 ──
+            SettingsSection(
+                title: "识别后端",
+                subtitle: "决定「录下来的声音怎么变成文字」。从下一段录音开始生效。"
+            ) {
+                // 行与行之间是 0.5pt 发丝线，**最后一行下面不画**
+                VStack(alignment: .leading, spacing: Theme.Spacing.s12) {
+                    VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
                         Picker("", selection: $store.backend) {
                             ForEach(TranscriptionBackend.allCases) { backend in
                                 Text(backend.label).tag(backend)
@@ -130,23 +138,27 @@ struct SettingsView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.segmented)
-                        .frame(width: 360)
+                        // 定宽 + **左对齐**：分段控件在固定宽的框里默认居中，
+                        // 两个分段的「识别后端」就会比五段的「麦克风增益」
+                        // 往右缩一截（P14-5 用户挑出来的那条）
+                        .frame(width: 360, alignment: .leading)
+
+                        Text(store.backend.hint)
+                            .textStyle(Theme.Text.meta)
+                            .foregroundStyle(Theme.textSupporting)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        note(
+                            "Whisper 后端跑的是本地模型：不联网、不上传，但要在「开始录制」之前先把模型读进内存。"
+                                + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
+                        )
                     }
-
-                    Text(store.backend.hint)
-                        .textStyle(Theme.Text.meta)
-                        .foregroundStyle(Theme.textSupporting)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    note(
-                        "Whisper 后端跑的是本地模型：不联网、不上传，但要在「开始录制」之前先把模型读进内存。"
-                            + "第一次准备要十几秒（之后走缓存，不到一秒），准备没成功时会明确报出来，不会悄悄换回系统识别。"
-                    )
 
                     // 模型这一段只在选了 Whisper 时出现。默认（Apple）走的是系统
                     // 识别，模型在不在和这次录音无关——把一条无关的信息摆在
                     // 默认路径上，只会让真正的错误更难被看见
                     if store.backend == .whisper {
+                        Separator()
                         modelRow()
                     }
 
@@ -154,38 +166,48 @@ struct SettingsView: View {
                     // 重转是对已经录好的音频做事，走的是自己那条路，用户哪怕
                     // 选了 Apple 也照样能重转——把它藏在 `backend == .whisper`
                     // 后面，就会出现「提示我去下 large，可设置里没有这一行」
-                    retranscribeModelRow()
+                    //
+                    // 分隔线跟着行一起出现：就位之后这一行是空的，先画线
+                    // 就会留下一条悬空的分隔线（P14-5 第一版快照里就是）
+                    if showsRetranscribeRow {
+                        Separator()
+                        retranscribeModelRow()
+                    }
 
                     // 未完成的下载残留。**和后端选择无关**：用户下一半切回 Apple，
                     // 那几百 MB 的 `.part` 照样占着盘。它只在自己存在时出现——
                     // 没有残留时不占一行，这是常态
                     if appState.modelDownload.shouldShowCacheRow {
+                        Separator()
                         cacheRow()
                     }
 
                     // 预热结果只在这一节里显示：模型路径、准备用时、「不可用」的原因
                     // 都只对「选了 Whisper 的人」有意义，默认（Apple）时这一行不出现
                     if let line = appState.transcription.whisper.statusLine {
+                        Separator()
                         Text(line)
                             .textStyle(Theme.Text.meta)
                             .foregroundStyle(line.hasPrefix("❌") ? Theme.error : Theme.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
 
-                Separator()
-
+            // ── 麦克风增益 ──
+            SettingsSection(
+                title: "麦克风增益",
+                subtitle: "录音存档存的始终是未加增益的原始音频；改动从下一段录音开始生效。"
+            ) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    LabeledField(label: "麦克风增益") {
-                        Picker("", selection: $store.micGain) {
-                            ForEach(MicGainMode.allCases) { mode in
-                                Text(mode.label).tag(mode)
-                            }
+                    Picker("", selection: $store.micGain) {
+                        ForEach(MicGainMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(width: 360)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 360, alignment: .leading)
 
                     // 选中的那一档到底做什么，写在下面而不是让用户去猜档位名。
                     // 「自动」和「5 倍」听上去都像「会放大」，区别全在噪声门上，
@@ -195,37 +217,39 @@ struct SettingsView: View {
                         .foregroundStyle(Theme.textSupporting)
 
                     note(
-                        "改动从下一段录音开始生效。增益档决定的是整段录音的处理方式，"
+                        "增益档决定的是整段录音的处理方式，"
                             + "中途换档会让同一段录音的前后两截用上不同的增益曲线。"
                     )
                 }
+            }
 
-                Separator()
-
+            // ── 提问检测 ──
+            SettingsSection(
+                title: "提问检测",
+                subtitle: "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
+                    + "纯本地规则判定，不联网、不调模型。"
+            ) {
                 VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
-                    LabeledField(label: "提问检测") {
-                        Picker("", selection: $store.questionSensitivity) {
-                            ForEach(QuestionSensitivity.allCases) { level in
-                                Text(level.label).tag(level)
-                            }
+                    Picker("", selection: $store.questionSensitivity) {
+                        ForEach(QuestionSensitivity.allCases) { level in
+                            Text(level.label).tag(level)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(width: 360)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 360, alignment: .leading)
 
                     Text(store.questionSensitivity.hint)
                         .textStyle(Theme.Text.meta)
                         .foregroundStyle(Theme.textSupporting)
-
-                    note(
-                        "检测的是「老师是不是向全班提问」，命中的段落会在转录里标出来。"
-                            + "纯本地规则判定，不联网、不调模型。"
-                    )
                 }
+            }
 
-                Separator()
-
+            // ── 三个开关 ──
+            // 每个开关一行，行间 0.5pt 发丝线，最后一行下面不画。
+            // 不另起总标题：开关的标签本身就说清了它管什么，
+            // 再加一行「转录行为」只是给同一件事起第二个名字
+            VStack(alignment: .leading, spacing: Theme.Spacing.s12) {
                 ToggleRow(
                     label: "自动核查",
                     isOn: $store.autoFactCheck,
@@ -258,6 +282,8 @@ struct SettingsView: View {
                         + "但不会因为门控判错而漏掉小声说话"
                 )
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle(elevation: 0)
         }
         // 进设置页扫一次模型目录。**挂在这里而不是写在 `body` 的求值路径上**：
         // 扫盘是副作用，而 `body` 一次渲染会被走好几遍。残留那一行只在自己
@@ -553,6 +579,22 @@ struct SettingsView: View {
     ///
     /// 它**不挂在 `backend == .whisper` 后面**：重转是对已经录好的音频做事，
     /// 走自己那条路，用户选了 Apple 后端也照样能重转。
+    /// 课后重转那一行有没有内容。分支和 `retranscribeModelRow()` 一一对应：
+    /// 「就位且没在下载」时它什么也不画，卡片里就不该先画一条分隔线。
+    /// 两处必须一起改——判据只负责让线别悬空
+    private var showsRetranscribeRow: Bool {
+        let center = appState.modelDownload
+        let engine = RetranscribeEngine.large
+        let activeHere = center.activeFile == engine.fileName
+        if center.phase.isBusy && activeHere { return true }
+        switch RetranscribeRequirement.resolve(engine: engine) {
+        case .blocked: return true
+        case .ready:
+            if case .done = center.phase, activeHere { return true }
+            return false
+        }
+    }
+
     @ViewBuilder
     private func retranscribeModelRow() -> some View {
         let center = appState.modelDownload

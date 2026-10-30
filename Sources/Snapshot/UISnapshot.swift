@@ -137,16 +137,21 @@ enum UISnapshot {
         // 分屏渲染开关。做成环境变量而不是新 CLI 参数：
         // `--ui-snapshot` 的解析在 `App.swift`，本包不许改它
         //   · `recordings`：P14-1/P14-2/P14-3 的「只渲 4 张」；
-        //   · `p14-4`：P14-4 的五屏 × 亮暗共 10 张，跳过录音列表
+        //   · `p14-4`：P14-4 的五屏 × 亮暗共 10 张，跳过录音列表；
+        //   · `p14-5`：P14-5 只改设置页，只渲 settings 亮/暗 2 张
         let only = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
         let onlyRecordings = only == "recordings"
         let onlyFive = only == "p14-4"
+        let onlySettings = only == "p14-5"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
             }
             if onlyFive {
                 return allScreens.filter { !$0.name.hasPrefix("recordings") }
+            }
+            if onlySettings {
+                return allScreens.filter { $0.name == "settings" }
             }
             return allScreens
         }()
@@ -156,6 +161,10 @@ enum UISnapshot {
         }
         if onlyFive {
             print("  模式：只渲五屏 10 张（UI_SNAPSHOT_ONLY=p14-4）")
+            print("")
+        }
+        if onlySettings {
+            print("  模式：只渲设置屏 2 张（UI_SNAPSHOT_ONLY=p14-5）")
             print("")
         }
 
@@ -277,7 +286,7 @@ enum UISnapshot {
 
         // ── 自检 ⑦：亮暗真的渲成了两套（色板没被忽略）──
         // 两种分屏模式各挑一张同时在两种外观下都存在的屏
-        let schemePair = onlyFive ? "settings" : "recordings"
+        let schemePair = (onlyFive || onlySettings) ? "settings" : "recordings"
         if let light = written["\(schemePair)-light.png"],
            let dark = written["\(schemePair)-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
@@ -487,6 +496,11 @@ enum UISnapshot {
         if onlyFive {
             failure.check(expected.count == 10,
                           "只渲五屏 10 张（五屏 × 亮/暗）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+        }
+        if onlySettings {
+            failure.check(expected.count == 2,
+                          "只渲设置屏 2 张（亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
 

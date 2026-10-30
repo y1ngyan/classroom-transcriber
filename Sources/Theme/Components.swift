@@ -17,6 +17,16 @@ struct PillButton: View {
         case quiet
     }
 
+    /// 禁用时的样子（P14-5）
+    enum DisabledStyle {
+        /// 老做法：整颗按钮降到 35%。适合「暂时不能点」的次要按钮
+        case faded
+        /// 灰底 + 三级灰字。**主操作禁用时必须用它**：蓝色按钮降透明度
+        /// 在浅色页面上仍然读作「一颗浅蓝色的按钮」，而不是「它现在不能点」
+        /// （P14-5 用户原话：右下「保存」看着像被禁用了一样）
+        case neutral
+    }
+
     let title: String
     var systemImage: String?
     /// 标题前的小圆点。录制按钮用它表示「正在录/未在录」，
@@ -28,6 +38,7 @@ struct PillButton: View {
     /// 会并发起两个请求，而且两个都会写进同一个 store
     var isLoading = false
     var isEnabled = true
+    var disabledStyle: DisabledStyle = .faded
     let action: () -> Void
 
     @State private var isHovering = false
@@ -41,11 +52,13 @@ struct PillButton: View {
                 systemImage: systemImage,
                 dotColor: dotColor,
                 isLoading: isLoading,
-                style: style
+                style: style,
+                // 灰底灰字只换颜色、不换尺寸：禁用前后按钮不会跳一下宽度
+                isDisabled: !isInteractive && disabledStyle == .neutral
             )
         }
         .buttonStyle(.plain)
-        .opacity(isInteractive ? 1 : 0.35)
+        .opacity(isInteractive || disabledStyle == .neutral ? 1 : 0.35)
         .disabled(!isInteractive)
         // 悬停反馈取代阴影：设计规范不要阴影，但按钮总得能看出是可点的
         .brightness(isHovering && isInteractive ? 0.06 : 0)
@@ -65,6 +78,8 @@ struct PillLabel: View {
     var trailingSystemImage: String?
     var isLoading = false
     var style: PillButton.Style = .filled
+    /// 禁用态换成灰底灰字（见 `PillButton.DisabledStyle.neutral`）
+    var isDisabled = false
 
     var body: some View {
         HStack(spacing: Theme.Spacing.sm) {
@@ -96,6 +111,9 @@ struct PillLabel: View {
     }
 
     private var background: Color {
+        // 用 `separator` 而不是 `backgroundSecondary`：后者在浅色下是
+        // #F5F5F7，比页面底 #F1F1F4 还亮，灰胶囊直接消失在底上
+        if isDisabled { return Theme.separator }
         switch style {
         case .filled: return Theme.accent
         case .quiet: return Theme.backgroundSecondary
@@ -103,6 +121,7 @@ struct PillLabel: View {
     }
 
     private var foreground: Color {
+        if isDisabled { return Theme.textSecondary }
         switch style {
         case .filled: return .white
         case .quiet: return Theme.textPrimary
