@@ -60,6 +60,19 @@ final class RecordingsStore {
         return decoded
     }
 
+    /// 列表缩略图要的 wav 路径（P15-1）。
+    ///
+    /// 正常路径只读摘要里的 `audioFileName`，不解码正文。旧 index.json
+    /// 没有这个字段，回落成解码一次会话正文——**只在摘要缺字段时发生**，
+    /// 而会话下一次 `save` 就会把摘要补齐，所以这是过渡期的代价，
+    /// 不是常态。解码走 `session(id:)` 的缓存，反复取也不会重复读盘
+    func audioURL(for summary: SessionSummary) -> URL? {
+        let fileName = summary.audioFileName
+            ?? self.session(id: summary.id)?.parts.lazy.compactMap(\.fileName).first
+        guard let fileName, !fileName.isEmpty else { return nil }
+        return recordingsDirectory.appendingPathComponent(fileName)
+    }
+
     // MARK: - 写入
 
     /// 接收引擎的录音快照：新会话就建，「接着录」就追加片段。

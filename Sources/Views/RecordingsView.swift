@@ -302,6 +302,7 @@ struct RecordingsView: View {
                 ForEach(items) { item in
                     RecordingRow(
                         summary: item,
+                        resolveAudioURL: { store.audioURL(for: item) },
                         onOpen: { openSessionID = item.id },
                         onDelete: { pendingDelete = item }
                     )
@@ -316,10 +317,26 @@ struct RecordingsView: View {
 /// 一条录音。整行可点进详情，悬停时右侧浮出删除入口。
 private struct RecordingRow: View {
     let summary: SessionSummary
+    /// 只在 `.task` 里调用，不在 body 里调用：body 每次重绘（悬停、角标变化）
+    /// 都会跑，在那里解析音频路径等于给每帧加一次磁盘/解码开销。
+    /// 旧 index 的摘要没有文件名，解析会回落成解码正文——更不该在 body 里做
+    let resolveAudioURL: () -> URL?
     let onOpen: () -> Void
     let onDelete: () -> Void
 
     @State private var isHovering = false
+    /// 包络算完之前是空数组，缩略图渲成一条 40% 灰直条（派的规格）。
+    /// 空数组也覆盖「这条录音没有 wav」：占位直条不该假装有波形
+    @State private var envelope: [Float] = []
+
+    /// 快照模式下直接用固定数组（理由见 `WaveformEnvelope.snapshotFixture`）。
+    /// 判断放在渲染路径上而不是 `.task` 里：离屏 `NSHostingView` 不会跑
+    /// 异步任务，等 `.task` 的话快照永远只拍到占位直条
+    private var displayedEnvelope: [Float] {
+        WaveformEnvelope.isSnapshotMode
+            ? WaveformEnvelope.snapshotFixture(seed: summary.id)
+            : envelope
+    }
 
     var body: some View {
         Button(action: onOpen) {
@@ -334,6 +351,20 @@ private struct RecordingRow: View {
                     .frame(width: Theme.RecordingLayout.playButton,
                            height: Theme.RecordingLayout.playButton)
                     .background(Circle().fill(Theme.accent.opacity(0.06)))
+
+                // 真实波形缩略图（P15-1）。读包络要打开 wav、扫全段，
+                // 放在主线程会让列表滚动卡顿——`.task` 里丢给 detached 任务，
+                // 回来时若这一行已被复用/移除就丢弃结果
+                WaveformThumbnail(values: displayedEnvelope)
+                    .task(id: summary.id) {
+                        guard !WaveformEnvelope.isSnapshotMode else { return }
+                        guard let url = resolveAudioURL() else { return }
+                        let values = await Task.detached(priority: .utility) {
+                            WaveformEnvelope.compute(url: url)
+                        }.value
+                        guard !Task.isCancelled else { return }
+                        envelope = values
+                    }
 
                 VStack(alignment: .leading, spacing: Theme.RecordingLayout.cardTextSpacing) {
                     // 标题行。角标钉在右上角（第一行基线），不跟元数据挤一行
@@ -370,16 +401,26 @@ private struct RecordingRow: View {
                             .lineLimit(1)
                     }
 
-                    // 读数行，只在实际有内容的项上出现——「0 个提问」这种
-                    // 占位读数没有任何信息量，只会把列表撑高。
-                    // P14-2：各项用 ` · ` 连起来，否则四个读数会糊成一串
-                    HStack(spacing: 0) {
-                        Text(metadataText)
-                            .textStyle(Theme.Text.meta)
+                    // 读数行（P15-1）：时长**排第一且更重**，其余读数低一档。
+                    // 以前所有读数同一个字号，一眼扫过去分不出「这条多长」和
+                    // 「转了多少段」哪个是主信息。两段文字共用 firstTextBaseline
+                    // 对齐——17pt 和 13pt 按顶/底对齐都会让数字看着悬空
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text(summary.formattedDuration)
+                            .textStyle(Theme.Text.bodyEmphasized)
                             .monospacedDigit()
-                            .foregroundStyle(Theme.textSupporting)
-                            .lineLimit(1)
+                            // 主色，不是 supporting：17pt 配三级灰在同一行里
+                            // 压不住 13pt 的读数，反而像一行褪色的备注
+                            .foregroundStyle(Theme.textPrimary)
+
+                        if !metadataTrailingText.isEmpty {
+                            Text(" · " + metadataTrailingText)
+                                .textStyle(Theme.Text.meta)
+                                .monospacedDigit()
+                                .foregroundStyle(Theme.textSupporting)
+                        }
                     }
+                    .lineLimit(1)
                 }
 
                 // 「这行能点」的暗示。P14-2：13→14pt 且提到 textSecondary，
@@ -404,13 +445,14 @@ private struct RecordingRow: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
     }
 
-    /// 元信息一行：`09:00 · 1:36:00 · 4 段转录 · 1 个提问`（P14-2）。
-    /// 时间固定第一项（标题不再兼任日期）；没有标题的旧数据里标题本身
-    /// 就是日期时间，这里不再重复一遍。空项不占位——「0 个提问」没有信息量
-    private var metadataText: String {
+    /// 时长之后那段读数：`4 段转录 · 1 个提问`。
+    ///
+    /// 时长不再放在这里——它要单独的字号和字重，单独渲染。
+    /// 起始时刻也去掉了（P15-1）：分组标题和日期已经给出「哪天」，
+    /// 而派单定的这一行是**时长在前**的读数行；两处都报时刻会把这个
+    /// 最重要的数字挤到第三位。空项不占位——「0 个提问」没有信息量
+    private var metadataTrailingText: String {
         var items: [String] = []
-        if !summary.title.isEmpty { items.append(summary.formattedTime) }
-        items.append(summary.formattedDuration)
         if summary.partCount > 1 { items.append("\(summary.partCount) 段录音") }
         items.append("\(summary.segmentCount) 段转录")
         if summary.questionCount > 0 { items.append("\(summary.questionCount) 个提问") }
@@ -449,6 +491,54 @@ private struct RecordingRow: View {
                 }
             }
         }
+    }
+}
+
+/// 60×24 的波形缩略图（P15-1）。
+///
+/// 64 桶固定不变，不跟宽度走：它是缩略图，不是可缩放的图表；桶数一旦
+/// 跟着布局变，「同一段录音在不同宽度下形状不同」就会变成很难解释的 bug。
+/// 每桶一根 1pt 圆角竖线，高度 = 归一化峰值（最小 1pt，否则静音处
+/// 会连成一条看不见的缝）。
+///
+/// 已播放/未播放：列表上没有播放进度（播放器在详情页），派单允许固定
+/// 0，于是全部走未播放色。`playedFraction` 留着，等列表接上播放状态
+/// 再传真实比例——不要让这个视图自己去猜
+private struct WaveformThumbnail: View {
+    let values: [Float]
+    var playedFraction: CGFloat = 0
+
+    var body: some View {
+        Canvas { context, size in
+            // 没数据 = 占位：一条 40% 灰直条。不画随机波形——那会让
+            // 「还在算」和「算出来是平的」看起来一样，也会让没有 wav 的
+            // 旧会话假装有音频
+            guard !values.isEmpty else {
+                var line = Path()
+                line.move(to: CGPoint(x: 0, y: size.height / 2))
+                line.addLine(to: CGPoint(x: size.width, y: size.height / 2))
+                context.stroke(line, with: .color(Theme.textTertiary.opacity(0.4)),
+                               lineWidth: 1)
+                return
+            }
+
+            let step = size.width / CGFloat(values.count)
+            let playedX = size.width * min(1, max(0, playedFraction))
+            for (index, value) in values.enumerated() {
+                let height = max(1, CGFloat(value) * size.height)
+                let x = step * (CGFloat(index) + 0.5)
+                let rect = CGRect(x: x - 0.5, y: (size.height - height) / 2,
+                                  width: 1, height: height)
+                let color = x <= playedX
+                    ? Theme.accent.opacity(0.8)
+                    : Theme.textTertiary.opacity(0.4)
+                context.fill(Path(roundedRect: rect, cornerRadius: 0.5),
+                             with: .color(color))
+            }
+        }
+        .frame(width: 60, height: 24)
+        // 波形是装饰：读屏念不出任何有用信息，别让它抢走卡片标题的朗读
+        .accessibilityHidden(true)
     }
 }
 

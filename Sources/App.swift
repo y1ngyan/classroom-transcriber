@@ -705,6 +705,14 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml()
         }
 
+        // 波形包络自检：--waveform-selftest（临时目录 + 合成 wav；不碰真实录音库、
+        // 不加载模型、不发声）。退出码跟着红绿走，理由同下面几条
+        if CommandLine.arguments.contains("--waveform-selftest") {
+            let result = WaveformEnvelope.selfTest()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 提问数据层自检：--questions-selftest（B 包 §4 / §6.2 / §6.3 / §4.6）
         // （离线：临时目录夹具；不联网、不调模型、不碰麦克风、不发声、不读真实库）
         //

@@ -138,11 +138,14 @@ enum UISnapshot {
         // `--ui-snapshot` 的解析在 `App.swift`，本包不许改它
         //   · `recordings`：P14-1/P14-2/P14-3 的「只渲 4 张」；
         //   · `p14-4`：P14-4 的五屏 × 亮暗共 10 张，跳过录音列表；
-        //   · `p14-5`：P14-5 只改设置页，只渲 settings 亮/暗 2 张
+        //   · `p14-5`：P14-5 只改设置页，只渲 settings 亮/暗 2 张；
+        //   · `p15-1`：P15-1 只改录音卡片，只渲有数据的 recordings 亮/暗 2 张
+        //     （空态屏不验波形，不浪费一次渲染）
         let only = ProcessInfo.processInfo.environment["UI_SNAPSHOT_ONLY"]
         let onlyRecordings = only == "recordings"
         let onlyFive = only == "p14-4"
         let onlySettings = only == "p14-5"
+        let onlyWaveform = only == "p15-1"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
@@ -152,6 +155,9 @@ enum UISnapshot {
             }
             if onlySettings {
                 return allScreens.filter { $0.name == "settings" }
+            }
+            if onlyWaveform {
+                return allScreens.filter { $0.name == "recordings" }
             }
             return allScreens
         }()
@@ -165,6 +171,10 @@ enum UISnapshot {
         }
         if onlySettings {
             print("  模式：只渲设置屏 2 张（UI_SNAPSHOT_ONLY=p14-5）")
+            print("")
+        }
+        if onlyWaveform {
+            print("  模式：只渲录音屏 2 张（UI_SNAPSHOT_ONLY=p15-1）")
             print("")
         }
 
@@ -501,6 +511,11 @@ enum UISnapshot {
         if onlySettings {
             failure.check(expected.count == 2,
                           "只渲设置屏 2 张（亮/暗）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+        }
+        if onlyWaveform {
+            failure.check(expected.count == 2,
+                          "只渲录音屏 2 张（亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
         }
 

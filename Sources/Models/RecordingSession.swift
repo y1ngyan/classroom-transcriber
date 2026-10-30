@@ -339,6 +339,13 @@ struct SessionSummary: Identifiable, Codable, Equatable {
     /// 为了读两个名字去解码整条会话正文（正文可能有几百段）
     var title: String
     var course: String
+    /// 这条会话第一段音频的文件名（P15-1 波形缩略图要定位 wav）。
+    ///
+    /// 存文件名而不是让列表去解码会话正文：摘要是「列表只读 index.json」
+    /// 这条设计的地基，为了一张缩略图把每条会话的几百段转录全解一遍，
+    /// 等于把当初拆正文的理由全扔掉。旧 index.json 没有这个键，
+    /// 读出来是 nil，走 `RecordingsStore.audioURL(for:)` 的一次性回落
+    var audioFileName: String?
 
     init(session: RecordingSession) {
         id = session.id
@@ -367,6 +374,9 @@ struct SessionSummary: Identifiable, Codable, Equatable {
         firstText = String(
             session.parts.lazy.compactMap { $0.segments.first?.text }.first?.prefix(30) ?? ""
         )
+        // 取第一段**有文件**的 part：续录的会话里理论上每段都有，但历史
+        // 数据里可能存在 fileName == nil 的段，不能只看 parts.first
+        audioFileName = session.parts.lazy.compactMap(\.fileName).first
     }
 
     /// 和 RecordingSession 同一套回落规则，见那边的注释
@@ -390,6 +400,7 @@ struct SessionSummary: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, updatedAt, durationMillis, partCount, segmentCount
         case questionCount, answeredQuestionCount, poorCount, fairCount, firstText, title, course
+        case audioFileName
     }
 
     init(from decoder: any Decoder) throws {
@@ -408,5 +419,8 @@ struct SessionSummary: Identifiable, Codable, Equatable {
         firstText = try c.decode(String.self, forKey: .firstText)
         title = try c.decodeIfPresent(String.self, forKey: .title) ?? ""
         course = try c.decodeIfPresent(String.self, forKey: .course) ?? ""
+        // 后加的字段：老 index.json 里没有它。nil = 「还没有可定位的音频」，
+        // 列表行会退化成占位直条，不是错误
+        audioFileName = try c.decodeIfPresent(String.self, forKey: .audioFileName)
     }
 }
