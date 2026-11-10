@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// 详情页顶部的「课后笔记」区块（拍板 6a）。
 ///
@@ -145,9 +146,50 @@ struct StudyNotesPanelView: View {
                         .foregroundStyle(Theme.accent).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                // Anki：只把「有答案的提问」和「有释义的术语」做成卡。
+                // 这里不判断有没有卡可出——空的时候导出会给出明确原因，比一个禁用按钮好，
+                // 用户至少知道「为什么没有卡」（没有答案 / 没有释义）
+                Button(action: exportToAnki) {
+                    Text("导出 Anki 卡片").textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.accent).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
 
             Spacer()
+        }
+    }
+
+    /// 导出 Anki 制卡文件（CSV）。
+    ///
+    /// 用 `NSSavePanel` 而不是直接落到下载目录：用户接下来要把它拖进 Anki 导入，
+    /// 自己选位置最省事；默认文件名带课程与日期，重导不会互相覆盖成 `-1.csv`
+    private func exportToAnki() {
+        let cards = AnkiExporter.cards(questions: session.questions,
+                                       glossary: appState.glossary.entries)
+        guard !cards.isEmpty else {
+            exportFailed = true
+            exportMessage = AnkiExporter.ExportError.noCards.errorDescription
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = AnkiExporter.defaultFileName(course: session.course,
+                                                                  date: session.startedAt)
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.message = "导出后在 Anki 里：文件 → 导入 → 选这个文件，字段按「正面 / 背面 / 标签」对应"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let deck = AnkiExporter.deckName(course: session.course, date: session.startedAt)
+        let text = AnkiExporter.render(cards, deck: deck)
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            exportFailed = false
+            exportMessage = "已导出 \(cards.count) 张卡片"
+        } catch {
+            exportFailed = true
+            exportMessage = error.localizedDescription
         }
     }
 

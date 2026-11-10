@@ -1975,6 +1975,12 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        if CommandLine.arguments.contains("--anki-selftest") {
+            let result = AnkiExporterSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--export-notes-selftest") {
             print("笔记导出自检（纯本地 · 不弹面板、不联网、不加载模型、不发声）")
             let result = NotesExporter.selfTest()
@@ -2106,6 +2112,11 @@ struct ClassroomTranscriberApp: App {
                 lines += obsidian.lines
                 passed += obsidian.passed
                 failed += obsidian.failed
+
+                let anki = AnkiExporterSelfTest.run()
+                lines += anki.lines
+                passed += anki.passed
+                failed += anki.failed
 
                 let store = await StudyNotesStore.selfTest()
                 lines += store.lines
