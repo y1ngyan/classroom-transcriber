@@ -72,6 +72,10 @@ enum QuestionDataSelfTest {
         checkSummaryCounts(c, root: root)
 
         c.note("")
+        c.note("─── 六、计数口径（已查 / 待查）───")
+        checkQueryTally(c)
+
+        c.note("")
         c.note(c.failed == 0
             ? "✅ 提问数据层自检通过（\(c.passed) 条）"
             : "❌ 提问数据层自检未通过（过 \(c.passed) / 红 \(c.failed)）")
@@ -397,6 +401,42 @@ enum QuestionDataSelfTest {
     }
 
     // MARK: - 五、摘要计数
+
+    /// 六、计数口径：已查 = 有答案 + 查不到 + 失败；待查 = 未查 + 查询中
+    ///
+    /// 页头那行字曾经少报：当时「已查」只数 `.answered`，「查不到」和「查失败」
+    /// 都被算成没查过。这条自检就是钉住那个回归的。
+    @MainActor
+    private static func checkQueryTally(_ c: Checker) {
+        func q(_ status: QuestionStatus, filtered: Bool = false, _ text: String) -> LessonQuestion {
+            LessonQuestion(text: text, rawSentence: text, startTimeMillis: 0, level: 2,
+                           status: status, filtered: filtered)
+        }
+
+        let mixed = [
+            q(.answered, "什么是梯度下降？"),
+            q(.noResults, "学习率怎么选？"),
+            q(.failed, "为什么要归一化？"),
+            q(.unasked, "什么叫动量？"),
+            q(.searching, "泰勒展开一阶项为什么能近似？"),
+        ]
+        c.check(QuestionTally.queried(mixed) == 3,
+                "已查 = 有答案 + 查不到 + 失败（查不到也算查过）",
+                "\(QuestionTally.queried(mixed))")
+        c.check(QuestionTally.pending(mixed) == 2,
+                "待查 = 未查 + 查询中",
+                "\(QuestionTally.pending(mixed))")
+        c.check(QuestionTally.queried(mixed) + QuestionTally.pending(mixed) == mixed.count,
+                "两个口径互斥且穷尽（相加 = 主列表条数）",
+                "\(QuestionTally.queried(mixed) + QuestionTally.pending(mixed)) / \(mixed.count)")
+
+        for status in QuestionStatus.allCases {
+            let queried = QuestionTally.isQueried(status)
+            c.check(QuestionTally.queried([q(status, "x")]) == (queried ? 1 : 0)
+                    && QuestionTally.pending([q(status, "x")]) == (queried ? 0 : 1),
+                    "单条 \(status.rawValue) 归入\(queried ? "已查" : "待查")")
+        }
+    }
 
     @MainActor
     private static func checkSummaryCounts(_ c: Checker, root: URL) {

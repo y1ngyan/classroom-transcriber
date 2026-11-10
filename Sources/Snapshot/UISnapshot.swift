@@ -124,9 +124,9 @@ enum UISnapshot {
         failure.check(fixtureStatuses == Set([.answered, .noResults, .unasked]),
                       "提问夹具覆盖 有答案 / 查不到 / 未查 三种状态",
                       detail: "（实得 \(fixtureStatuses.map(\.rawValue).sorted().joined(separator: "、"))）")
-        failure.check(populated.questions.answeredCount == 1 && populated.questions.pendingCount == 1,
-                      "提问汇总 = 1 已查 / 1 待查",
-                      detail: "（实得 \(populated.questions.answeredCount) / \(populated.questions.pendingCount)）")
+        failure.check(populated.questions.queriedCount == 2 && populated.questions.pendingCount == 1,
+                      "提问汇总 = 2 已查（有答案 + 查不到）/ 1 待查",
+                      detail: "（实得 \(populated.questions.queriedCount) / \(populated.questions.pendingCount)）")
 
         // P17 的详情页夹具：取最新那条录音。第一条会话在 `seedRecordings`
         // 里有 4 段，够摆「播放某一句」和「编辑某一句」两种状态

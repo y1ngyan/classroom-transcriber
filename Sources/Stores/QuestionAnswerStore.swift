@@ -67,10 +67,19 @@ final class QuestionAnswerStore {
     /// 折叠区：默认收起，只显示原句、没有查询入口
     var filteredQuestions: [LessonQuestion] { questions.filter(\.filtered) }
 
-    var answeredCount: Int { questions.filter { $0.status == .answered }.count }
-    var pendingCount: Int {
-        mainQuestions.filter { $0.status == .unasked }.count
-    }
+    /// 有答案的条数（「已答」口径，只看 `.answered`）
+    var answeredCount: Int { mainQuestions.filter { $0.status == .answered }.count }
+
+    /// 查过的条数（「已查」口径）。**这是页头那行用的数**。
+    ///
+    /// 「查不到」和「查失败」都算查过：用户点了查询、系统也真的去问了，只是没得到可靠答案。
+    /// 早先这里直接拿 `answeredCount`（只数 `.answered`）当「已查」，
+    /// 于是「3 个问题：有答案 1 / 查不到 1 / 未查 1」的页面写着「1 个已查」，
+    /// 少报了真实的查询次数。判据在 `QuestionTally`（纯函数，离线自检）。
+    var queriedCount: Int { QuestionTally.queried(mainQuestions) }
+
+    /// 还等着查的条数（未查 + 查询中）。与 `queriedCount` 互斥，两者相加 = 主列表条数
+    var pendingCount: Int { QuestionTally.pending(mainQuestions) }
 
     /// 搜索和 DeepSeek 两个密钥都得有（拍板第 9 条：缺任意一个就禁用入口，
     /// 但列表照常显示）
