@@ -135,7 +135,7 @@ struct QuestionsView: View {
     }
 
     private var summaryLine: String {
-        "\(store.mainQuestions.count) 个问题 · \(store.answeredCount) 个已查 · \(store.pendingCount) 个待查"
+        "\(store.mainQuestions.count) 个问题 · \(store.queriedCount) 个已查 · \(store.pendingCount) 个待查"
     }
 
     /// 配置警告：形态复用 `FactCheckView.configWarning`（图标 + 颜色 + 2pt 竖条），

@@ -124,9 +124,9 @@ enum UISnapshot {
         failure.check(fixtureStatuses == Set([.answered, .noResults, .unasked]),
                       "提问夹具覆盖 有答案 / 查不到 / 未查 三种状态",
                       detail: "（实得 \(fixtureStatuses.map(\.rawValue).sorted().joined(separator: "、"))）")
-        failure.check(populated.questions.answeredCount == 1 && populated.questions.pendingCount == 1,
-                      "提问汇总 = 1 已查 / 1 待查",
-                      detail: "（实得 \(populated.questions.answeredCount) / \(populated.questions.pendingCount)）")
+        failure.check(populated.questions.queriedCount == 2 && populated.questions.pendingCount == 1,
+                      "提问汇总 = 2 已查（有答案 + 查不到）/ 1 待查",
+                      detail: "（实得 \(populated.questions.queriedCount) / \(populated.questions.pendingCount)）")
 
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
