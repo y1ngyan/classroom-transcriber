@@ -29,3 +29,7 @@ build-hermes*/
 
 # 本地 agent 说明（不上公开仓库）
 AGENTS.md
+
+# 并行线构建目录
+build-lane/
+build-b/
