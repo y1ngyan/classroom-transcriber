@@ -1987,6 +1987,12 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        if CommandLine.arguments.contains("--search-selftest") {
+            let result = TranscriptSearchSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--export-notes-selftest") {
             print("笔记导出自检（纯本地 · 不弹面板、不联网、不加载模型、不发声）")
             let result = NotesExporter.selfTest()
@@ -2128,6 +2134,11 @@ struct ClassroomTranscriberApp: App {
                 lines += documents.lines
                 passed += documents.passed
                 failed += documents.failed
+
+                let search = TranscriptSearchSelfTest.run()
+                lines += search.lines
+                passed += search.passed
+                failed += search.failed
 
                 let store = await StudyNotesStore.selfTest()
                 lines += store.lines

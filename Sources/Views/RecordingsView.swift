@@ -21,6 +21,16 @@ struct RecordingsView: View {
     /// 清理「只有提问、没有录音」的占位会话（B 包拍板第 1 条）
     @State private var isConfirmingQuestionCleanup = false
 
+    /// 跨录音检索：查询词与结果。
+    ///
+    /// 索引**懒建**：没人搜就不扫全库。55 节课第一次建约几十毫秒（实测见自检），
+    /// 之后每次按键只查倒排表。录音增删后按 `indexedCount` 重建
+    @State private var query = ""
+    @State private var searchIndex: TranscriptSearch.Index?
+    @State private var indexedCount = -1
+    @State private var hits: [TranscriptSearch.Hit] = []
+    @State private var indexBuildMillis: Double = 0
+
     private var store: RecordingsStore { appState.recordings }
 
     var body: some View {
@@ -95,19 +105,204 @@ struct RecordingsView: View {
         }
     }
 
+    // MARK: - 跨录音检索
+
+    private var isSearching: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: Theme.Spacing.s10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Theme.textTertiary)
+            // 占位文字自己画：SwiftUI 的 TextField 占位符用系统灰，压在 #1C1C1E 上
+            // 几乎看不见（截图里被判为「像一条静态标签」）。自己画能指定对比度
+            ZStack(alignment: .leading) {
+                if query.isEmpty {
+                    Text("在所有课里找一句话（例如：梯度下降）")
+                        .textStyle(Theme.Text.body)
+                        .foregroundStyle(Theme.textTertiary)
+                        .allowsHitTesting(false)
+                }
+                TextField("", text: $query)
+                    .textFieldStyle(.plain)
+                    .textStyle(Theme.Text.body)
+                    .onSubmit { runSearch() }
+                    .onChange(of: query) { _, _ in runSearch() }
+            }
+            if isSearching {
+                Button {
+                    query = ""
+                    hits = []
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .help("清空搜索")
+            }
+        }
+        .padding(.horizontal, Theme.Spacing.s10)
+        .padding(.vertical, Theme.Spacing.s6)
+        .background(Theme.Surface.card)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.input, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.input, style: .continuous)
+                .strokeBorder(Theme.Surface.cardBorder, lineWidth: 0.5)
+        )
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.Spacing.s20)
+        .padding(.bottom, Theme.Spacing.s6)
+    }
+
+    private var searchResults: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: Theme.Spacing.md) {
+                HStack(spacing: Theme.Spacing.s6) {
+                    Text("\(hits.count) 处命中 · \(TranscriptSearch.sections(hits).count) 节课")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.textSecondary)
+                    if indexBuildMillis > 0 {
+                        Text(String(format: "· 建索引 %.0f ms", indexBuildMillis))
+                            .textStyle(Theme.Text.meta)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Spacer()
+                }
+
+                if hits.isEmpty {
+                    Text("没有找到。换个说法试试——检索按两字一组匹配，长句比单词更容易命中。")
+                        .textStyle(Theme.Text.body)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.top, Theme.Spacing.s20)
+                } else {
+                    ForEach(TranscriptSearch.sections(hits), id: \.sessionID) { section in
+                        VStack(alignment: .leading, spacing: Theme.Spacing.s6) {
+                            Button {
+                                openSessionID = section.sessionID
+                            } label: {
+                                HStack(spacing: Theme.Spacing.s6) {
+                                    Text(section.course.isEmpty ? "未分类" : section.course)
+                                        .textStyle(Theme.Text.meta)
+                                        .foregroundStyle(Theme.textTertiary)
+                                    Text(section.title)
+                                        .textStyle(Theme.Text.bodyEmphasized)
+                                        .foregroundStyle(Theme.textPrimary)
+                                    Text(dateText(section.startedAt))
+                                        .textStyle(Theme.Text.meta)
+                                        .foregroundStyle(Theme.textTertiary)
+                                    Spacer()
+                                    Text("\(section.hits.count) 处")
+                                        .textStyle(Theme.Text.meta)
+                                        .foregroundStyle(Theme.textTertiary)
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("打开这节课")
+
+                            ForEach(Array(section.hits.prefix(6).enumerated()), id: \.offset) { _, hit in
+                                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s10) {
+                                    Text(stamp(hit.startMillis))
+                                        .textStyle(Theme.Text.meta)
+                                        .foregroundStyle(Theme.textTertiary)
+                                        .monospacedDigit()
+                                    Text(highlighted(hit))
+                                        .textStyle(Theme.Text.body)
+                                        .foregroundStyle(Theme.textSecondary)
+                                        .lineLimit(2)
+                                    Spacer()
+                                }
+                            }
+                            if section.hits.count > 6 {
+                                Text("另有 \(section.hits.count - 6) 处，打开这节课看全部")
+                                    .textStyle(Theme.Text.meta)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                        .padding(Theme.Spacing.md)
+                        .cardStyle(elevation: 1)
+                    }
+                }
+            }
+            .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+            .padding(.top, Theme.Spacing.s20)
+            .padding(.bottom, Theme.RecordingLayout.listBottom)
+        }
+    }
+
+    /// 命中词加粗。用原句的 String 找位置再换算到 AttributedString 的下标——
+    /// AttributedString 自己的 range(of:) 在深色主题里会被系统默认样式盖住颜色
+    private func highlighted(_ hit: TranscriptSearch.Hit) -> AttributedString {
+        var result = AttributedString(hit.snippet)
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty,
+              let range = hit.snippet.range(of: needle, options: [.caseInsensitive, .widthInsensitive])
+        else { return result }
+        let lower = hit.snippet.distance(from: hit.snippet.startIndex, to: range.lowerBound)
+        let length = hit.snippet.distance(from: range.lowerBound, to: range.upperBound)
+        guard let start = result.characters.index(result.startIndex, offsetBy: lower, limitedBy: result.endIndex),
+              let end = result.characters.index(start, offsetBy: length, limitedBy: result.endIndex)
+        else { return result }
+        result[start..<end].inlinePresentationIntent = .stronglyEmphasized
+        return result
+    }
+
+    private func stamp(_ millis: Int) -> String {
+        let total = max(0, millis) / 1000
+        return String(format: "%02d:%02d", total / 60, total % 60)
+    }
+
+    private func dateText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd"
+        return formatter.string(from: date)
+    }
+
+    /// 检索：索引懒建；录音条数变了就重建（增删录音后不用重启也能搜到）
+    private func runSearch() {
+        guard isSearching else { hits = []; return }
+        if searchIndex == nil || indexedCount != store.summaries.count {
+            let started = Date()
+            let docs: [TranscriptSearch.Doc] = store.summaries.compactMap { summary in
+                guard let session = store.session(id: summary.id) else { return nil }
+                var segments: [TranscriptSearch.Segment] = []
+                for part in session.parts {
+                    for segment in part.segments where segment.isFinal {
+                        segments.append(.init(startMillis: part.offsetMillis + segment.startTimeMillis,
+                                              text: segment.text))
+                    }
+                }
+                return TranscriptSearch.Doc(sessionID: session.id,
+                                            title: session.title.isEmpty ? "未命名" : session.title,
+                                            course: session.course,
+                                            startedAt: session.startedAt,
+                                            segments: segments)
+            }
+            searchIndex = TranscriptSearch.build(docs)
+            indexedCount = store.summaries.count
+            indexBuildMillis = Date().timeIntervalSince(started) * 1000
+        }
+        guard let index = searchIndex else { return }
+        hits = TranscriptSearch.search(query, in: index, limit: 60)
+    }
+
     // MARK: - 列表
 
     private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+            searchBar
 
-            if !store.questionOnlySummaries.isEmpty {
+            if isSearching {
+                searchResults
+            } else if !store.questionOnlySummaries.isEmpty {
                 questionOnlyCleanup
             }
 
-            if store.summaries.isEmpty && store.recoveryItems.isEmpty {
+            if !isSearching && store.summaries.isEmpty && store.recoveryItems.isEmpty {
                 emptyState
-            } else {
+            } else if !isSearching {
                 // 本周概览（P15-2）。放在标题与第一个分组之间，用留白 +
                 // 分隔线和列表分开。它是**读数**，不是一条录音，所以不套卡片。
                 // 没有数据时整条不渲染（见 `overviewStats`）
