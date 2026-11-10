@@ -743,6 +743,17 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 提问流程自检：--question-flow-selftest（B 包 §5 状态机 / §6.5 闸门 /
+        // §7 元问题表 / 拍板第 1 条占位会话）。离线：桩检索和桩模型，不联网、
+        // 不读真实库、不碰麦克风、不发声。注意名字比上面那条少一个 s：
+        // 那是数据层，这条是「点下去之后发生什么」
+        if CommandLine.arguments.contains("--question-flow-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            let result = QuestionFlowSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 说话人映射自检：--speaker-mapping-selftest [--session-file <会话 json>]
         // （纯函数 + 旧会话解码；不联网、不加载模型、不碰麦克风、不发声）
         //

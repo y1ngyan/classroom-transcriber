@@ -94,6 +94,13 @@ final class TranscriptionEngine {
     /// 本次开录的墙上时间（片段的 startedAt）
     private var partStartedAt: Date?
 
+    /// 本次开录的墙上时间，供提问页建占位会话时用（B 包拍板第 1 条）。
+    ///
+    /// 只读暴露，不改采集/落盘行为：占位会话的 `startedAt` 应该是**这节课
+    /// 开录的时刻**，不是「学生第一次点查答案」的时刻——后者会在课堂开始
+    /// 半小时后，列表上的时间就成了假的
+    var currentPartStartedAt: Date? { partStartedAt }
+
     // MARK: - 录制草稿（P9-1）
 
     /// 录制**途中**周期性交出快照，由 AppState 接到 `RecordingsStore.saveDraft`。

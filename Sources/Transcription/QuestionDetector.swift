@@ -504,3 +504,12 @@ private extension String {
         return s
     }
 }
+
+extension QuestionDetector {
+    /// 元问题过滤用的「知识锚点」（B 包设计稿 §7.5）。
+    ///
+    /// 检测器的规则词表是 private，而 `MetaQuestionFilter` 明确要求复用它
+    /// 的强疑问结构（不另抄一份、以免两边漂移），所以这里只暴露一份只读副本。
+    /// **不改任何检测行为**：检测器自己仍然只读同一份 `Rules.zhStrong`
+    static let metaAnchorTerms: [String] = Rules.zhStrong + Rules.zhStrongSoft
+}

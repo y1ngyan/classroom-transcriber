@@ -79,8 +79,12 @@ final class RecordingsStore {
     ///
     /// 返回会话 id ——引擎要拿它记在身上，下一次 stop 才知道自己
     /// 属于哪条会话
+    /// - Parameter questionSensitivity: 落盘时顺带把这一段里检测到的问题并进
+    ///   会话（只在会话已经回填过条目时做，见下方注释）。默认 `.off` 让
+    ///   自检和旧调用点行为不变
     @discardableResult
-    func ingest(_ draft: SessionDraft) -> RecordingSession {
+    func ingest(_ draft: SessionDraft,
+                questionSensitivity: QuestionSensitivity = .off) -> RecordingSession {
         var session: RecordingSession
         if let id = draft.sessionID, let existing = self.session(id: id) {
             session = existing
@@ -109,8 +113,85 @@ final class RecordingsStore {
         session.parts.append(part)
         session.updatedAt = Date()
 
+        // 实时期间问题页可能已经先建了占位会话并落过问题（版本已达标）。
+        // 那种会话**不会再走按需回填**（版本门槛拦着），所以这一段的提问
+        // 必须在这里并进去，否则「查完答案之后老师又问了几个问题」会丢。
+        //
+        // 版本没达标（0）的旧会话**不在这里盖章**：只并新片段会让「已回填」
+        // 变成谎话，旧片段的提问从此再也补不回来。留给按需要回填一次跑全量
+        if session.questionSchemaVersion >= LessonQuestionSchema.current {
+            mergeDetectedQuestions(in: part, into: &session,
+                                   sensitivity: questionSensitivity)
+        }
+
         save(session)
         return session
+    }
+
+    /// 把一段里检测到的提问并进会话（§6.3 入列去重，§7 元问题标记）。
+    ///
+    /// **按 `sourceSegmentID` 跳过已经入列的段**：实时期间问题页已经把它们
+    /// 落过一次了，再来一遍会把 `askedCount` 从 1 翻成 2——同一句话只说了
+    /// 一次，数字却是两次，学生看到的「本课重复 n 次」就成了假话。
+    private func mergeDetectedQuestions(
+        in part: RecordingPart,
+        into session: inout RecordingSession,
+        sensitivity: QuestionSensitivity
+    ) {
+        guard sensitivity != .off else { return }
+        let detector = QuestionDetector(sensitivity: sensitivity)
+        let known = Set(session.questions.compactMap(\.sourceSegmentID))
+        for segment in part.segments where !known.contains(segment.id) {
+            guard let hit = detector.detect(segment.text) else { continue }
+            let candidate = LessonQuestion(
+                text: hit.coreQuestion,
+                rawSentence: segment.text,
+                startTimeMillis: RecordingSession.absoluteRange(of: segment, in: part).lowerBound,
+                sourceSegmentID: segment.id,
+                level: hit.level,
+                filtered: MetaQuestionFilter.isMetaQuestion(hit.coreQuestion)
+            )
+            LessonQuestion.enqueue(candidate, into: &session.questions)
+        }
+    }
+
+    // MARK: - 占位会话（B 包拍板第 1 条）
+
+    /// 实时期间第一次查询时建一条**空占位会话**，让「答案落盘」在点击的
+    /// 瞬间就成立（崩溃不丢）。录制结束 `ingest` 带着同一个 id 追加片段，
+    /// 不会变成两条；如果最终没有片段，它留成一条「只有提问」的会话，
+    /// 由录音列表的「删除无录音的提问记录」清理
+    ///
+    /// `questionSchemaVersion` 直接盖当前版本：这条会话的提问由问题页
+    /// 实时并进来（见 `ingest` 的分支），不该再被按需回填重跑一遍
+    func createQuestionPlaceholder(startedAt: Date) -> UUID {
+        let now = Date()
+        let session = RecordingSession(
+            id: UUID(),
+            startedAt: startedAt,
+            updatedAt: now,
+            parts: [],
+            questionSchemaVersion: LessonQuestionSchema.current
+        )
+        save(session)
+        return session.id
+    }
+
+    /// 没有录音片段的会话（占位会话；理论上只有在实时期间查过答案、
+    /// 后来没录成才会出现）。列表页的清理入口只在这里读摘要，不解码正文
+    var questionOnlySummaries: [SessionSummary] {
+        summaries.filter { $0.partCount == 0 }
+    }
+
+    /// 删除所有「只有提问、没有录音」的会话。返回删掉几条。
+    ///
+    /// 用 `delete(id:)` 而不是 `deleteWithAudio`：这些会话没有片段，
+    /// 不存在 wav，而误删音频不可恢复——两个删除语义的边界不在这里松动
+    @discardableResult
+    func deleteQuestionOnlySessions() -> Int {
+        let ids = questionOnlySummaries.map(\.id)
+        for id in ids { delete(id: id) }
+        return ids.count
     }
 
     /// 编码 + 原子落盘的**唯一一处**实现。会话正文和录制草稿都走它——

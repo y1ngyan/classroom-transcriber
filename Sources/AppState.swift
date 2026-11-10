@@ -21,6 +21,10 @@ final class AppState {
     let punctuation = PunctuationStore()
     let upload = UploadStore()
     let recordings: RecordingsStore
+    /// 提问 → 查答案（B 包）。页面状态住在这里而不是视图里：切走标签页
+    /// 再回来视图会重建，而「正在查的那一行」不能因此丢掉（同 `settings`
+    /// 放在 AppState 的理由）
+    let questions: QuestionAnswerStore
     /// 说话人识别（C-3-2）。首跑就位、找 helper、落盘都在它里面；
     /// **它不自己写文件**，落盘走 `recordings.save`（`.atomic`，见那边的注释）
     let diarization: DiarizationStore
@@ -69,6 +73,11 @@ final class AppState {
         )
         self.recordings = recordings
         self.diarization = DiarizationStore(save: { recordings.save($0) })
+        // 必须在 `recordings` / `transcription` 之后建：它要拿同一份 store
+        // 和同一个引擎（占位会话的 id 要写回 `transcription.sessionID`）
+        self.questions = QuestionAnswerStore(
+            recordings: recordings, transcription: transcription
+        )
 
         AppConfig.writeTemplateIfMissing()
 
@@ -85,7 +94,11 @@ final class AppState {
         // 回去——「接着录」的下一次 stop 才知道该追加到哪条会话
         transcription.onSessionComplete = { [weak self] draft in
             guard let self else { return UUID() }
-            let session = self.recordings.ingest(draft)
+            // 灵敏度跟着这次录制走（起录那一刻定下来的那个），不是设置页的
+            // 当前值——中途改设置不该影响已经录完的这一段的提问识别
+            let session = self.recordings.ingest(
+                draft, questionSensitivity: self.transcription.questionSensitivity
+            )
 
             // 转录结束与录音落盘分开记：它们是两件事（一份音频可以转录失败
             // 但仍然存档，反过来也一样），判据要能分开数
