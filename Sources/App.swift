@@ -1978,6 +1978,26 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 转录导出自检：--transcript-export-selftest
+        // （纯本地：临时目录里写文件，不弹面板、不联网、不加载模型、不发声）
+        //
+        // 和 `--export-notes-selftest` 同一条规矩：退出码跟着红绿走。
+        // 四种格式的渲染全是纯函数，所以这条自检能把「序号、进位、跨小时、
+        // 空段、最后一句没结束时间、说话人为空」这些**用户真会撞上**的
+        // 形状一次钉住，而不只是在界面上点一遍看文件名出没出来
+        if CommandLine.arguments.contains("--transcript-export-selftest") {
+            setvbuf(stdout, nil, _IONBF, 0)
+            print("转录导出自检（纯本地 · 不弹面板、不联网、不加载模型、不发声）")
+            let result = TranscriptExporter.selfTest()
+            for line in result.lines { print(line) }
+            if result.failed == 0 {
+                print("✅ 转录导出自检通过（\(result.passed) 条）")
+            } else {
+                print("❌ 转录导出自检未通过（过 \(result.passed) / 红 \(result.failed)）")
+            }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         // 学习笔记自检：--study-notes-selftest
         // （离线：模型调用打桩，不联网、不花钱、不加载模型、不碰音频、不发声）
         //
@@ -2472,6 +2492,18 @@ enum EnvironmentChecks {
         for line in AppConfig.statusLines {
             lines.append("   \(line)")
         }
+
+        // 转录导出：四种格式的渲染全是纯函数，在这里跑一遍就能拿到红绿。
+        // **不另开一份夹具**：用的是 `TranscriptExporter.selfTest()`
+        // 自己那份，`--transcript-export-selftest` 打的也是它——
+        // 两处各写一份的话，「--selftest 绿、导出闸红」会变成查不出来的谜
+        lines.append("")
+        lines.append("📤 转录导出（SRT / VTT / Markdown / JSON）:")
+        let exportResult = TranscriptExporter.selfTest()
+        lines += exportResult.lines
+        lines.append(exportResult.failed == 0
+            ? "   ✅ 导出格式检查 \(exportResult.passed) 条全过"
+            : "   ❌ 导出格式检查：过 \(exportResult.passed) / 红 \(exportResult.failed)")
 
         lines.append("系统: \(ProcessInfo.processInfo.operatingSystemVersionString)")
         return lines
