@@ -33,3 +33,6 @@ AGENTS.md
 # 并行线构建目录
 build-lane/
 build-b/
+
+# 本地代理脚手架（不进公开仓库）
+.claude/

@@ -1,9 +1,9 @@
-# 脏数据 → trap 面清单（P6-2）
+# 脏数据 → 崩溃面清单
 
 **这份清单回答一个问题**：库里存着的那份数据（会话 JSON + wav），如果里面
 有两个数对不上，全项目哪些写法会**直接崩掉进程**。
 
-P6-2 的起点就是这一类的实例：C-4 查明 `WhisperEngine` 把 whisper 给的
+起点是一类的实例：C-4 查明 `WhisperEngine` 把 whisper 给的
 `t0`/`t1` 原样乘 10 落字段，没有 `t1 ≥ t0` 判定；一个反向段一路喂到
 `RecordingSession.absoluteRange` 的 `..<`，Swift 6 的带检查运算符
 `lower > upper` 直接 SIGTRAP（实测退出码 133，release 下**一个字都不打印**）。

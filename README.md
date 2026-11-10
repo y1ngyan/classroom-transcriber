@@ -28,14 +28,15 @@
 ## 功能状态
 
 - ✅ 实时转录（Apple Speech 或 whisper.cpp 本地模型，可切换）
+- ✅ 点句跳转音频、双击就地改错（人工改过的句子，重转不会覆盖）
 - ✅ 课后重转（large-v3）+ 出处可查（哪一段来自哪个模型、哪个窗口）
 - ✅ 静音门控（可关，设置页有开关；环境变量 `CLASSROOM_SPEECH_GATE` 可强制覆盖）
 - ✅ 说话人分离（离线，FluidAudio helper 子进程，段级编号）
 - ✅ 事实核查（逐段或自动，来源可点）
-- ✅ 课后学习笔记 + Markdown 导出
-- ✅ 术语表（AI 联网生成，可作 whisper `initial_prompt`）
-- 🚧 老师提问 → 学生自主查答案（数据层已完成，界面在开发）
-- 🚧 Windows 版（见 `windows/`，目前是可验证的最小切片）
+- ✅ 课后学习笔记 + Markdown / Obsidian 导出（术语页、课程索引一并生成）
+- ✅ 转录导出：SRT / VTT / Markdown / JSON，带说话人和时间戳
+- ✅ 老师提问 → 学生自主查答案（逐条或批量，答案必标来源）
+- 🚧 Windows 版（见 `windows/`，目前是可验证的最小切片：重采样 + 滑窗 + 门控 + 合并）
 - ❌ 云端同步 / 账号 / 移动端（不在路线图内）
 
 ## 构建（macOS 26+，无需完整 Xcode）
@@ -54,9 +55,13 @@ open build/ClassroomTranscriber.app
 无头自检（不需要 GUI、不需要麦克风）：
 
 ```bash
-build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber --selftest
-build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber --speech-gate-selftest
-build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber --ui-snapshot /tmp/ui-snap
+BIN=build/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber
+$BIN --selftest                  # 主自检（含提问、导出、编辑持久化）
+$BIN --speech-gate-selftest      # 静音门控判据
+$BIN --questions-selftest        # 提问数据层
+$BIN --transcript-export-selftest # SRT/VTT/Markdown/JSON
+$BIN --obsidian-selftest         # Obsidian 导出（临时目录）
+$BIN --ui-snapshot /tmp/ui-snap  # 界面快照（渲 PNG，不开窗口）
 ```
 
 ## 目录
