@@ -60,6 +60,11 @@ final class RecordingsStore {
         return decoded
     }
 
+    /// wav 所在目录。播放器要按片段文件名自己拼 URL（多片段会话不给它
+    /// 一份「所有 wav 的列表」就播不了），而 `recordingsDirectory` 是
+    /// private——这里只读地开一个口，不把目录本身暴露成可写的状态
+    var audioDirectory: URL { recordingsDirectory }
+
     /// 列表缩略图要的 wav 路径（P15-1）。
     ///
     /// 正常路径只读摘要里的 `audioFileName`，不解码正文。旧 index.json
@@ -245,6 +250,106 @@ final class RecordingsStore {
                 .init("总段数", session.segmentCount),
             ])
         }
+    }
+
+    // MARK: - 人工改错（P17）
+
+    /// 一次编辑的「改之前」现场。只存 text / edited 两样：
+    /// 一次改错要撤销的也只有这两样，别的不该被连带回滚。
+    ///
+    /// `appliedText` 用来兜住「改完又发生了重转」：撤销时磁盘上的文本
+    /// 已经不是这次写进去的那句，就不该把旧文本硬盖上去。
+    struct SegmentEditSnapshot: Equatable {
+        let sessionID: UUID
+        let partID: UUID
+        let segmentID: UUID
+        let previousText: String
+        let previousEdited: Bool
+        let appliedText: String
+    }
+
+    /// 上一步人工修改。**只留一步**（派单写的是「至少支持上一步」）：
+    /// 再往上就是一条无限长的 undo 栈，而详情页真正需要的只是
+    /// 「刚刚手滑改错了，退回去」
+    private(set) var lastSegmentEdit: SegmentEditSnapshot?
+
+    /// 把某一句改成用户输入的文字，并打上「人工改过」标记。
+    ///
+    /// 空文本/只改空白不落盘：一句空话既没有信息量，又会在下一次重转
+    /// 时因为「人工文本优先」把一段好好的识别结果永久占住。取消编辑走
+    /// UI 的 Esc，不走这里
+    ///
+    /// 返回是否真的写入。`false` 包括：会话/片段/段找不到、文本没变、
+    /// 文本是空的——这些都不该在界面上表现成「保存成功」
+    @discardableResult
+    func updateSegmentText(sessionID: UUID,
+                           partID: UUID,
+                           segmentID: UUID,
+                           text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var session = session(id: sessionID),
+              let partIndex = session.parts.firstIndex(where: { $0.id == partID }),
+              let segmentIndex = session.parts[partIndex].segments
+                .firstIndex(where: { $0.id == segmentID })
+        else { return false }
+
+        let old = session.parts[partIndex].segments[segmentIndex]
+        guard old.text != trimmed else { return false }
+
+        lastSegmentEdit = SegmentEditSnapshot(
+            sessionID: sessionID,
+            partID: partID,
+            segmentID: segmentID,
+            previousText: old.text,
+            previousEdited: old.edited,
+            appliedText: trimmed
+        )
+
+        session.parts[partIndex].segments[segmentIndex].text = trimmed
+        session.parts[partIndex].segments[segmentIndex].edited = true
+        session.updatedAt = Date()
+        save(session)
+
+        DiagnosticLog.info(.transcription, "人工修改转录段", fields: [
+            .init("sessionId", sessionID),
+            .init("segmentId", segmentID),
+            .init("原字数", old.text.count),
+            .init("新字数", trimmed.count),
+        ])
+        return true
+    }
+
+    /// 撤销 `updateSegmentText` 的上一次写入。返回是否撤销成功。
+    ///
+    /// 磁盘上的文本已经不等于这次写进去的那句时**不撤销**：那说明之后
+    /// 又发生了重转或第二次编辑，拿一个更旧的快照盖回去会静默吃掉别人的改动
+    @discardableResult
+    func undoLastSegmentEdit() -> Bool {
+        guard let edit = lastSegmentEdit,
+              var session = session(id: edit.sessionID),
+              let partIndex = session.parts.firstIndex(where: { $0.id == edit.partID }),
+              let segmentIndex = session.parts[partIndex].segments
+                .firstIndex(where: { $0.id == edit.segmentID })
+        else { return false }
+
+        let current = session.parts[partIndex].segments[segmentIndex]
+        guard current.text == edit.appliedText else {
+            lastSegmentEdit = nil
+            return false
+        }
+
+        session.parts[partIndex].segments[segmentIndex].text = edit.previousText
+        session.parts[partIndex].segments[segmentIndex].edited = edit.previousEdited
+        session.updatedAt = Date()
+        lastSegmentEdit = nil
+        save(session)
+
+        DiagnosticLog.info(.transcription, "撤销人工修改", fields: [
+            .init("sessionId", edit.sessionID),
+            .init("segmentId", edit.segmentID),
+        ])
+        return true
     }
 
     // MARK: - 录制草稿（P9-1）
@@ -553,6 +658,7 @@ final class RecordingsStore {
         var done: [(index: Int, segments: [TranscriptSegment])] = []
         var skipped: [String] = []
         var cancelled = false
+        var preservedEdits = 0
 
         for (index, part) in session.parts.enumerated() {
             if Task.isCancelled { cancelled = true; break }
@@ -576,7 +682,22 @@ final class RecordingsStore {
                 url: url, whisper: whisper, engine: engine, partIndex: index, partCount: total
             ) {
             case .success(let segments):
-                done.append((index, segments))
+                // 用户手改过的句子在这一步保住（P17）。重转是整段覆盖，
+                // 不做这一层的话，人工纠正的错字会被无声地换回识别结果。
+                // 只在内存里换文本，落盘仍走下面统一的 save
+                let merged = SegmentEditPreserver.merge(
+                    new: segments, old: session.parts[index].segments
+                )
+                for item in merged.preserved {
+                    DiagnosticLog.info(.transcription, "重转保留人工修改", fields: [
+                        .init("sessionId", sessionID),
+                        .init("新段起点", item.newStartMillis),
+                        .init("原段起点", item.oldStartMillis),
+                        .init("文本", String(item.text.prefix(24))),
+                    ])
+                }
+                preservedEdits += merged.preserved.count
+                done.append((index, merged.segments))
             case .cancelled:
                 cancelled = true
             case .failed(let message):
@@ -598,6 +719,9 @@ final class RecordingsStore {
 
         var notes = ["模型 \(engine.fileName)"]
         if !done.isEmpty { notes.append("已重转 \(done.count) 段录音") }
+        // 保留了几条必须说出来：用户只看到「重转完成」时，会以为人工修改
+        // 已经被新结果覆盖了；这条消息是唯一能告诉他「还在」的地方
+        if preservedEdits > 0 { notes.append("已保留 \(preservedEdits) 句人工修改") }
         if cancelled { notes.append("⏹ 已取消") }
         notes.append(contentsOf: skipped.map { "⚠️ \($0)" })
         if done.isEmpty {

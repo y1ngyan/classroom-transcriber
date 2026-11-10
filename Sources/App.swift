@@ -2382,6 +2382,9 @@ struct ClassroomTranscriberApp: App {
 
 /// 工具链与语音能力探测，`App` 与 UI 共用
 enum EnvironmentChecks {
+    /// `@MainActor`：下面「人工改错」一节要构造真实的 `RecordingsStore`
+    /// （临时目录）。App 的 init 本来就在主 actor 上，这里不改变调用时机
+    @MainActor
     static func run() -> [String] {
         var lines: [String] = []
 
@@ -2455,6 +2458,14 @@ enum EnvironmentChecks {
         for (name, needle) in expectations {
             lines.append("   \(html.contains(needle) ? "✅" : "❌") \(name)  \(needle)")
         }
+
+        lines.append("")
+        lines.append("✏️ 人工改错持久化（P17）:")
+        let editCheck = SegmentEditSelfTest.run()
+        lines.append(contentsOf: editCheck.lines)
+        lines.append(editCheck.failed == 0
+            ? "   ✅ 共 \(editCheck.passed) 条全绿"
+            : "   ❌ 红 \(editCheck.failed) 条 / 共 \(editCheck.passed + editCheck.failed) 条")
 
         lines.append("")
         lines.append("🔑 API 配置:")

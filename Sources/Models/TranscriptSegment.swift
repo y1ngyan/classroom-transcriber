@@ -50,6 +50,16 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
     /// 与 `speakerId` 相互独立：可以「有归属 + 多人」，也可以「无归属 + 多人」
     var speakerMixed: Bool = false
 
+    /// 这一段的文本被用户手工改过（P17）。
+    ///
+    /// 为什么要落盘：重转是整段覆盖写入的，如果不留这个标记，用户改过的字
+    /// 会在下一次重转时**无声地**被识别结果换掉。`RecordingsStore.retranscribe`
+    /// 靠它挑出「该保留人工文本」的段（见 `SegmentEditPreserver`）。
+    ///
+    /// 默认 false + `decodeIfPresent` 兜底：P17 之前的存档没有这个键，
+    /// 读出来必须是「没改过」，而不是整条会话解不出来
+    var edited: Bool = false
+
     init(
         id: UUID = UUID(),
         text: String,
@@ -88,6 +98,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
         case id, text, isFinal, startTimeMillis, endTimeMillis, timestamp, languages
         case questionLevel, coreQuestion, qualityGrade
         case speakerId, speakerOverlapRatio, speakerMixed
+        case edited
     }
 
     init(from decoder: any Decoder) throws {
@@ -103,6 +114,7 @@ struct TranscriptSegment: Identifiable, Codable, Equatable {
         // 后加的非可选字段：缺键回落到属性默认值
         questionLevel = try c.decodeIfPresent(Int.self, forKey: .questionLevel) ?? 0
         speakerMixed = try c.decodeIfPresent(Bool.self, forKey: .speakerMixed) ?? false
+        edited = try c.decodeIfPresent(Bool.self, forKey: .edited) ?? false
         // 后加的可选字段：缺键就是 nil（也正是「没标」「没评」的原意）
         coreQuestion = try c.decodeIfPresent(String.self, forKey: .coreQuestion)
         qualityGrade = try c.decodeIfPresent(TranscriptGrade.self, forKey: .qualityGrade)

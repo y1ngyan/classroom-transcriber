@@ -1,6 +1,17 @@
 import SwiftUI
 import AppKit
 
+/// 快照专用的交互态预览（P17）。
+///
+/// 离屏 `NSHostingView` 拍不到 hover / 点击 / 播放这类交互态（见 `UISnapshot`
+/// 的说明），而「编辑中」「播放中」恰恰是 P17 要验的两个样子。这里把状态
+/// 显式摆出来，生产代码永远传 nil——**不是为了给 App 加一个「预览模式」**，
+/// 是让快照能拍到一个真实存在的状态，而不是另画一套假界面
+struct TranscriptInteractionPreview: Equatable {
+    var playingSegmentID: UUID?
+    var editingSegmentID: UUID?
+}
+
 /// 单条录音的详情：转录全文 + 对这条录音的操作。
 ///
 /// 转录按「片段」分组展示——「接着录」会把多次录制拼进同一条会话，
@@ -11,6 +22,8 @@ struct RecordingDetailView: View {
     @Environment(AppState.self) private var appState
     let session: RecordingSession
     let onBack: () -> Void
+    /// 快照用；nil = 正常交互。见 `TranscriptInteractionPreview`
+    var preview: TranscriptInteractionPreview? = nil
 
     @State private var isRenaming = false
     @State private var isSettingCourse = false
@@ -18,7 +31,67 @@ struct RecordingDetailView: View {
     @State private var draftTitle = ""
     @State private var draftCourse = ""
 
+    // P17：行内改错 + 播放跟随
+    @State private var editingSegmentID: UUID?
+    @State private var draftText = ""
+    /// 用户手动滚过列表就不再跟着播放位置滚——**别抢用户的滚动条**。
+    /// 点句子 / 空格 / 方向键都会重新打开跟随（那是用户主动要定位）
+    @State private var isFollowingPlayback = true
+    @FocusState private var isTranscriptFocused: Bool
+    @FocusState private var isEditorFocused: Bool
+
+    /// 显式 init 只为了快照预览：编辑态要**在第一次布局前**就成立。
+    /// `onAppear` 在离屏 `NSHostingView` 里不保证先于 `cacheDisplay` 跑，
+    /// 靠它设状态会让编辑态在快照里时有时无
+    init(session: RecordingSession,
+         onBack: @escaping () -> Void,
+         preview: TranscriptInteractionPreview? = nil) {
+        self.session = session
+        self.onBack = onBack
+        self.preview = preview
+        let editingText = preview?.editingSegmentID.flatMap { id in
+            session.parts.flatMap(\.segments).first { $0.id == id }?.text
+        } ?? ""
+        _editingSegmentID = State(initialValue: preview?.editingSegmentID)
+        _draftText = State(initialValue: editingText)
+    }
+
     private var store: RecordingsStore { appState.recordings }
+    private var player: TranscriptPlayer { appState.transcriptPlayer }
+
+    /// 快照预览里「正在播放」这一档。生产路径看播放器真实状态
+    private var isShowingPlayingState: Bool {
+        if let preview { return preview.playingSegmentID != nil }
+        return player.isPlaying
+    }
+
+    private var playbackHint: String {
+        if isShowingPlayingState {
+            return "空格 播放/暂停 · ←/→ 前后一句 · 双击改错"
+        }
+        return session.parts.contains { $0.fileName != nil }
+            ? "点击句子跳转播放 · 空格 播放/暂停 · ←/→ 前后一句 · 双击改错"
+            : "双击句子可以改错 · 这条录音没有存档音频"
+    }
+
+    /// 当前播放位置落在哪一句。按**会话时间轴**（绝对毫秒）找，和
+    /// `TranscriptLine` 显示的时间戳同一套口径
+    private var playingSegmentID: UUID? {
+        if let preview { return preview.playingSegmentID }
+        let millis = player.currentTimeMillis
+        guard player.isPlaying || millis > 0 else { return nil }
+        let ordered = orderedSegments
+        return ordered.last { $0.startTimeMillis <= millis && millis < $0.endTimeMillis }?.id
+            ?? ordered.last { $0.startTimeMillis <= millis }?.id
+    }
+
+    /// 跨片段的连续顺序。`parts` 之间本来就按时间排，这里再排一次
+    /// 是因为「前后一句」的判据必须只有一处
+    private var orderedSegments: [TranscriptSegment] {
+        session.parts
+            .flatMap { part in part.segments.map { $0.absoluteCopy(in: part) } }
+            .sorted { $0.startTimeMillis < $1.startTimeMillis }
+    }
 
     /// 「本节课提问 N 条」里的 N。和 `SessionSummary.questionCount` 同一套
     /// 口径：回填过的会话数问题条目（去重后），旧会话回落到段落计数——
@@ -36,6 +109,24 @@ struct RecordingDetailView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        // 键盘（P17）：空格播放/暂停，←/→ 前后一句。
+        // 编辑时 TextField 会拿走焦点，这里三个 handler 再看一眼
+        // `editingSegmentID`，回车打字不会被抢走
+        .focusable()
+        .focused($isTranscriptFocused)
+        .focusEffectDisabled()
+        .onKeyPress(.space) { handleSpace() }
+        .onKeyPress(.leftArrow) { jumpSegment(by: -1) ? .handled : .ignored }
+        .onKeyPress(.rightArrow) { jumpSegment(by: 1) ? .handled : .ignored }
+        // 音频装载放在 `.task` 而不是 init：`AVAudioPlayer` 只在真的要
+        // 播的时候才建，进详情页不碰磁盘也不碰输出设备
+        .task(id: session.id) {
+            player.load(session: session, audioDirectory: store.audioDirectory)
+        }
+        .onAppear(perform: applyPreviewState)
+        // 离开只暂停、不 stop：从详情页返回列表再点回来，位置还在。
+        // 停止由「换会话」的 `load` 负责
+        .onDisappear { player.pause() }
         .sheet(isPresented: $isRenaming) { renameSheet }
         .sheet(isPresented: $isSettingCourse) { courseSheet }
         .confirmationDialog(
@@ -159,6 +250,16 @@ struct RecordingDetailView: View {
                 }
                 .buttonStyle(.plain)
 
+                // 撤销上一步人工改错（P17）。只在这一条会话刚被改过时出现：
+                // 常驻一根灰着的「撤销」等于给每个用户一个永远点不亮的控件
+                if store.lastSegmentEdit?.sessionID == session.id {
+                    Button { store.undoLastSegmentEdit() } label: {
+                        Text("撤销上次修改").textStyle(Theme.Text.caption)
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 // 重转：覆盖式操作，先确认再跑
                 Button { isConfirmingRetranscribe = true } label: {
                     Text("重新转录").textStyle(Theme.Text.caption)
@@ -212,6 +313,21 @@ struct RecordingDetailView: View {
                     .textSelection(.enabled)
             }
 
+            // 操作说明（P17）。这几件事没有可见按钮，不写出来用户不会知道；
+            // 「正在播放」跟着它走，免得播放时屏幕上没有任何状态反馈
+            HStack(spacing: Theme.Spacing.sm) {
+                if isShowingPlayingState {
+                    Text("正在播放")
+                        .font(Theme.Text.caption.font.weight(.medium))
+                        .foregroundStyle(Theme.accent)
+                        .monospacedDigit()
+                }
+                Text(playbackHint)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+            }
+
             if !session.course.isEmpty {
                 HStack(spacing: Theme.Spacing.xs) {
                     Image(systemName: "folder").font(.system(size: 10))
@@ -225,8 +341,9 @@ struct RecordingDetailView: View {
     // MARK: - 转录正文
 
     private var transcript: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
                 // 课后笔记在转录**上面**（拍板 6a）：用户进这条录音，
                 // 先要的是「这堂课讲了什么」，全文往后翻才有用。
                 // 与转录之间隔着 `Theme.Spacing.xxl`（80）——分组靠留白，
@@ -242,9 +359,22 @@ struct RecordingDetailView: View {
                     partSection(index: index, part: part)
                 }
             }
-            .padding(.horizontal, Theme.pagePadding)
-            .padding(.top, Theme.Spacing.lg)
-            .padding(.bottom, Theme.Spacing.xxl)
+                .padding(.horizontal, Theme.pagePadding)
+                .padding(.top, Theme.Spacing.lg)
+                .padding(.bottom, Theme.Spacing.xxl)
+            }
+            // 用户一上手滚，就交出跟随权（P17 派单：不要强制滚到打断
+            // 手动浏览的位置）。只认 `.interacting`：程序自己触发的滚动
+            // 是 `.animating`，不能把它当成用户操作，否则跟随只生效一次
+            .onScrollPhaseChange { _, phase in
+                if phase == .interacting { isFollowingPlayback = false }
+            }
+            .onChange(of: playingSegmentID) { _, id in
+                guard let id, isFollowingPlayback, editingSegmentID == nil else { return }
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
         }
     }
 
@@ -283,21 +413,168 @@ struct RecordingDetailView: View {
             } else {
                 VStack(alignment: .leading, spacing: Theme.segmentSpacing) {
                     ForEach(part.segments) { segment in
-                        // 复用转录页的展示组件：质量标记、提问标记、
-                        // 语义切分、时间戳的样式全都一致。
-                        // 时间戳传的是**会话时间轴**上的绝对位置——
-                        // 多片段拼接时不能显示片段内的相对时间
-                        TranscriptLine(
-                            segment: segment.absoluteCopy(in: part),
-                            attachments: [],
-                            // 说话人字段在 `absoluteCopy` 里原样带过来
-                            // （它是 `var copy = self`），所以这里直接用原段取
-                            speakerLabel: SpeakerLabel.text(for: segment)
-                        )
+                        if editingSegmentID == segment.id {
+                            segmentEditor(segment: segment, part: part)
+                                .id(segment.id)
+                        } else {
+                            // 复用转录页的展示组件：质量标记、提问标记、
+                            // 语义切分、时间戳的样式全都一致。
+                            // 时间戳传的是**会话时间轴**上的绝对位置——
+                            // 多片段拼接时不能显示片段内的相对时间
+                            TranscriptLine(
+                                segment: segment.absoluteCopy(in: part),
+                                attachments: [],
+                                // 说话人字段在 `absoluteCopy` 里原样带过来
+                                // （它是 `var copy = self`），所以这里直接用原段取
+                                speakerLabel: SpeakerLabel.text(for: segment),
+                                isPlaying: playingSegmentID == segment.id,
+                                // 详情页关掉拖选：见 `allowsTextSelection`
+                                allowsTextSelection: false
+                            )
+                            .id(segment.id)
+                            .contentShape(Rectangle())
+                            // 双击改错，单击跳播。`exclusively` 让双击优先：
+                            // 两个独立的 onTapGesture(count:) 叠在一起时，
+                            // 双击的第一下会先触发单击（于是用户每次想改错
+                            // 都会先播放一遍）
+                            .gesture(
+                                TapGesture(count: 2)
+                                    .onEnded { beginEditing(segment) }
+                                    .exclusively(
+                                        before: TapGesture(count: 1)
+                                            .onEnded { play(segmentID: segment.id) }
+                                    )
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+
+    // MARK: - 行内改错（P17）
+
+    private func segmentEditor(segment: TranscriptSegment, part: RecordingPart) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s6) {
+            HStack(spacing: Theme.Spacing.sm) {
+                Text(segment.absoluteCopy(in: part).formattedTimestamp)
+                    .font(Theme.Text.meta.font.monospacedDigit())
+                    .foregroundStyle(Theme.textSupporting)
+                Text("编辑中 · 回车保存 · Esc 取消")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+            }
+
+            // 单行 TextField 而不是 TextEditor：回车必须是「保存」，
+            // 多行输入会把回车吃掉变成换行，用户就永远不知道该怎么提交。
+            // 长句横向滚动，好在课堂转录单段很少长到放不下
+            TextField("", text: $draftText)
+                .textFieldStyle(.plain)
+                .font(Theme.Text.summary.font)
+                .foregroundStyle(Theme.textPrimary)
+                .padding(Theme.Spacing.sm)
+                .background {
+                    RoundedRectangle(cornerRadius: Theme.Spacing.sm)
+                        .fill(Theme.backgroundSecondary)
+                }
+                .overlay {
+                    // 编辑框的描边是**功能**不是装饰：离屏快照里系统焦点环
+                    // 和插入光标都可能画不出来，这根 1.5pt accent 边是
+                    // 「正在编辑」唯一可靠的视觉信号
+                    RoundedRectangle(cornerRadius: Theme.Spacing.sm)
+                        .stroke(Theme.accent, lineWidth: 1.5)
+                }
+                .focused($isEditorFocused)
+                .onSubmit(commitEdit)
+                .onExitCommand(perform: cancelEdit)
+        }
+        .onAppear { isEditorFocused = true }
+    }
+
+    private func beginEditing(_ segment: TranscriptSegment) {
+        // 改的时候不播：高亮每几秒跳一次，编辑框跟着晃，两个都在抢注意力
+        player.pause()
+        draftText = segment.text
+        editingSegmentID = segment.id
+        isTranscriptFocused = false
+    }
+
+    private func commitEdit() {
+        guard let id = editingSegmentID, let part = part(containingSegment: id) else {
+            cancelEdit()
+            return
+        }
+        // 文本没变 / 被清空时 store 返回 false 并不落盘；界面上仍然退出编辑
+        // ——「我看了看没改」不该把人卡在编辑框里
+        store.updateSegmentText(
+            sessionID: session.id, partID: part.id, segmentID: id, text: draftText
+        )
+        editingSegmentID = nil
+        isEditorFocused = false
+        isTranscriptFocused = true
+    }
+
+    private func cancelEdit() {
+        editingSegmentID = nil
+        draftText = ""
+        isEditorFocused = false
+        isTranscriptFocused = true
+    }
+
+    /// 找到段所在的片段：编辑和播放都要拿片段（一个取 partID，
+    /// 一个取 `offsetMillis` 换算绝对时间）
+    private func part(containingSegment id: UUID) -> RecordingPart? {
+        session.parts.first { part in part.segments.contains { $0.id == id } }
+    }
+
+    // MARK: - 播放（P17）
+
+    private func play(segmentID: UUID) {
+        guard player.hasAudio,
+              let part = part(containingSegment: segmentID),
+              let segment = part.segments.first(where: { $0.id == segmentID })
+        else { return }
+        isFollowingPlayback = true
+        isTranscriptFocused = true
+        player.seek(
+            toMillis: segment.absoluteCopy(in: part).startTimeMillis,
+            play: true
+        )
+    }
+
+    /// ←/→。返回是否处理——没有音频时把按键放回系统（否则方向键
+    /// 会被吞掉，用户以为键盘坏了）
+    private func jumpSegment(by offset: Int) -> Bool {
+        guard editingSegmentID == nil, player.hasAudio else { return false }
+        let ordered = orderedSegments
+        guard !ordered.isEmpty else { return false }
+
+        let currentIndex = ordered.lastIndex {
+            $0.startTimeMillis <= player.currentTimeMillis
+        }
+        // 当前时间在第一句之前时，前后两个方向都从第一句起（夹取会处理）
+        let targetIndex = (currentIndex ?? -1) + offset
+        let target = ordered[min(max(targetIndex, 0), ordered.count - 1)]
+
+        isFollowingPlayback = true
+        isTranscriptFocused = true
+        player.seek(toMillis: target.startTimeMillis, play: true)
+        return true
+    }
+
+    private func handleSpace() -> KeyPress.Result {
+        guard editingSegmentID == nil, player.hasAudio else { return .ignored }
+        isFollowingPlayback = true
+        isTranscriptFocused = true
+        player.togglePlayPause()
+        return .handled
+    }
+
+    /// 快照预览：编辑态已由 `init` 摆好，这里只负责让真实页面拿到键盘焦点
+    private func applyPreviewState() {
+        guard preview == nil else { return }
+        isTranscriptFocused = true
     }
 
     private func revealAudio() {

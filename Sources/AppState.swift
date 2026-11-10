@@ -25,6 +25,10 @@ final class AppState {
     /// 再回来视图会重建，而「正在查的那一行」不能因此丢掉（同 `settings`
     /// 放在 AppState 的理由）
     let questions: QuestionAnswerStore
+    /// 转录详情页的音频播放器（P17）。放在 AppState 而不是详情页的
+    /// `@State`：整个仓库只该有一个 `AVAudioPlayer`，进出详情页、切标签页
+    /// 都沿用同一个实例（理由见 `TranscriptPlayer` 的注释）
+    let transcriptPlayer = TranscriptPlayer()
     /// 说话人识别（C-3-2）。首跑就位、找 helper、落盘都在它里面；
     /// **它不自己写文件**，落盘走 `recordings.save`（`.atomic`，见那边的注释）
     let diarization: DiarizationStore

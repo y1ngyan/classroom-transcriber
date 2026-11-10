@@ -128,6 +128,15 @@ enum UISnapshot {
                       "提问汇总 = 1 已查 / 1 待查",
                       detail: "（实得 \(populated.questions.answeredCount) / \(populated.questions.pendingCount)）")
 
+        // P17 的详情页夹具：取最新那条录音。第一条会话在 `seedRecordings`
+        // 里有 4 段，够摆「播放某一句」和「编辑某一句」两种状态
+        let detailSession = populated.recordings.summaries.first
+            .flatMap { populated.recordings.session(id: $0.id) }
+        let detailSegments = detailSession?.parts.first?.segments ?? []
+        failure.check(detailSegments.count >= 3,
+                      "转录详情夹具至少 3 段（够摆编辑/播放两种态）",
+                      detail: "（实得 \(detailSegments.count) 段）")
+
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
         // ── 渲染 ──
@@ -138,7 +147,7 @@ enum UISnapshot {
         //     装得下时列表按自身高度停在顶部，快照展示的就是真实使用中
         //     「滚到末尾」的那一个静止状态，且最后一张卡片与底栏之间留出安全区。
         // 离屏宿主不能滚（见 `renderBottom` 的注释），只能把宿主加高再截最后一段
-        let allScreens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
+        var allScreens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = [
             ("transcription", AnyView(TranscriptionView().environment(populated)), 980),
             ("fact-check", AnyView(FactCheckView().environment(populated)), nil),
             ("notes", AnyView(NotesView().environment(populated)), nil),
@@ -150,6 +159,34 @@ enum UISnapshot {
             ("recordings", AnyView(RecordingsView().environment(populated)), nil),
             ("recordings-empty", AnyView(RecordingsView().environment(empty)), nil),
         ]
+
+        // P17：详情页的两种交互态。宿主加高到整页装得下，`renderBottom`
+        // 再裁出底部一段——页头 + 课后笔记 + 说话人面板之后才是转录正文，
+        // 760pt 的普通画布只拍得到面板
+        if let detailSession, detailSegments.count >= 3 {
+            allScreens.append((
+                "transcript-playing",
+                AnyView(RecordingDetailView(
+                    session: detailSession,
+                    onBack: {},
+                    preview: TranscriptInteractionPreview(
+                        playingSegmentID: detailSegments[1].id
+                    )
+                ).environment(populated)),
+                1600
+            ))
+            allScreens.append((
+                "transcript-editing",
+                AnyView(RecordingDetailView(
+                    session: detailSession,
+                    onBack: {},
+                    preview: TranscriptInteractionPreview(
+                        editingSegmentID: detailSegments[2].id
+                    )
+                ).environment(populated)),
+                1600
+            ))
+        }
 
         // 分屏渲染开关。做成环境变量而不是新 CLI 参数：
         // `--ui-snapshot` 的解析在 `App.swift`，本包不许改它
@@ -167,6 +204,7 @@ enum UISnapshot {
         let onlyRecordingsTwo = only == "p15-1" || only == "p15-2"
         let onlyTimeline = only == "p15-3"
         let onlyQuestions = only == "p16-1"
+        let onlyEdit = only == "p17"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
@@ -185,6 +223,9 @@ enum UISnapshot {
             }
             if onlyQuestions {
                 return allScreens.filter { $0.name == "questions" }
+            }
+            if onlyEdit {
+                return allScreens.filter { $0.name.hasPrefix("transcript-") }
             }
             return allScreens
         }()
@@ -210,6 +251,10 @@ enum UISnapshot {
         }
         if onlyQuestions {
             print("  模式：只渲提问屏 2 张（UI_SNAPSHOT_ONLY=p16-1）")
+            print("")
+        }
+        if onlyEdit {
+            print("  模式：只渲详情页编辑/播放 4 张（UI_SNAPSHOT_ONLY=p17）")
             print("")
         }
 
@@ -334,7 +379,8 @@ enum UISnapshot {
         let schemePair = onlyTimeline
             ? "transcription"
             : (onlyQuestions ? "questions"
-                : ((onlyFive || onlySettings) ? "settings" : "recordings"))
+                : (onlyEdit ? "transcript-playing"
+                    : ((onlyFive || onlySettings) ? "settings" : "recordings")))
         if let light = written["\(schemePair)-light.png"],
            let dark = written["\(schemePair)-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
@@ -370,7 +416,9 @@ enum UISnapshot {
             // 「段落透明」「发丝线在」在下面的自检 ⑭ 里。
             // 提问页同理：§3.2 明确要求 `LazyVStack` + `Separator`，
             // 不用卡片、不用底色、不用边框，这里没有卡片可判
-            if onlyTimeline || name.hasPrefix("questions") {
+            // P17 的两张详情页快照同理：这一屏没有卡片可判（面板卡片
+            // 早就有自己的判据），这里只跳过「卡片分离」这一组
+            if onlyTimeline || name.hasPrefix("questions") || name.hasPrefix("transcript-") {
                 continue
             }
             if name.hasSuffix("-dark.png") {
@@ -596,6 +644,55 @@ enum UISnapshot {
                 failure.check(green > 20,
                               "\(imageName) 画出了成功绿（「有答案」状态标记）",
                               detail: "（绿色像素 \(green) 个）")
+            }
+        }
+
+        // ── 自检 ⑮：详情页的编辑态 / 播放态（P17）──
+        //
+        // 两张图必须各自证明自己的那一面，并且**互相不能证明对方**：
+        //   · 编辑态靠 1.5pt accent 描边——它在整行上是一条连续的蓝线，
+        //     正文里的英文单词虽然也是 accent 色，但最长连不到 600pt；
+        //   · 播放态靠 10% accent 淡底——它是一整块蓝灰，按「一行里
+        //     60% 的采样点都是蓝偏色且亮度离页面底足够远」认。
+        //     编辑框的描边只有两三像素高，凑不满 30 行。
+        // 两条都做了反向判据（编辑图里不许有高亮块、播放图里不许有长描边），
+        // 否则「两张图其实一样」也能全绿
+        if onlyEdit {
+            failure.check(expected.count == 4,
+                          "只渲详情页 4 张（编辑/播放 × 亮/暗）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+            failure.check(screens.contains { $0.name == "transcript-editing" }
+                          && screens.contains { $0.name == "transcript-playing" },
+                          "编辑态与播放态两张屏都在")
+
+            for schemeName in ["light", "dark"] {
+                let editName = "transcript-editing-\(schemeName).png"
+                let playName = "transcript-playing-\(schemeName).png"
+                guard let editRep = bitmap(at: output.appendingPathComponent(editName)),
+                      let editPixels = Pixels(editRep),
+                      let playRep = bitmap(at: output.appendingPathComponent(playName)),
+                      let playPixels = Pixels(playRep) else {
+                    failure.check(false, "\(schemeName) 编辑/播放两张能读成像素")
+                    continue
+                }
+
+                let editStroke = longestAccentRun(in: editPixels)
+                let playStroke = longestAccentRun(in: playPixels)
+                failure.check(editStroke >= 1200,
+                              "\(editName) 编辑框有 accent 描边",
+                              detail: "（最长连续 accent 横条 \(editStroke)px，要求 ≥ 1200）")
+                failure.check(playStroke < 1200,
+                              "\(playName) 没有编辑描边（两态可区分）",
+                              detail: "（最长连续 accent 横条 \(playStroke)px）")
+
+                let playRows = blueTintRowCount(in: playPixels)
+                let editRows = blueTintRowCount(in: editPixels)
+                failure.check(playRows >= 30,
+                              "\(playName) 播放高亮块存在（与页面底不同）",
+                              detail: "（蓝偏色铺满行 \(playRows) 行，要求 ≥ 30）")
+                failure.check(editRows < 30,
+                              "\(editName) 没有播放高亮块（两态可区分）",
+                              detail: "（蓝偏色铺满行 \(editRows) 行）")
             }
         }
 
@@ -920,6 +1017,53 @@ enum UISnapshot {
             }
             return result
         }
+    }
+
+    /// 一整行里最长的连续 accent 蓝横条有多长（像素）。
+    ///
+    /// 编辑框的描边是横贯内容区的一条实线（约 2000px）；正文里的英文
+    /// 单词也是 accent 色，但笔画之间有空隙，最长只有一百多像素。
+    /// 判法沿用时间轴节点那条：`b - r > 0.4 && b > 0.6`，橙/绿都混不进来
+    private static func longestAccentRun(in pixels: Pixels) -> Int {
+        var best = 0
+        for y in 0..<pixels.height {
+            var run = 0
+            for x in 0..<pixels.width {
+                let (r, _, b) = pixels.rgb(x, y)
+                if b - r > 0.4 && b > 0.6 {
+                    run += 1
+                    best = max(best, run)
+                } else {
+                    run = 0
+                }
+            }
+        }
+        return best
+    }
+
+    /// 有多少行像「播放高亮块」：横向采样里至少 60% 的点是 accent 淡底。
+    ///
+    /// 淡底是 `Theme.accent.opacity(0.10)` 叠在页面底上：亮色下
+    /// b−r ≈ 0.10、比页面底暗约 0.06；深色下亮约 0.04。要求
+    /// b−r > 0.04 把灰字/白字排除，亮度差 > 0.012 把纯页面底排除。
+    /// 高亮块高度约 90px，所以「≥ 30 行」和编辑框那两三行描边分得开
+    private static func blueTintRowCount(in pixels: Pixels) -> Int {
+        let background = pixels.backgroundLuminance()
+        var rows = 0
+        for y in 0..<pixels.height {
+            var tinted = 0
+            var total = 0
+            var x = 100
+            while x < pixels.width - 100 {
+                let (r, g, b) = pixels.rgb(x, y)
+                let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                if b - r > 0.04 && abs(luma - background) > 0.012 { tinted += 1 }
+                total += 1
+                x += 8
+            }
+            if total > 0, Double(tinted) / Double(total) > 0.6 { rows += 1 }
+        }
+        return rows
     }
 
     /// 0–1 的 sRGB 三通道 → 亮度。时间轴两种橙靠明度区分，判据要能算它

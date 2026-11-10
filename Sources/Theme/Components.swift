@@ -316,6 +316,16 @@ struct TranscriptLine: View {
     /// 正在转写的那一行。给一个轻的 `isHighlighted` 态：
     /// 最后一段还没定稿时，用户要能一眼找到「现在写到哪了」
     var isActive = false
+    /// 音频正播放到这一句（P17）。铺一层 accent 淡底。
+    ///
+    /// **和 `isActive` 分开**：那个是「识别器正在写这一行」，这个是
+    /// 「耳朵正听到这一句」。两者可能同时存在（边播边转），但语义不同，
+    /// 合成一个布尔值之后就没法只高亮其中一个了
+    var isPlaying = false
+    /// 正文能不能拖选。录音详情页要关掉（P17）：`textSelection` 打开时
+    /// 拖选会和「点句子播放 / 双击改错」抢鼠标，第一下点击会被系统当成
+    /// 设置选区起点，行上的 tap 手势收不到。转录页不关——那里没有行级点击
+    var allowsTextSelection = true
     /// 是否在卡片里画时间戳。时间轴（P15-3）把它搬到了节点那一行，
     /// 这里传 false——同一段时间戳画两次，卡内那一个会和节点行的错位
     var showsTimestamp = true
@@ -332,7 +342,7 @@ struct TranscriptLine: View {
     var body: some View {
         switch surface {
         case .card(let elevation):
-            content
+            playbackHighlightedContent
                 .cardStyle(elevation: elevation,
                            isHighlighted: isActive || isHovering)
                 .contentShape(Rectangle())
@@ -346,14 +356,14 @@ struct TranscriptLine: View {
             // 两者是两块并列的图形，时间轴读不成一条轴；悬停时再铺一层
             // 4% 的底，等于在指针经过时把盒子又画回来一次。悬停仍有反馈——
             // 「核查」按钮只在这时出现（见 `content` 里的 isHovering）
-            content
+            playbackHighlightedContent
                 .padding(Theme.Spacing.md)
                 .contentShape(Rectangle())
                 .onHover { hovering in
                     withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
                 }
         case .bare:
-            content
+            playbackHighlightedContent
                 // 悬停反馈是一条 2pt 左侧竖条（设计规范），不是背景填充。
                 // 画在 overlay 里不占布局，指针进出时列表不会抖
                 .overlay(alignment: .leading) {
@@ -367,6 +377,21 @@ struct TranscriptLine: View {
                     withAnimation(.easeInOut(duration: 0.12)) { isHovering = hovering }
                 }
         }
+    }
+
+    /// 播放高亮的底铺在正文之下。用负 padding 扩出去一圈，**不加正
+    /// padding**：正 padding 会让「开始播放」那一刻整行文字往里一跳，
+    /// 而播放位置是每几秒变一次的，跳一次用户就丢一次读到的位置
+    private var playbackHighlightedContent: some View {
+        content
+            .background {
+                if isPlaying {
+                    RoundedRectangle(cornerRadius: Theme.Spacing.sm)
+                        .fill(Theme.accent.opacity(0.10))
+                        .padding(.horizontal, -Theme.Spacing.sm)
+                        .padding(.vertical, -Theme.Spacing.xs)
+                }
+            }
     }
 
     private var content: some View {
@@ -400,6 +425,16 @@ struct TranscriptLine: View {
                         systemImage: segment.questionLevel >= 2
                             ? "questionmark.bubble.fill"
                             : "hand.raised.fill"
+                    )
+                }
+
+                // 人工改过的段要能认出来（P17）。不标的话，用户下次重转
+                // 看到「这一句怎么还是我改的样子」得靠记忆判断原因
+                if segment.edited {
+                    StatusCapsule(
+                        text: "人工修改",
+                        color: Theme.textSecondary,
+                        systemImage: "pencil"
                     )
                 }
 
@@ -472,12 +507,23 @@ struct TranscriptLine: View {
 
     /// 正文 15pt（P14-4）。未定稿的段落压暗一档：识别结果还会变，视觉上先分开
     private func bodyText(_ text: String) -> some View {
+        Group {
+            // 两种 selectability 是不同类型，三元表达式拼不到一起，
+            // 只能分支构造（`TextSelection` 的两个静态成员不在同一类型上）
+            if allowsTextSelection && segment.isFinal {
+                bodyLabel(text).textSelection(.enabled)
+            } else {
+                bodyLabel(text).textSelection(.disabled)
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func bodyLabel(_ text: String) -> some View {
         Text(TextHighlight.styled(text))
             .textStyle(Theme.Text.summary)
             .opacity(segment.isFinal ? 1 : 0.55)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// 核查状态角标。没查过返回 nil
