@@ -4,9 +4,20 @@ struct TranscriptionView: View {
     @Environment(AppState.self) private var appState
     @State private var courseName = "未命名课程"
     @State private var isImporting = false
+    @State private var isExporting = false
+    @State private var exportNotice = ""
+    @State private var exportNoticeFailed = false
     @State private var attachmentImportError: String?
 
     private var engine: TranscriptionEngine { appState.transcription }
+
+    /// 导出源：转录页用的是**内存里的段**（单条流，offset 恒 0）。
+    /// 和详情页走同一个渲染器，出来的文件才长得一样
+    private var exportSource: TranscriptExportSource {
+        .live(segments: engine.segments, startedAt: Date(), title: "")
+    }
+
+    private var exportableSegmentCount: Int { exportSource.preparedSegments.count }
 
     /// 本次转录里被判为课堂提问的段落（含 L1 点名预警），按时间顺序
     private var questionSegments: [TranscriptSegment] {
@@ -33,6 +44,9 @@ struct TranscriptionView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.background)
+        .sheet(isPresented: $isExporting) {
+            TranscriptExportSheet(source: exportSource)
+        }
     }
 
     // MARK: - 标题区
@@ -112,7 +126,47 @@ struct TranscriptionView: View {
                 .buttonStyle(.plain)
                 .disabled(!canAddImage)
 
+                // 导出/复制/分享：和详情页同一套（同一份渲染器）。
+                // 直播页的段还在内存里，没有落盘的会话——「录完之前就想把
+                // 现有内容贴出去」是最常见的用法，不该逼用户先存完再切页
+                Button { isExporting = true } label: {
+                    Text("导出转录")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(exportableSegmentCount > 0 ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(exportableSegmentCount == 0)
+                .help(exportableSegmentCount == 0
+                    ? "还没有转录内容"
+                    : "导出为 SRT / VTT / Markdown / JSON")
+
+                Button { copyTranscript() } label: {
+                    Text("复制全文")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(exportableSegmentCount > 0 ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(exportableSegmentCount == 0)
+
+                if exportableSegmentCount > 0 {
+                    ShareLink(item: exportSource.copyText()) {
+                        Text("分享")
+                            .textStyle(Theme.Text.meta)
+                            .foregroundStyle(Theme.accent)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Spacer(minLength: 0)
+            }
+
+            if !exportNotice.isEmpty {
+                Text(exportNotice)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(exportNoticeFailed ? Theme.error : Theme.textSecondary)
             }
 
             // 提问汇总入口：次要操作，退化成文字链接而不是按钮。
@@ -188,6 +242,13 @@ struct TranscriptionView: View {
 
     private var canAddImage: Bool {
         !engine.isRunning && !engine.segments.isEmpty
+    }
+
+    /// 复制全部文本。结果写回界面（复制成功与否是看不见的）
+    private func copyTranscript() {
+        let result = TranscriptExportAction.copyToPasteboard(exportSource)
+        exportNotice = result.message
+        exportNoticeFailed = result.failed
     }
 
     private func toggleRecording() {

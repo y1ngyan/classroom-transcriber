@@ -15,10 +15,20 @@ struct RecordingDetailView: View {
     @State private var isRenaming = false
     @State private var isSettingCourse = false
     @State private var isConfirmingRetranscribe = false
+    @State private var isExporting = false
+    /// 复制/导出的一句话结果。空 = 什么都不显示
+    @State private var exportNotice = ""
+    @State private var exportNoticeFailed = false
     @State private var draftTitle = ""
     @State private var draftCourse = ""
 
     private var store: RecordingsStore { appState.recordings }
+
+    private var exportSource: TranscriptExportSource { .session(session) }
+
+    /// 有没有可导出的段。**判据是规整后的段数**（空段、纯空白段不算），
+    /// 和界面上的「N 段转录」不是同一个数——那里数的是原始段
+    private var exportableSegmentCount: Int { exportSource.preparedSegments.count }
 
     /// 「本节课提问 N 条」里的 N。和 `SessionSummary.questionCount` 同一套
     /// 口径：回填过的会话数问题条目（去重后），旧会话回落到段落计数——
@@ -38,6 +48,9 @@ struct RecordingDetailView: View {
         .background(Theme.background)
         .sheet(isPresented: $isRenaming) { renameSheet }
         .sheet(isPresented: $isSettingCourse) { courseSheet }
+        .sheet(isPresented: $isExporting) {
+            TranscriptExportSheet(source: exportSource)
+        }
         .confirmationDialog(
             "重新转录这条录音？",
             isPresented: $isConfirmingRetranscribe,
@@ -183,6 +196,11 @@ struct RecordingDetailView: View {
                 Spacer()
             }
 
+            // 导出/复制/分享单独一行。**不塞进上面那一行**：上面那排是
+            // 「这条录音本身」（显示、改名、课程、重转），这一排是「把内容带出去」，
+            // 两件事挤一起，七个文字链接排成一条，谁也扫不到
+            exportRow
+
             // 重转进行中：一条几十分钟的录音要跑很久，不给状态用户会
             // 以为卡死了，进而去点别的地方把界面搞乱。
             // 「取消」是文字链接（一行只放一个 PillButton，上面那个位置
@@ -222,8 +240,71 @@ struct RecordingDetailView: View {
         }
     }
 
-    // MARK: - 转录正文
+    /// 导出 / 复制全文 / 分享。三个都是「把内容带出去」，所以同一行。
+    ///
+    /// 分享用 `ShareLink` 而不是自绘菜单：它接的是系统的分享面板
+    /// （隔空投送、备忘录、信息…），自己拼一份等于把系统能力实现得差一点。
+    /// 传的是**复制用的那份 Markdown**（不带时间戳），与剪贴板一致——
+    /// 「分享出去的」和「复制走的」该是同一份文本
+    private var exportRow: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
+            HStack(spacing: Theme.Spacing.lg) {
+                Button { isExporting = true } label: {
+                    Text("导出转录")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(exportableSegmentCount > 0 ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(exportableSegmentCount == 0)
+                .help(exportableSegmentCount == 0
+                    ? "这条录音还没有转录内容"
+                    : "导出为 SRT / VTT / Markdown / JSON")
 
+                Button { copyTranscript() } label: {
+                    Text("复制全文")
+                        .textStyle(Theme.Text.caption)
+                        .foregroundStyle(exportableSegmentCount > 0 ? Theme.accent : Theme.textTertiary)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(exportableSegmentCount == 0)
+                .help("把分段正文复制到剪贴板（不带时间戳）")
+
+                // 分享：没有内容时整颗不出现（灰着的分享按钮点了没反应，
+                // 和「没有提问就不显示提问入口」是同一条规矩）
+                if exportableSegmentCount > 0 {
+                    ShareLink(item: exportSource.copyText()) {
+                        Text("分享")
+                            .textStyle(Theme.Text.caption)
+                            .foregroundStyle(Theme.accent)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("用系统分享面板把转录发出去")
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            // 结果必须落在界面上一句话：复制成功/失败是**看不见的**，
+            // 不说就成了「点了一下，不知道有没有成」
+            if !exportNotice.isEmpty {
+                Text(exportNotice)
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(exportNoticeFailed ? Theme.error : Theme.textSecondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func copyTranscript() {
+        let result = TranscriptExportAction.copyToPasteboard(exportSource)
+        exportNotice = result.message
+        exportNoticeFailed = result.failed
+    }
+
+    // MARK: - 转录正文
     private var transcript: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Theme.Spacing.xxl) {
