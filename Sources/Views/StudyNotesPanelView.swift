@@ -132,32 +132,59 @@ struct StudyNotesPanelView: View {
             }
 
             if state.showsExistingNotes {
-                Button(action: exportNotes) {
-                    Text("导出 Markdown").textStyle(Theme.Text.meta)
-                        .foregroundStyle(Theme.accent).contentShape(Rectangle())
+                // 五个去处收进一个菜单：转录笔记能导的地方只会越来越多，
+                // 平铺成五个蓝色小链接会把这一行撑成工具条，也分不清主次
+                Menu {
+                    Button("Markdown 文件", action: exportNotes)
+                    Button("Obsidian（课程目录 + 术语页 + 索引）", action: exportToObsidian)
+                    Button("Anki 卡片（CSV）", action: exportToAnki)
+                    Divider()
+                    Button("Word（.docx）", action: { exportDocument(kind: .word) })
+                    Button("PDF", action: { exportDocument(kind: .pdf) })
+                } label: {
+                    Text("导出").textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.accent)
                 }
-                .buttonStyle(.plain)
-
-                // Obsidian 导出：一次把「主笔记 + 术语页 + 课程索引」写进 vault。
-                // 和上面那份单文件 Markdown 是两个去处，不是同一个按钮的两种格式：
-                // 这份要用户先选一个 vault（Obsidian 的目录），选完记住，下次直接写
-                Button(action: exportToObsidian) {
-                    Text("导出到 Obsidian").textStyle(Theme.Text.meta)
-                        .foregroundStyle(Theme.accent).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-
-                // Anki：只把「有答案的提问」和「有释义的术语」做成卡。
-                // 这里不判断有没有卡可出——空的时候导出会给出明确原因，比一个禁用按钮好，
-                // 用户至少知道「为什么没有卡」（没有答案 / 没有释义）
-                Button(action: exportToAnki) {
-                    Text("导出 Anki 卡片").textStyle(Theme.Text.meta)
-                        .foregroundStyle(Theme.accent).contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
             }
 
             Spacer()
+        }
+    }
+
+    private enum DocumentKind { case word, pdf }
+
+    /// 导出 Word / PDF。内容层与排版层都在 `DocumentExporter`，这里只负责选路径与报结果
+    private func exportDocument(kind: DocumentKind) {
+        let content = DocumentExporter.content(
+            meta: ObsidianExporter.Meta(course: session.course, title: session.title,
+                                        startedAt: session.startedAt,
+                                        durationMillis: session.durationMillis,
+                                        recordingName: session.parts.first?.fileName),
+            notes: store.notes[session.id],
+            questions: session.questions,
+            glossary: appState.glossary.entries
+        )
+        let ext = kind == .word ? "docx" : "pdf"
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = DocumentExporter.defaultFileName(content: content, ext: ext)
+        panel.allowedContentTypes = kind == .word
+            ? [UTType(filenameExtension: "docx") ?? .data]
+            : [.pdf]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            if kind == .word {
+                try DocumentExporter.writeDocx(content, to: url)
+            } else {
+                try DocumentExporter.writePDF(content, to: url)
+            }
+            exportFailed = false
+            exportMessage = "已导出 \(ext.uppercased())"
+        } catch {
+            exportFailed = true
+            exportMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
     }
 
