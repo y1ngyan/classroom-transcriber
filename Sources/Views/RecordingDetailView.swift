@@ -20,6 +20,15 @@ struct RecordingDetailView: View {
 
     private var store: RecordingsStore { appState.recordings }
 
+    /// 「本节课提问 N 条」里的 N。和 `SessionSummary.questionCount` 同一套
+    /// 口径：回填过的会话数问题条目（去重后），旧会话回落到段落计数——
+    /// 否则 B 包上线前录的课在这一行会显示 0，而转录里明明有提问
+    private var questionEntryCount: Int {
+        session.questionSchemaVersion >= LessonQuestionSchema.current
+            ? session.questions.count
+            : session.questionCount
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -157,6 +166,19 @@ struct RecordingDetailView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(store.isRetranscribing || session.parts.allSatisfy { $0.fileName == nil })
+
+                // 课后复习的主入口（B 包 §3.1）：切到独立的「提问查答案」页。
+                // 数量为 0 时不显示——没有提问不是一种状态
+                if questionEntryCount > 0 {
+                    Button {
+                        appState.openQuestions(scope: .session(session.id))
+                    } label: {
+                        Text("本节课提问 \(questionEntryCount) 条")
+                            .textStyle(Theme.Text.caption)
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                }
 
                 Spacer()
             }

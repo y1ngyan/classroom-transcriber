@@ -198,6 +198,14 @@ final class AppState {
         return "\(info.name) [\(info.uid) · \(info.channels)ch · \(Int(info.sampleRate))Hz]"
     }
 
+    /// 打开提问页（B 包）。页面状态住在 `questions` store 里；切标签页
+    /// 放在这里，转录页和录音详情页的入口就只需要说「打开哪个范围」，
+    /// 不必各自再拼一句 `selectedTab = .questions`
+    func openQuestions(scope: QuestionAnswerStore.Scope) {
+        questions.open(scope: scope, sensitivity: settings.questionSensitivity)
+        selectedTab = .questions
+    }
+
     /// 开始转录。术语表在这里灌给识别器。
     ///
     /// 这个连线放在 AppState 而不是视图里：识别器该知道哪些词是数据层面的

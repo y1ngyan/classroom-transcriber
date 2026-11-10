@@ -18,6 +18,8 @@ struct RecordingsView: View {
     @State private var pendingDelete: SessionSummary?
     /// 丢弃未完成录音的确认。**删文件一律显式**——非 nil 时弹确认框
     @State private var pendingDiscard: RecoveryScan.Item?
+    /// 清理「只有提问、没有录音」的占位会话（B 包拍板第 1 条）
+    @State private var isConfirmingQuestionCleanup = false
 
     private var store: RecordingsStore { appState.recordings }
 
@@ -76,6 +78,21 @@ struct RecordingsView: View {
             Text("只会删掉这份没写完的转录。音频 \(item.fileName ?? "") 留在原处，"
                  + "之后会显示成「无会话的录音」。")
         }
+        // 删除占位会话。这些会话只有问题与答案、没有音频；删除后答案不可恢复，
+        // 所以走和删录音同一套「先确认再删」的规矩
+        .confirmationDialog(
+            "删除 \(store.questionOnlySummaries.count) 条无录音的提问记录？",
+            isPresented: $isConfirmingQuestionCleanup,
+            titleVisibility: .visible
+        ) {
+            Button("删除提问记录", role: .destructive) {
+                store.deleteQuestionOnlySessions()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这些记录只有问题和查到的答案，没有音频。删除后不可恢复；"
+                 + "真录到的课不受影响。")
+        }
     }
 
     // MARK: - 列表
@@ -83,6 +100,10 @@ struct RecordingsView: View {
     private var list: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
+
+            if !store.questionOnlySummaries.isEmpty {
+                questionOnlyCleanup
+            }
 
             if store.summaries.isEmpty && store.recoveryItems.isEmpty {
                 emptyState
@@ -177,6 +198,29 @@ struct RecordingsView: View {
         WaveformEnvelope.isSnapshotMode
             ? .snapshotFixture
             : RecordingStats.make(from: store.summaries)
+    }
+
+    /// 清理入口（B 包拍板第 1 条）：实时期间查过答案、但最后没录成音频的
+    /// 占位会话会留在库里。它是可回收的垃圾数据，但**不能自动删**——
+    /// 里面可能有学生查过的答案，删不删由他决定
+    private var questionOnlyCleanup: some View {
+        HStack(spacing: Theme.Spacing.sm) {
+            StatusMark(
+                kind: .neutral,
+                text: "有 \(store.questionOnlySummaries.count) 条只有提问、没有录音的记录"
+            )
+            Spacer(minLength: Theme.Spacing.md)
+            Button {
+                isConfirmingQuestionCleanup = true
+            } label: {
+                Text("删除")
+                    .textStyle(Theme.Text.caption)
+                    .foregroundStyle(Theme.accent)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Theme.RecordingLayout.pagePadding)
+        .padding(.top, Theme.Spacing.s12)
     }
 
     private var emptyState: some View {        VStack(spacing: Theme.Spacing.md) {

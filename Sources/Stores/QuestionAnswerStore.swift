@@ -30,6 +30,10 @@ final class QuestionAnswerStore {
     /// 问题实际落在哪条会话上。`.live` 且还没建占位会话时为 nil——
     /// 那时列表里是内存候选（`ephemeral`），点第一次查询才落盘
     private(set) var sessionID: UUID?
+    /// `open` 至少被调用过一次没有。页面用它决定「第一次进来要不要自己挑
+    /// 一个范围」：从转录页 / 录音详情点进来时 `openQuestions` 已经先调了
+    /// `open`，此时再自动挑一次会把用户刚指定的会话顶掉
+    private(set) var hasOpened = false
     /// 当前展示的条目（主列表与折叠区都从这里分）。按时间排序
     private(set) var questions: [LessonQuestion] = []
     /// 每一行「查询中」的阶段文案
@@ -92,6 +96,7 @@ final class QuestionAnswerStore {
     /// 不发任何网络请求（§5.3「页面加载不产生转移」）
     func open(scope: Scope, sensitivity: QuestionSensitivity) {
         self.scope = scope
+        self.hasOpened = true
         self.message = nil
         self.phases.removeAll()
         self.batchProgress = nil

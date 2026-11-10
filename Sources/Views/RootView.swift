@@ -9,6 +9,10 @@ struct RootView: View {
         case factCheck = "事实核查"
         case notes = "笔记"
         case glossary = "术语表"
+        // 位置按 B4a 的功能顺序：词库 → 查答案 → 说话人。
+        // tab 从 6 变 7，宽度只有实机能量（拍板第 10 条：先按 7 个做，
+        // 挤的话再退回「提问并入录音详情」那条路）
+        case questions = "提问"
         case settings = "设置"
     }
 
@@ -31,6 +35,8 @@ struct RootView: View {
                     NotesView()
                 case .glossary:
                     GlossaryView()
+                case .questions:
+                    QuestionsView()
                 case .settings:
                     SettingsView()
                 }

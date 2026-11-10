@@ -5,7 +5,6 @@ struct TranscriptionView: View {
     @State private var courseName = "未命名课程"
     @State private var isImporting = false
     @State private var attachmentImportError: String?
-    @State private var isShowingQuestions = false
 
     private var engine: TranscriptionEngine { appState.transcription }
 
@@ -116,10 +115,12 @@ struct TranscriptionView: View {
                 Spacer(minLength: 0)
             }
 
-            // 提问汇总入口：次要操作，退化成文字链接而不是按钮
+            // 提问汇总入口：次要操作，退化成文字链接而不是按钮。
+            // B 包起它不再弹一张只读列表，而是切到独立的「提问查答案」页
+            // ——那里才有「查答案」这个动作（拍板第 2 条）
             if !questionSegments.isEmpty {
                 Button {
-                    isShowingQuestions = true
+                    appState.openQuestions(scope: .live)
                 } label: {
                     HStack(spacing: Theme.Spacing.xs) {
                         Image(systemName: "questionmark.bubble")
@@ -174,9 +175,6 @@ struct TranscriptionView: View {
             Button("好", role: .cancel) { attachmentImportError = nil }
         } message: {
             Text(attachmentImportError ?? "")
-        }
-        .sheet(isPresented: $isShowingQuestions) {
-            QuestionListView(questions: questionSegments)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, Theme.RecordingLayout.pagePadding)
@@ -292,73 +290,5 @@ struct TranscriptionView: View {
                 StatusMark(kind: .error, text: reason)
             }
         }
-    }
-}
-
-// MARK: - 提问汇总
-
-/// 一节课里所有被判为提问的段落，按时间列出来。
-///
-/// 存在的理由：提问标记散在整场转录里，课上想「回看一下老师都问了什么」
-/// 不可能回去翻几千字。这里列的是剥过口头禅的核心问题，原句留给需要
-/// 核对上下文的人展开看。
-private struct QuestionListView: View {
-    let questions: [TranscriptSegment]
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("本节课提问")
-                    .textStyle(Theme.Text.title)
-                    .foregroundStyle(Theme.textPrimary)
-                Spacer()
-                Button("完成") { dismiss() }
-                    .buttonStyle(.plain)
-                    .textStyle(Theme.Text.body)
-                    .foregroundStyle(Theme.accent)
-            }
-            .padding(.bottom, Theme.Spacing.lg)
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(questions) { segment in
-                        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
-                            HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.sm) {
-                                Text(segment.formattedTimestamp)
-                                    .textStyle(Theme.Text.meta)
-                                    .monospacedDigit()
-                                    .foregroundStyle(Theme.textTertiary)
-                                if segment.questionLevel < 2 {
-                                    Text("点名")
-                                        .textStyle(Theme.Text.meta)
-                                        .foregroundStyle(Theme.warning)
-                                }
-                            }
-                            Text(segment.coreQuestion ?? segment.text)
-                                .textStyle(Theme.Text.summary)
-                                .foregroundStyle(Theme.textPrimary)
-                                .textSelection(.enabled)
-                            // 核心问题是剥出来的，和原句可能差很远——
-                            // 剥错了的时候，没有对照就不知道是检测错了还是记错了
-                            if let core = segment.coreQuestion, core != segment.text {
-                                Text(segment.text)
-                                    .textStyle(Theme.Text.meta)
-                                    .foregroundStyle(Theme.textSecondary)
-                                    .textSelection(.enabled)
-                            }
-                        }
-                        .padding(.vertical, Theme.Spacing.md)
-
-                        if segment.id != questions.last?.id {
-                            Separator()
-                        }
-                    }
-                }
-            }
-        }
-        .padding(Theme.Spacing.xl)
-        .frame(minWidth: 480, minHeight: 360)
-        .background(Theme.background)
     }
 }

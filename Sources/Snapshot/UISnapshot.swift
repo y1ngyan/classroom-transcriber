@@ -70,7 +70,7 @@ enum UISnapshot {
         }
         defer { try? FileManager.default.removeItem(at: root) }
 
-        seedRecordings(into: dataSessions)
+        let questionSessionID = seedRecordings(into: dataSessions)
 
         let transcript = transcriptFixture()
         let checks = factCheckFixture(segments: transcript)
@@ -114,6 +114,20 @@ enum UISnapshot {
         failure.check(empty.recordings.summaries.isEmpty && empty.recordings.recoveryItems.isEmpty,
                       "空状态夹具确实为空")
 
+        // 提问页（B 包）的夹具：第一条会话带 3 个问题，状态分别是
+        // 有答案 / 查不到 / 未查——快照要能一眼看出五种状态里的三种差异
+        populated.questions.open(scope: .session(questionSessionID), sensitivity: .normal)
+        failure.check(populated.questions.questions.count == 3,
+                      "提问夹具读回来 3 条",
+                      detail: "（实得 \(populated.questions.questions.count)）")
+        let fixtureStatuses = Set(populated.questions.mainQuestions.map(\.status))
+        failure.check(fixtureStatuses == Set([.answered, .noResults, .unasked]),
+                      "提问夹具覆盖 有答案 / 查不到 / 未查 三种状态",
+                      detail: "（实得 \(fixtureStatuses.map(\.rawValue).sorted().joined(separator: "、"))）")
+        failure.check(populated.questions.answeredCount == 1 && populated.questions.pendingCount == 1,
+                      "提问汇总 = 1 已查 / 1 待查",
+                      detail: "（实得 \(populated.questions.answeredCount) / \(populated.questions.pendingCount)）")
+
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
 
         // ── 渲染 ──
@@ -129,6 +143,9 @@ enum UISnapshot {
             ("fact-check", AnyView(FactCheckView().environment(populated)), nil),
             ("notes", AnyView(NotesView().environment(populated)), nil),
             ("glossary", AnyView(GlossaryView().environment(populated)), 2000),
+            // 提问页（P16-1）：预置了 3 条问题（有答案 / 查不到 / 未查），
+            // 页首的汇总、行内动作和状态标记都在 760pt 内
+            ("questions", AnyView(QuestionsView().environment(populated)), nil),
             ("settings", AnyView(SettingsView().environment(populated)), nil),
             ("recordings", AnyView(RecordingsView().environment(populated)), nil),
             ("recordings-empty", AnyView(RecordingsView().environment(empty)), nil),
@@ -149,6 +166,7 @@ enum UISnapshot {
         let onlySettings = only == "p14-5"
         let onlyRecordingsTwo = only == "p15-1" || only == "p15-2"
         let onlyTimeline = only == "p15-3"
+        let onlyQuestions = only == "p16-1"
         let screens: [(name: String, view: AnyView, tallHeight: CGFloat?)] = {
             if onlyRecordings {
                 return allScreens.filter { $0.name.hasPrefix("recordings") }
@@ -164,6 +182,9 @@ enum UISnapshot {
             }
             if onlyTimeline {
                 return allScreens.filter { $0.name == "transcription" }
+            }
+            if onlyQuestions {
+                return allScreens.filter { $0.name == "questions" }
             }
             return allScreens
         }()
@@ -185,6 +206,10 @@ enum UISnapshot {
         }
         if onlyTimeline {
             print("  模式：只渲转录屏 2 张（UI_SNAPSHOT_ONLY=p15-3）")
+            print("")
+        }
+        if onlyQuestions {
+            print("  模式：只渲提问屏 2 张（UI_SNAPSHOT_ONLY=p16-1）")
             print("")
         }
 
@@ -308,7 +333,8 @@ enum UISnapshot {
         // 两种分屏模式各挑一张同时在两种外观下都存在的屏
         let schemePair = onlyTimeline
             ? "transcription"
-            : ((onlyFive || onlySettings) ? "settings" : "recordings")
+            : (onlyQuestions ? "questions"
+                : ((onlyFive || onlySettings) ? "settings" : "recordings"))
         if let light = written["\(schemePair)-light.png"],
            let dark = written["\(schemePair)-dark.png"],
            let lightLum = cornerLuminance(light), let darkLum = cornerLuminance(dark) {
@@ -341,8 +367,10 @@ enum UISnapshot {
 
             // P15-5 起转录页没有卡片（时间轴上的段落是透明的），
             // 卡片分离那两条在 p15-3 模式下没有对象可判——替代判据
-            // 「段落透明」「发丝线在」在下面的自检 ⑭ 里
-            if onlyTimeline {
+            // 「段落透明」「发丝线在」在下面的自检 ⑭ 里。
+            // 提问页同理：§3.2 明确要求 `LazyVStack` + `Separator`，
+            // 不用卡片、不用底色、不用边框，这里没有卡片可判
+            if onlyTimeline || name.hasPrefix("questions") {
                 continue
             }
             if name.hasSuffix("-dark.png") {
@@ -540,6 +568,35 @@ enum UISnapshot {
             failure.check(expected.count == 2,
                           "只渲录音屏 2 张（亮/暗）",
                           detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+        }
+        if onlyQuestions {
+            failure.check(expected.count == 2,
+                          "只渲提问屏 2 张（亮/暗）",
+                          detail: "（实得 \(expected.count) 张：\(expected.joined(separator: "、"))）")
+
+            // 「有答案」那行的状态标记是成功绿（#30D158 / #4ADE80）。
+            // 只判这一处颜色：它证明 answered 这一档真的画出来了，
+            // 「查不到 / 未查」是中性灰，和正文分不开，像素上数不出口径。
+            // 中文文字没法从像素上认，状态差异的另一半由上面
+            // `fixtureStatuses` 那条纯数据判据兜
+            for schemeName in ["light", "dark"] {
+                let imageName = "questions-\(schemeName).png"
+                guard let rep = bitmap(at: output.appendingPathComponent(imageName)),
+                      let pixels = Pixels(rep) else {
+                    failure.check(false, "\(imageName) 能读成像素")
+                    continue
+                }
+                var green = 0
+                for y in stride(from: 0, to: pixels.height, by: 2) {
+                    for x in stride(from: 0, to: pixels.width, by: 2) {
+                        let (r, g, b) = pixels.rgb(x, y)
+                        if g - r > 0.25 && g - b > 0.25 && g > 0.6 { green += 1 }
+                    }
+                }
+                failure.check(green > 20,
+                              "\(imageName) 画出了成功绿（「有答案」状态标记）",
+                              detail: "（绿色像素 \(green) 个）")
+            }
         }
 
         // ── 自检 ⑭：时间轴（P15-3）──
@@ -1116,7 +1173,9 @@ enum UISnapshot {
     /// 有不可信段的。全是今天/昨天/前天，是为了让分组标题（今天/昨天/M月d日）
     /// 三条都出现一次——那三档都是列表要画的。
     /// 第二条刻意让 fair 和 poor 并存：质量状态那格必须两种数都报
-    private static func seedRecordings(into sessionsDirectory: URL) {
+    /// 返回第一条会话的 id：提问页夹具要打开它（`questions.open`）
+    @discardableResult
+    private static func seedRecordings(into sessionsDirectory: URL) -> UUID {
         let store = RecordingsStore(
             directory: sessionsDirectory,
             recordingsDirectory: sessionsDirectory.deletingLastPathComponent()
@@ -1154,7 +1213,7 @@ enum UISnapshot {
                                     parts: [part], title: title, course: course)
         }
 
-        store.save(session(
+        var first = session(
             title: "第 3 讲 · 梯度下降", course: "机器学习", startedAt: at(daysAgo: 0, hour: 9),
             minutes: 96,
             segments: [
@@ -1163,7 +1222,67 @@ enum UISnapshot {
                 segment("这里谁来回答一下，为什么负梯度方向是最快的？", start: 18_000, end: 25_000, question: true),
                 segment("对，因为泰勒展开的一阶项里它取到最小值。", start: 25_000, end: 31_000),
             ]
-        ))
+        )
+        // 提问页夹具（B 包）：三种状态各一条。**刻意让「有答案」带两条来源**，
+        // 来源列表和「由 <模型> 于 <时间> 生成」那一行都要在快照里出现一次
+        first.questionSchemaVersion = LessonQuestionSchema.current
+        first.questions = [
+            LessonQuestion(
+                text: "为什么负梯度方向是最快的？",
+                rawSentence: "这里谁来回答一下，为什么负梯度方向是最快的？",
+                startTimeMillis: 18_000,
+                level: 2,
+                status: .answered,
+                answer: QuestionAnswer(
+                    markdown: """
+                    因为梯度方向是函数值**上升最快**的方向，负梯度方向就是下降最快的方向。
+
+                    把函数做一阶泰勒展开：
+
+                    `f(x + Δx) ≈ f(x) + ∇f(x)ᵀΔx`
+
+                    要让它下降最多，就要让一阶项取到最小值，也就是取
+                    `Δx = −η ∇f(x)`。
+
+                    这正是梯度下降的更新式：每次沿负梯度方向走一步，步长由学习率控制。
+                    """,
+                    sources: [
+                        AnswerSource(title: "Gradient descent — Wikipedia",
+                                     url: "https://en.wikipedia.org/wiki/Gradient_descent"),
+                        AnswerSource(title: "梯度下降 - 维基百科",
+                                     url: "https://zh.wikipedia.org/wiki/梯度下降"),
+                    ],
+                    createdAt: now,
+                    model: ModelText.defaultModel,
+                    searchProvider: "tavily"
+                )
+            ),
+            LessonQuestion(
+                text: "学习率应该怎么选？",
+                rawSentence: "学习率应该怎么选，有没有经验法则？",
+                startTimeMillis: 40_000,
+                level: 2,
+                status: .noResults,
+                answer: QuestionAnswer(
+                    markdown: "",
+                    sources: [
+                        AnswerSource(title: "Learning rate — Wikipedia",
+                                     url: "https://en.wikipedia.org/wiki/Learning_rate"),
+                    ],
+                    createdAt: now,
+                    model: ModelText.defaultModel,
+                    searchProvider: "tavily"
+                )
+            ),
+            LessonQuestion(
+                text: "为什么泰勒展开的一阶项能近似原函数？",
+                rawSentence: "那为什么泰勒展开的一阶项能近似原函数呢？",
+                startTimeMillis: 60_000,
+                level: 2,
+                status: .unasked
+            ),
+        ]
+        store.save(first)
         // P14-2：这一条原来 title 为空、靠日期回落当标题，评审看到的是
         // 「同一列表里一条是讲次、一条是日期」。标题永远是课程/讲次，
         // 日期时间只出现在元信息行第一项。
@@ -1186,5 +1305,7 @@ enum UISnapshot {
                 segment("给定任意小的 ε，都存在 N，使得 n 大于 N 时差的绝对值小于 ε。", start: 14_000, end: 22_000),
             ]
         ))
+
+        return first.id
     }
 }
