@@ -38,6 +38,8 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// Obsidian vault 目录。选过一次就记住，之后「导出到 Obsidian」不再弹选择框
+        var obsidianVaultPath: String?
         /// 是否把术语表作为 whisper 的 `initial_prompt` 送进去（P12-1）。
         /// 缺省见 `AppConfig.glossaryPromptEnabled`——那里的注释写了为什么
         var glossaryPrompt: Bool?
@@ -163,6 +165,19 @@ enum AppConfig {
     static var searchProvider: String {
         value(env: "SEARCH_PROVIDER", file: store.current.searchProvider)?
             .lowercased() ?? "tavily"
+    }
+
+    /// Obsidian vault 目录。没有就是没选过，界面会弹一次选择框
+    static var obsidianVaultPath: String? {
+        value(env: "OBSIDIAN_VAULT", file: store.current.obsidianVaultPath)
+    }
+
+    /// 记住 vault 目录。写盘失败就**静默算了**：这只影响「下次要不要再问一次」，
+    /// 不该因为存不下偏好就让导出失败——用户这一刻要的是笔记落进 vault
+    static func setObsidianVaultPath(_ path: String) {
+        var config = store.current
+        config.obsidianVaultPath = path
+        try? save(config)
     }
 
     static var searchAPIKey: String? {

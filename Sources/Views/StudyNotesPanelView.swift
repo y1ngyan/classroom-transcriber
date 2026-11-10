@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 /// 详情页顶部的「课后笔记」区块（拍板 6a）。
 ///
@@ -135,6 +136,15 @@ struct StudyNotesPanelView: View {
                         .foregroundStyle(Theme.accent).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+
+                // Obsidian 导出：一次把「主笔记 + 术语页 + 课程索引」写进 vault。
+                // 和上面那份单文件 Markdown 是两个去处，不是同一个按钮的两种格式：
+                // 这份要用户先选一个 vault（Obsidian 的目录），选完记住，下次直接写
+                Button(action: exportToObsidian) {
+                    Text("导出到 Obsidian").textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.accent).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
 
             Spacer()
@@ -148,5 +158,52 @@ struct StudyNotesPanelView: View {
         guard let result = store.export(sessionID: session.id) else { return }
         exportMessage = result.message
         exportFailed = result.failed
+    }
+
+    /// 导出到 Obsidian vault。
+    ///
+    /// 目录选择用 `NSOpenPanel(canChooseDirectories:)` 而不是 `NSSavePanel`：
+    /// vault 是个**已有目录**，用户不该在这里新建文件。选过一次就记进配置，
+    /// 之后不再问——每节课都弹一次选择框是最惹人烦的交互
+    private func exportToObsidian() {
+        let vault: URL
+        if let saved = AppConfig.obsidianVaultPath, FileManager.default.fileExists(atPath: saved) {
+            vault = URL(fileURLWithPath: saved)
+        } else {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            panel.allowsMultipleSelection = false
+            panel.prompt = "选 Obsidian vault"
+            panel.message = "选你的 Obsidian vault 目录（笔记会写进它的课程子目录）"
+            guard panel.runModal() == .OK, let picked = panel.url else { return }
+            AppConfig.setObsidianVaultPath(picked.path)
+            vault = picked
+        }
+
+        let meta = ObsidianExporter.Meta(
+            course: session.course,
+            title: session.title,
+            startedAt: session.startedAt,
+            durationMillis: session.durationMillis,
+            recordingName: session.parts.first?.fileName
+        )
+        let docs = ObsidianExporter.documents(
+            meta: meta,
+            notes: store.notes[session.id],
+            questions: session.questions,
+            glossary: appState.glossary.entries
+        )
+        let indexPath = "\(meta.courseFolder)/\(meta.courseFolder).md"
+        do {
+            let result = try ObsidianExporter.write(docs, to: vault, overwrite: false,
+                                                    courseIndexPath: indexPath)
+            exportFailed = false
+            exportMessage = "已写入 \(result.written.count) 个文件"
+                + (result.skipped.isEmpty ? "" : "，跳过 \(result.skipped.count) 个已存在")
+        } catch {
+            exportFailed = true
+            exportMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
     }
 }

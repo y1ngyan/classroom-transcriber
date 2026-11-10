@@ -1966,6 +1966,15 @@ struct ClassroomTranscriberApp: App {
         //
         // 退出码跟着红绿走——`--whisper-selftest` 那边踩过的坑是自检失败不改
         // 退出码，于是只看退出码的探针分不出它是红是绿
+        // Obsidian 导出自检：--obsidian-selftest
+        // （纯本地：临时目录里写文件，不弹面板、不联网、不加载模型、不发声）
+        // 退出码跟着红绿走，理由同 --export-notes-selftest
+        if CommandLine.arguments.contains("--obsidian-selftest") {
+            let result = ObsidianExporterSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--export-notes-selftest") {
             print("笔记导出自检（纯本地 · 不弹面板、不联网、不加载模型、不发声）")
             let result = NotesExporter.selfTest()
@@ -2092,6 +2101,11 @@ struct ClassroomTranscriberApp: App {
                 lines += markdown.lines
                 passed += markdown.passed
                 failed += markdown.failed
+
+                let obsidian = ObsidianExporterSelfTest.run()
+                lines += obsidian.lines
+                passed += obsidian.passed
+                failed += obsidian.failed
 
                 let store = await StudyNotesStore.selfTest()
                 lines += store.lines
