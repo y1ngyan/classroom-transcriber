@@ -346,7 +346,7 @@ enum FileTranscription {
         // 实测一条 144.8 秒的录音只转出到 131.6 秒，末尾 13 秒消失，
         // 而且不报任何错。
         //
-        // 这和 CLAUDE.md 第 5 条（stop() 必须先定稿再取消消费任务）
+        // 这和 docs/design.md 第 5 条（stop() 必须先定稿再取消消费任务）
         // 是同一类顺序约束。用 inputAudioFile 那条路径时框架自己管这件事，
         // 所以之前没暴露过
         try await analyzer.finalizeAndFinishThroughEndOfInput()

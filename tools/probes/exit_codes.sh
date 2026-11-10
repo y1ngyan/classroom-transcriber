@@ -385,7 +385,7 @@ run "--quality-selftest"            --quality-selftest
 # ⚠️ **medium 必须真的在那边**（下面用 `cp -c` 做 APFS 克隆，不复制 539MB 的实体）。
 # 这是这条判据能不能红的全部关键：目录**全空**时，一个「缺 large 就换 medium」的
 # 实现照样会走到「medium 也不在」，于是照样 exit=3——**判据全绿，而回落已经写进
-# 去了**。那种假绿本仓库吃过亏（见 CLAUDE.md「判据必须能红」），所以这里刻意造出
+# 去了**。那种假绿本仓库吃过亏（见 docs/design.md「判据必须能红」），所以这里刻意造出
 # 「回落真的能成功」的现场，回落一旦落码就当场变红。把 large 那一条注回
 # `RetranscribeRun` 里验过：exit=0 → 这条断言红。
 #

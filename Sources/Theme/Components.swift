@@ -12,7 +12,7 @@ struct PillButton: View {
     enum Style {
         /// 主按钮
         case filled
-        /// 次级操作。`CLAUDE.md` 设计规范只定义了主按钮，但界面上确实有「添加图片」这类
+        /// 次级操作。`docs/design.md` 设计规范只定义了主按钮，但界面上确实有「添加图片」这类
         /// 不该跟主操作抢眼的地方——都涂成蓝的等于没有主次
         case quiet
     }
@@ -637,7 +637,7 @@ enum RecordingBadge {
 
 // MARK: - 状态标记
 
-/// 状态用小图标 + 颜色表达（`CLAUDE.md` 设计规范要求），而不是靠背景色块。
+/// 状态用小图标 + 颜色表达（`docs/design.md` 设计规范要求），而不是靠背景色块。
 struct StatusMark: View {
     enum Kind {
         case ok, warning, error, neutral

@@ -140,7 +140,7 @@ final class TranscriptionEngine {
 
     /// 要挂载的语言模型。
     ///
-    /// 实测结论（同 `CLAUDE.md` 第 4 条）：中文课堂挂单个 `zh-CN` 最优——它会把英文术语
+    /// 实测结论（同 `docs/design.md` 第 4 条）：中文课堂挂单个 `zh-CN` 最优——它会把英文术语
     /// 按读音转成拉丁字母（machine learning → "Machin learning"），这些偏差交给
     /// 术语词表纠正。同时挂 `en-US` 不会融合、反而污染输出，故默认不挂。
     var locales: [String] = ["zh-CN"]

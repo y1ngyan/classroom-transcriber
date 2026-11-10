@@ -21,7 +21,7 @@ import Foundation
 ///     `directory` / `recordingsDirectory` 都可以注入，见它的 init）。
 ///     用户真实的库一个字节都不碰——这条自检**不读也不写**真实库里的任何东西；
 ///   · 音频用 `say -v Tingting`（macOS 自带）合成一句课堂话，48kHz 单声道
-///     16-bit WAV——和 `CLAUDE.md` §9 那条「合成一段干净语音」同一条路子。
+///     16-bit WAV——和 `docs/design.md` §9 那条「合成一段干净语音」同一条路子。
 ///     用它而不是截一段真实录音：真实录音的**开头可能是静音**，转不出东西，
 ///     那会让「跑完了」这一组变成一条偶发的假红；
 ///   · 它**不碰麦克风、不发声、不联网**（`say -o` 是写文件，不是放音）。
@@ -248,7 +248,7 @@ enum RetranscribeStoreSelfTest {
 
     /// `say -o` 写一个 48kHz 单声道 16-bit 的 WAV。**不是放音**：`-o` 是写文件，
     /// 一个字也传不到扬声器上（「不许自造声」那条针对的是麦克风验证，
-    /// 这里是文件夹具，路子同 `CLAUDE.md` §9 那条合成语音）
+    /// 这里是文件夹具，路子同 `docs/design.md` §9 那条合成语音）
     private static func synthesizeSpeech(to url: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")

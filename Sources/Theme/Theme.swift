@@ -211,7 +211,7 @@ enum Theme {
         static let s28: CGFloat = 28
         static let s32: CGFloat = 32
         static let xl: CGFloat = 40
-        /// 区块之间的留白。`CLAUDE.md` 设计规范里「`Theme.Spacing.xxl`(80)」就是它——
+        /// 区块之间的留白。`docs/design.md` 设计规范里「`Theme.Spacing.xxl`(80)」就是它——
         /// 取代卡片：靠留白分组，而不是靠框
         static let xxl: CGFloat = 80
 
