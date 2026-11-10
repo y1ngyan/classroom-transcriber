@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct GlossaryView: View {
     @Environment(AppState.self) private var appState
@@ -15,6 +17,10 @@ struct GlossaryView: View {
 
 private struct GlossaryContent: View {
     @Bindable var store: GlossaryStore
+
+    /// 导入/导出的结果提示。就近显示——用户的眼睛在刚点的那一行
+    @State private var transferNotice: String?
+    @State private var transferFailed = false
     let presets: CoursePresetStore
     let punctuation: PunctuationStore
     let engine: TranscriptionEngine
@@ -24,6 +30,70 @@ private struct GlossaryContent: View {
     /// 顺带它也是「存为我的词库」那一包的**名字来源**，所以按钮上会把
     /// 这个名字显示出来，用户看得见自己会存成什么名字。
     @State private var courseInput = ""
+
+    // MARK: - 导入 / 导出
+
+    private func exportCSV() {
+        let content = GlossaryTransfer.csv(store.entries)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "术语表.csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try content.write(to: url, atomically: true, encoding: .utf8)
+            transferFailed = false
+            transferNotice = "已导出 \(store.entries.count) 个术语"
+        } catch {
+            transferFailed = true
+            transferNotice = error.localizedDescription
+        }
+    }
+
+    private func copyShareText() {
+        let text = GlossaryTransfer.shareText(store.entries)
+        guard !text.isEmpty else {
+            transferFailed = true
+            transferNotice = "词表是空的，没有可复制的内容"
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        transferFailed = false
+        transferNotice = "已复制 \(store.entries.count) 个术语，可直接粘贴发送"
+    }
+
+    /// 导入：读文本 → 自动识别格式 → 按 term 去重合并（本地优先）→ 落盘。
+    /// 结果要报清「新增 / 跳过 / 丢弃」三个数，否则用户不知道为什么少了条
+    private func importGlossary() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.commaSeparatedText, .json, .plainText, .text]
+        panel.message = "选一个词表文件（CSV / JSON / 从 Excel 复制的制表符文本都行）"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let raw = try? String(contentsOf: url, encoding: .utf8) else {
+            transferFailed = true
+            transferNotice = "读不出这个文件（不是 UTF-8 文本？）"
+            return
+        }
+
+        let parsed = GlossaryTransfer.parse(raw)
+        guard !parsed.entries.isEmpty else {
+            transferFailed = true
+            transferNotice = "这个文件里没有能识别的术语（格式：术语,误听写法,释义）"
+            return
+        }
+        let merged = GlossaryTransfer.merge(existing: store.entries, incoming: parsed.entries)
+        store.entries = merged.entries
+        store.persist()
+
+        var parts = ["新增 \(merged.added)", "跳过重复 \(merged.skipped)"]
+        if parsed.selfDuplicates > 0 { parts.append("文件内重复 \(parsed.selfDuplicates)") }
+        if parsed.rejected > 0 { parts.append("格式不对 \(parsed.rejected)") }
+        transferFailed = false
+        transferNotice = "导入完成：" + parts.joined(separator: " · ")
+    }
 
     var body: some View {
         ScrollView {
@@ -60,6 +130,19 @@ private struct GlossaryContent: View {
 
                 Spacer(minLength: Theme.Spacing.md)
 
+                Menu {
+                    Button("导出 CSV（发给同学）", action: exportCSV)
+                    Button("复制词表文本", action: copyShareText)
+                    Divider()
+                    Button("从文件导入（CSV / JSON / 制表符）…", action: importGlossary)
+                } label: {
+                    Text("导入 / 导出").textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.accent)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+
                 ToolbarActionButton(title: "新增术语", systemImage: "plus") {
                     store.addEntry()
                 }
@@ -81,6 +164,12 @@ private struct GlossaryContent: View {
 
             if !store.isConfigured {
                 StatusMark(kind: .warning, text: "未配置 DeepSeek 密钥，校正功能不可用")
+            }
+
+            if let notice = transferNotice {
+                Text(notice)
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(transferFailed ? Theme.error : Theme.textSupporting)
             }
 
             HStack(spacing: Theme.Spacing.md) {
