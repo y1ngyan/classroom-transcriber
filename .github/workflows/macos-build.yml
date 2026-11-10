@@ -1,0 +1,32 @@
+name: macos-build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install whisper.cpp
+        run: brew install whisper.cpp
+      - name: Build
+        run: CLASSROOM_BUILD_DIR=build-ci ./build.sh
+      - name: Self tests (headless, no mic)
+        run: |
+          BIN=build-ci/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber
+          "$BIN" --selftest
+          "$BIN" --speech-gate-selftest
+      - name: UI snapshots
+        run: |
+          BIN=build-ci/ClassroomTranscriber.app/Contents/MacOS/ClassroomTranscriber
+          "$BIN" --ui-snapshot /tmp/ui-snap
+          ls -l /tmp/ui-snap | head
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: /tmp/ui-snap/*.png

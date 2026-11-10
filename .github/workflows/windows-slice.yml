@@ -1,0 +1,30 @@
+name: windows-slice
+
+on:
+  push:
+    paths:
+      - "windows/**"
+      - ".github/workflows/windows-slice.yml"
+  pull_request:
+    paths:
+      - "windows/**"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        working-directory: windows
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        working-directory: windows
+        run: cmake --build build --config Release
+      - name: Smoke test without arguments
+        working-directory: windows
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse -Filter ct-win.exe build | Select-Object -First 1
+          if (-not $exe) { throw "ct-win.exe not built" }
+          & $exe.FullName
+          if ($LASTEXITCODE -ne 2) { throw "expected exit 2, got $LASTEXITCODE" }

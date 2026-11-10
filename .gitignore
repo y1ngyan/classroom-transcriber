@@ -16,3 +16,16 @@ build-ui/
 .build/
 
 .DS_Store
+
+# 验证/合并用的构建目录（与 build/ 同理，都是生成物）
+build-ui/
+build-merge/
+build-verify/
+build-hermes*/
+
+# 本地 agent 配置
+.agents/
+.codex/
+
+# 本地 agent 说明（不上公开仓库）
+AGENTS.md
