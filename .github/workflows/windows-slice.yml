@@ -8,6 +8,7 @@ on:
   pull_request:
     paths:
       - "windows/**"
+      - ".github/workflows/windows-slice.yml"
 
 jobs:
   build:
@@ -20,6 +21,11 @@ jobs:
       - name: Build
         working-directory: windows
         run: cmake --build build --config Release
+      # 单元测试**不加载模型**：模型不在仓库里，ct-win-tests 只链 ct-core
+      # （WAV 解析 / 重采样 / 门控 / 取窗 / 合并）
+      - name: Unit tests
+        working-directory: windows
+        run: ctest --test-dir build -C Release --output-on-failure
       - name: Smoke test without arguments
         working-directory: windows
         shell: pwsh
