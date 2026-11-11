@@ -103,6 +103,8 @@ struct SettingsView: View {
 
     private func save() {
         store.save()
+        // 悬浮字幕立刻生效（不必等下一场录音）：用户点了「保存」就该看到那条岛
+        appState.showsSubtitleOverlay = store.subtitleOverlay
         // 刚把后端保存成 Whisper：立刻开始预热模型。用户接下来多半
         // 就是切到转录页点开始录制，十几秒的准备时间正好花在
         // 「切页面、摆设备」这段里，而不是花在他盯着按钮的时候
@@ -265,6 +267,38 @@ struct SettingsView: View {
                     label: "术语前移",
                     isOn: $store.glossaryPrompt,
                     description: "开启后把术语表作为先验送进 whisper（不联网、不调模型）；顶部是 Apple 后端时不生效"
+                )
+
+                Separator()
+
+                // 音源：麦克风 / 系统声音。选系统声音就是录网课——
+                // 需要「屏幕录制」权限，第一次会弹系统框
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.md) {
+                    Text("音源")
+                        .textStyle(Theme.Text.body)
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Picker("", selection: $store.audioSource) {
+                        Text("麦克风（课堂现场）").tag("mic")
+                        Text("系统声音（网课 / 会议）").tag("system")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 220, alignment: .trailing)
+                }
+                Text("选「系统声音」时 App 不去碰麦克风，只采这台机器正在播放的声音；"
+                     + "第一次需要在「系统设置 → 隐私与安全性 → 屏幕录制」里授权")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textTertiary)
+
+                Separator()
+
+                // 悬浮字幕：全屏看网课时浮在顶部的一条，说话时两行、停顿后收起
+                ToggleRow(
+                    label: "悬浮字幕（灵动岛）",
+                    isOn: $store.subtitleOverlay,
+                    description: "转录中的句子浮在屏幕顶部，不抢焦点、全屏也能显示；"
+                        + "停顿 6 秒自动收成小胶囊"
                 )
 
                 Separator()

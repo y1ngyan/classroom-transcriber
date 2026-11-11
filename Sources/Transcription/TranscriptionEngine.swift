@@ -215,6 +215,13 @@ final class TranscriptionEngine {
     private var analyzer: SpeechAnalyzer?
     private var transcribers: [SpeechTranscriber] = []
     private var audioEngine: AVAudioEngine?
+    /// 系统声音采集（网课模式）。麦克风那条路不用它
+    private var systemAudioCapture: SystemAudioCapture?
+    /// 把系统声音从采集缓冲搬进管线的循环
+    private var systemAudioPump: Task<Void, Never>?
+    /// 新句定稿的回调（悬浮字幕用）。引擎不认识界面，只往外抛文本。
+    /// 与既有的 `onFinalSegment`（抛整段对象）分开：那个给业务层，这个只给显示层
+    var onSubtitleSegment: ((String) -> Void)?
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var resultTasks: [Task<Void, Never>] = []
     private var segmentIndex: [SegmentKey: Int] = [:]
@@ -544,6 +551,13 @@ final class TranscriptionEngine {
         whisperSkippedRounds = 0
         whisperRoundSeconds.removeAll()
 
+        // 系统声音（网课）分支：**不碰麦克风**。麦克风那条路会占住输入设备、
+        // 触发麦克风权限，而网课场景用户根本不在说话。
+        if AppConfig.usesSystemAudio {
+            await startSystemAudio(pipeline: pipeline)
+            return
+        }
+
         guard startMicrophone(
             engine: audioEngine,
             micFormat: micFormat,
@@ -645,6 +659,13 @@ final class TranscriptionEngine {
         // 合并器是按候选顺序追加的，吐回来的顺序不保证与索引一致，必须重建
         rebuildSegmentIndex()
 
+        // 悬浮字幕：只喂**新定稿**的句子。喂候选会把同一句刷三遍，
+        // 岛里就会看到「学习率太大学/学习率太大会/学习率太大会震荡」一路抖
+        let freshlyFinal = segments.filter { $0.isFinal && wasFinal[$0.id] != true }
+        for segment in freshlyFinal {
+            onSubtitleSegment?(segment.text)
+        }
+
         for index in segments.indices
         where segments[index].isFinal && wasFinal[segments[index].id] != true {
             applyQuestionDetection(at: index)
@@ -684,6 +705,37 @@ final class TranscriptionEngine {
             channels: 1,
             interleaved: false
         )
+    }
+
+    /// 系统声音 → 管线。与麦克风那条路的唯一差别是**音源**：之后的滑窗、
+    /// 静音门控、幻觉过滤、合并全在同一条管线上
+    private func startSystemAudio(pipeline: WhisperWindowPipeline) async {
+        let capture = SystemAudioCapture()
+        systemAudioCapture = capture
+        do {
+            try await capture.start()
+        } catch {
+            statusMessage = "❌ " + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            systemAudioCapture = nil
+            return
+        }
+        // 轮询取走攒下的采样：200ms 一次，既不会让管线吃到碎渣，
+        // 也不会让采集队列背上「往管线塞数据」的跨 actor 责任
+        systemAudioPump = Task { [weak self] in
+            while !Task.isCancelled {
+                let chunk = capture.drain()
+                if !chunk.isEmpty { pipeline.append(chunk) }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                if self?.isRunning != true { break }
+            }
+        }
+
+        isRunning = true
+        statusMessage = "转录中 · 系统声音（网课）· Whisper 本地"
+            + " · 首句约 12 秒后出现（先攒满 10 秒窗口）"
+        whisperLoopTask = Task { [weak self] in
+            await self?.runWhisperLoop(pipeline: pipeline)
+        }
     }
 
     private func startMicrophone(
@@ -1712,6 +1764,13 @@ final class TranscriptionEngine {
         // 先停草稿循环再卸 tap：反过来的话，一条已经排队的草稿推送可能在
         // 收尾落盘**之后**才落地，把一份过期的转录覆盖回去
         stopDraftLoop()
+        // 系统声音（网课）模式下没有麦克风引擎，停止采集要靠 capture 自己
+        systemAudioPump?.cancel()
+        systemAudioPump = nil
+        if let capture = systemAudioCapture {
+            systemAudioCapture = nil
+            Task { await capture.stop() }
+        }
         // 设备监视要在摘设备之前停：它下一秒还会去读 `engine.inputNode`，
         // 而下面马上就把 audioEngine 置 nil + 把设备还给系统了
         endCaptureTracking()

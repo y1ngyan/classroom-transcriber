@@ -1993,6 +1993,69 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        // 系统声音采集探针：--system-audio-probe <秒数>
+        // 打「收到多少帧 / 峰值多大」，用来回答「网课的声音到底进没进来」。
+        //
+        // **不能用 DispatchSemaphore 等**：主线程一堵，@MainActor 的 Task 就永远
+        // 得不到执行机会（实测会挂死 300 秒）。改成转 RunLoop——主线程还在转圈，
+        // Task 能跑，我们只是在这里等着它把标记置上
+        if let index = CommandLine.arguments.firstIndex(of: "--system-audio-probe") {
+            final class ProbeResult: @unchecked Sendable {
+                var frames = 0
+                var peak: Float = 0
+                var finished = false
+                var failure: String?
+            }
+            let seconds = CommandLine.arguments.count > index + 1
+                ? (Double(CommandLine.arguments[index + 1]) ?? 5) : 5
+            // 可选的第三个参数：把采到的音频写成 wav，好接着跑 --conv-file 验「进来的是不是话」
+            let wavPath: String? = CommandLine.arguments.count > index + 2
+                && !CommandLine.arguments[index + 2].hasPrefix("--")
+                ? CommandLine.arguments[index + 2] : nil
+            let result = ProbeResult()
+            let probe = SystemAudioCapture()
+            Task { @MainActor in
+                do {
+                    try await probe.start()
+                } catch {
+                    result.failure = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    result.finished = true
+                    return
+                }
+                print("采集已启动，采样 \(seconds) 秒…")
+                let deadline = Date().addingTimeInterval(seconds)
+                var collected: [Float] = []
+                while Date() < deadline {
+                    let chunk = probe.drain()
+                    result.frames += chunk.count
+                    for sample in chunk { result.peak = max(result.peak, abs(sample)) }
+                    if wavPath != nil { collected.append(contentsOf: chunk) }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                await probe.stop()
+                if let wavPath { writeProbeWav(collected, to: wavPath) }
+                result.finished = true
+            }
+            let deadline = Date().addingTimeInterval(seconds + 20)
+            while !result.finished && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+            if let failure = result.failure {
+                print("❌ " + failure)
+                exitReleasingGgml(2)
+            }
+            print(String(format: "收到 %d 帧（%.1f 秒 @16kHz）· 峰值 %.4f (%@)",
+                         result.frames, Double(result.frames) / 16_000, result.peak,
+                         result.peak > 0.005 ? "有声音" : "几乎无声（网课没在放？或音量 0）"))
+            exitReleasingGgml(result.frames > 0 ? 0 : 1)
+        }
+
+        if CommandLine.arguments.contains("--subtitle-overlay-selftest") {
+            let result = SubtitleOverlaySelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--language-selftest") {
             let result = LanguagePreferenceSelfTest.run()
             for line in result.lines { print(line) }
@@ -2161,6 +2224,11 @@ struct ClassroomTranscriberApp: App {
                 lines += language.lines
                 passed += language.passed
                 failed += language.failed
+
+                let overlay = SubtitleOverlaySelfTest.run()
+                lines += overlay.lines
+                passed += overlay.passed
+                failed += overlay.failed
 
                 let store = await StudyNotesStore.selfTest()
                 lines += store.lines
@@ -2611,4 +2679,23 @@ private func describe(_ state: WhisperRuntime.State) -> String {
     case .ready(let seconds): return String(format: "ready（用时 %.2f 秒）", seconds)
     case .unavailable(let reason): return "unavailable（\(reason)）"
     }
+}
+
+
+/// 探针用：把 16k 单声道 Float 写成 PCM16 WAV（44 字节头，不引第三方库）
+private func writeProbeWav(_ samples: [Float], to path: String) {
+    var data = Data()
+    let dataBytes = UInt32(samples.count * 2)
+    func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+    func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+    data.append(contentsOf: Array("RIFF".utf8)); append32(36 + dataBytes)
+    data.append(contentsOf: Array("WAVE".utf8))
+    data.append(contentsOf: Array("fmt ".utf8)); append32(16); append16(1); append16(1)
+    append32(16_000); append32(32_000); append16(2); append16(16)
+    data.append(contentsOf: Array("data".utf8)); append32(dataBytes)
+    for sample in samples {
+        let scaled = Int16(max(-1, min(1, sample)) * 32_767)
+        append16(UInt16(bitPattern: scaled))
+    }
+    try? data.write(to: URL(fileURLWithPath: path))
 }

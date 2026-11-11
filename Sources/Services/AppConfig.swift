@@ -38,6 +38,12 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// 悬浮字幕（灵动岛样式）。缺省关：它是一条浮在全屏视频上的窗，
+        /// 用户没要就不该出现
+        var subtitleOverlay: Bool?
+        /// 音源：mic / system。缺省 mic（与改造前一致）。
+        /// system = 采系统正在播放的声音（网课/会议），需要「屏幕录制」权限
+        var audioSource: String?
         /// 转录语言（auto / zh / en / ja / ko / de / fr / es / ru）。缺省 zh，
         /// 与改造前一致；非法值由 `LanguagePreference.normalize` 回落 zh
         var transcriptionLanguage: String?
@@ -163,6 +169,23 @@ enum AppConfig {
 
     static var deepSeekAPIKey: String? {
         value(env: "DEEPSEEK_API_KEY", file: store.current.deepSeekAPIKey)
+    }
+
+    /// 音源。`CLASSROOM_AUDIO_SOURCE=system` 可强制覆盖（探针用）
+    static var audioSource: String {
+        let raw = value(env: "CLASSROOM_AUDIO_SOURCE", file: store.current.audioSource)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return raw == "system" ? "system" : "mic"
+    }
+
+    static var usesSystemAudio: Bool { audioSource == "system" }
+
+    /// 悬浮字幕开关（`CLASSROOM_SUBTITLE_OVERLAY=1` 可强制打开，探针/演示用）
+    static var subtitleOverlayEnabled: Bool {
+        if let raw = value(env: "CLASSROOM_SUBTITLE_OVERLAY", file: nil) {
+            return ["1", "on", "true", "yes"].contains(raw.trimmingCharacters(in: .whitespaces).lowercased())
+        }
+        return store.current.subtitleOverlay ?? false
     }
 
     /// 转录语言。环境变量 `CLASSROOM_LANGUAGE` 可覆盖（探针要能指定语言跑同一段音频）

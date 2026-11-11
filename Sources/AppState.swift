@@ -44,6 +44,20 @@ final class AppState {
     /// 当前标签页。放在 AppState 而不是 `RootView` 的 `@State`：
     /// 录音空状态里的「去转录页录制」要能从 RecordingsView 切走标签页，
     /// 而那个视图拿不到 RootView 的局部状态
+    /// 悬浮字幕开关。改了立刻生效：开 → 显示窗；关 → 隐藏并清空，
+    /// 否则关掉之后那条浮层还挂在那儿，用户只能重启 App
+    var showsSubtitleOverlay: Bool = false {
+        didSet {
+            guard oldValue != showsSubtitleOverlay else { return }
+            if showsSubtitleOverlay {
+                SubtitleOverlayController.shared.show()
+            } else {
+                SubtitleOverlayController.shared.clear()
+                SubtitleOverlayController.shared.hide()
+            }
+        }
+    }
+
     var selectedTab: RootView.Tab = .transcription
 
     /// - Parameter sessionsDirectory: 录音库（`sessions/`）落在哪。默认 nil =
@@ -82,6 +96,17 @@ final class AppState {
         self.questions = QuestionAnswerStore(
             recordings: recordings, transcription: transcription
         )
+
+        // 悬浮字幕：引擎只往外抛「这句定稿了」，显不显示由这里决定。
+        // **必须放在所有存储属性初始化之后**——闭包里用到 self，
+        // 放前面编译器会报「used before being initialized」
+        showsSubtitleOverlay = AppConfig.subtitleOverlayEnabled
+        transcription.onSubtitleSegment = { [weak self] text in
+            guard let self else { return }
+            if self.showsSubtitleOverlay {
+                SubtitleOverlayController.shared.push(text)
+            }
+        }
 
         AppConfig.writeTemplateIfMissing()
 
