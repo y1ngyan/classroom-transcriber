@@ -125,8 +125,30 @@ enum SpeechGate {
     static func isSilence(_ reading: Reading) -> Bool {
         guard reading.frameCount > 0 else { return false }
         guard reading.speechRatio < minSpeechRatio else { return false }
-        return reading.speech < speechCeiling
+        // ① 绝对线：安静环境下的静音窗
+        if reading.speech < speechCeiling { return true }
+        // ② 相对线：**教室噪声下的静音窗**。
+        // 绝对线在真实教室里经常永远不成立——实测（2026-11-04 那节课）底噪
+        // 0.0049、p90 判据 0.01，18 个窗一个有都没被判静音；可同一段里
+        // 没人说话的窗 p90 也就底噪的 1.2 倍左右。于是 whisper 在每个静音窗里
+        // 照解，编出「谢谢观看」那类句子——用户听到的「静音幻听」就是这个。
+        // 相对线只在**底噪本身不低**（≥ 0.002）时生效：安静的房间里底噪接近 0，
+        // 用倍数判会把真人小声说话一起吞掉，那比幻觉更糟
+        // 只对「噪声级」底噪生效：底噪必须落在 [0.002, 0.01]。
+        // 上限这一条不能省——电平均匀的人声（幅度 0.02）底噪也接近 0.02，
+        // 不设上限的话它会被自己的底噪倍数判成静音，而这正是第 2 条判据
+        // 要保护的那一类（自检里有现成用例）。
+        guard reading.floor >= relativeFloorActivation, reading.floor <= 0.01 else { return false }
+        return reading.speech < reading.floor * relativeCeilingFactor
     }
+
+    /// 相对线的启用门槛：底噪低于这个值说明房间本来就安静，走绝对线就够
+    static let relativeFloorActivation: Double = 0.002
+
+    /// 窗内 p90 低于「底噪 × 这个倍数」判静音。
+    /// 2.2 的来历：实测该节课判有声那批最近的窗是底噪的 3.7 倍（0.01808 / 0.00488），
+    /// 而纯噪声窗在 1.0–1.5 倍之间；2.2 落在两批中间，且离「真人小声」那侧更远
+    static let relativeCeilingFactor: Double = 2.2
 
     /// 一窗的判定。`samples` 是 16kHz 单声道。
     static func evaluate(samples: [Float], sampleRate: Double = 16_000) -> (verdict: Verdict, reading: Reading) {
@@ -297,6 +319,25 @@ extension SpeechGate {
               !isSilence(Reading(windowSeconds: 0, frameCount: 0, floor: 0, median: 0, speech: 0, speechRatio: 0)))
         check("空样本喂进 evaluate 也判有声、不崩",
               !evaluate(samples: [], sampleRate: rate).verdict.isSilence)
+
+        // MARK: 四之二、相对线（教室噪声下的静音窗）
+
+        func noisy(floor: Double, p90: Double, ratio: Double = 0.05) -> Reading {
+            Reading(windowSeconds: 10, frameCount: 500, floor: floor,
+                    median: floor * 1.1, speech: p90, speechRatio: ratio)
+        }
+        check("噪声地板 0.004、p90 只有地板的 1.2 倍 → 判静音（绝对线管不到这里）",
+              isSilence(noisy(floor: 0.004, p90: 0.0048)))
+        check("同底噪、p90 是地板 3.7 倍（实测真人说话那批的下沿）→ 判有声",
+              !isSilence(noisy(floor: 0.004, p90: 0.0148)))
+        check("安静房间（底噪 0.0005）走绝对线：p90 0.0008 → 静音",
+              isSilence(noisy(floor: 0.0005, p90: 0.0008)))
+        check("安静房间不启用相对线：p90 0.004（地板的 8 倍但低于绝对上限）→ 仍判静音",
+              isSilence(noisy(floor: 0.0005, p90: 0.004)))
+        check("相对线的启用门槛是底噪 0.002",
+              relativeFloorActivation == 0.002, "\(relativeFloorActivation)")
+        check("相对倍数是 2.2",
+              relativeCeilingFactor == 2.2, "\(relativeCeilingFactor)")
 
         // MARK: 五、常量与同源性（写死数值，别拿实现再算一遍）
 

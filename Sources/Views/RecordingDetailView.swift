@@ -135,8 +135,12 @@ struct RecordingDetailView: View {
         }
         .onAppear(perform: applyPreviewState)
         // 离开只暂停、不 stop：从详情页返回列表再点回来，位置还在。
-        // 停止由「换会话」的 `load` 负责
-        .onDisappear { player.pause() }
+        // 停止由「换会话」的 `load` 负责。
+        // 顺带把「听到哪」落盘（断点续听）：下次打开这节课从这里接着放
+        .onDisappear {
+            player.pause()
+            store.updatePlayedPosition(sessionID: session.id, millis: player.currentTimeMillis)
+        }
         .sheet(isPresented: $isRenaming) { renameSheet }
         .sheet(isPresented: $isSettingCourse) { courseSheet }
         .sheet(isPresented: $isExporting) {

@@ -62,6 +62,25 @@ final class TranscriptPlayer {
                 durationMillis: part.durationMillis
             )
         }
+
+        // 断点续听：上次听到哪儿就定位到哪儿，但**不自动播放**——
+        // 打开一节课就突然出声是最容易吓人的交互（课堂上戴耳机时尤其）
+        let end = (clips.last?.offsetMillis ?? 0) + (clips.last?.durationMillis ?? 0)
+        if let resume = Self.resumeTarget(lastPlayedMillis: session.lastPlayedMillis, totalMillis: end) {
+            seek(toMillis: resume, play: false)
+        }
+    }
+
+    /// 续播位置：**纯函数**，好离线断言。
+    ///
+    /// 三条规则：
+    /// - 没听过（0 或负）→ nil，从头放；
+    /// - 离结尾不到 1 秒 → nil，从头放（听完的课再打开应该从头，不是停在最后一秒）；
+    /// - 其余 → 上次的位置（夹到 [0, 总长]）
+    static func resumeTarget(lastPlayedMillis: Int, totalMillis: Int) -> Int? {
+        guard totalMillis > 0, lastPlayedMillis > 0 else { return nil }
+        if lastPlayedMillis >= totalMillis - 1_000 { return nil }
+        return min(lastPlayedMillis, totalMillis)
     }
 
     // MARK: - 播放控制

@@ -212,6 +212,20 @@ final class RecordingsStore {
     }
 
     /// 保存/更新一条会话：写正文文件 + 同步 index 里的摘要
+    /// 记下「听到哪」（断点续听）。
+    ///
+    /// 只在真正停下来时写（关详情页、暂停、切课），不是每帧写：
+    /// 一节课 45 分钟、每 0.25 秒一次落盘会把磁盘写爆，而续听精度 ±5 秒完全够用。
+    /// `millis` 会被夹到 [0, 时长]，避免手改存档或音频被截断时越界
+    func updatePlayedPosition(sessionID: UUID, millis: Int) {
+        guard var session = session(id: sessionID) else { return }
+        let total = session.parts.reduce(0) { $0 + $1.durationMillis }
+        let clamped = max(0, min(millis, max(0, total)))
+        guard clamped != session.lastPlayedMillis else { return }
+        session.lastPlayedMillis = clamped
+        save(session)
+    }
+
     func save(_ session: RecordingSession) {
         do {
             try atomicWrite(session, to: fileURL(for: session.id))

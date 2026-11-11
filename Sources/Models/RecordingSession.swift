@@ -14,6 +14,10 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     /// 录音片段。「接着录」一次就追加一条，永远按时间顺序
     var parts: [RecordingPart]
 
+    /// 上次听到哪（会话绝对毫秒）。**断点续听**用：打开详情页时播放器从这里接着放。
+    /// 缺省 0 = 没听过；老存档没有这个键，解码回落 0，行为与改造前一致
+    var lastPlayedMillis: Int = 0
+
     /// 用户给这条录音起的名字。空表示没起过——列表回落到显示
     /// 日期和首段文本。**不给默认名**：自动生成的「未命名录音 3」
     /// 比空更糟，用户得先删掉它才能起自己的名
@@ -43,6 +47,7 @@ struct RecordingSession: Identifiable, Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, updatedAt, parts, title, course
         case questions, questionSchemaVersion
+        case lastPlayedMillis
     }
 
     init(id: UUID, startedAt: Date, updatedAt: Date, parts: [RecordingPart],
@@ -72,6 +77,8 @@ struct RecordingSession: Identifiable, Codable, Equatable {
         questions = try c.decodeIfPresent([LenientElement<LessonQuestion>].self, forKey: .questions)?
             .compactMap(\.value) ?? []
         questionSchemaVersion = try c.decodeIfPresent(Int.self, forKey: .questionSchemaVersion) ?? 0
+        // 老存档没有这个键：回落 0（= 从头放），不能让它读不出整条会话
+        lastPlayedMillis = try c.decodeIfPresent(Int.self, forKey: .lastPlayedMillis) ?? 0
     }
 
     /// 列表上显示的名字。用户起过就用它，没起过回落到时间——
