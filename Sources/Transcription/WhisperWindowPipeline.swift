@@ -115,15 +115,22 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 而不是把入参回显一遍——见 `WhisperFileTranscription.Result.initialPrompt`）
     let initialPrompt: String?
 
+    /// 解码语言（whisper 的 language 参数；`auto` 交给它自己判）。
+    /// 存成实例属性而不是每次读配置：一场课录到一半改语言，前后两段会变成两套解码，
+    /// 而文本上看不出这个分界（同 `initialPrompt` 的理由）
+    let language: String
+
     init(
         segments: [TranscriptSegment] = [],
         capacitySeconds: Double = 15,
         initialPrompt: String? = nil,
         gatePolicy: SpeechGatePolicy = .fromConfig(),
-        mergeStepMillis: Int = WhisperWindowPipeline.stepMillis
+        mergeStepMillis: Int = WhisperWindowPipeline.stepMillis,
+        language: String = AppConfig.transcriptionLanguage
     ) {
         self.segments = segments
         self.initialPrompt = initialPrompt
+        self.language = language
         self.gatePolicy = gatePolicy
         self.mergeStepMillis = mergeStepMillis
         self.buffer = WhisperWindowBuffer(capacitySeconds: capacitySeconds, sampleRate: Self.sampleRate)
@@ -306,6 +313,7 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         // 得能翻回是这次录音的哪一窗
         let raw = try engine.transcribe(
             windowSamples,
+            language: language,
             initialPrompt: initialPrompt,
             audio: "实时 · 窗口@\(windowStartMillis)ms"
         )

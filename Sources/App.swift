@@ -1993,6 +1993,12 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.failed == 0 ? 0 : 1)
         }
 
+        if CommandLine.arguments.contains("--language-selftest") {
+            let result = LanguagePreferenceSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--glossary-transfer-selftest") {
             let result = GlossaryTransferSelfTest.run()
             for line in result.lines { print(line) }
@@ -2150,6 +2156,11 @@ struct ClassroomTranscriberApp: App {
                 lines += transfer.lines
                 passed += transfer.passed
                 failed += transfer.failed
+
+                let language = LanguagePreferenceSelfTest.run()
+                lines += language.lines
+                passed += language.passed
+                failed += language.failed
 
                 let store = await StudyNotesStore.selfTest()
                 lines += store.lines

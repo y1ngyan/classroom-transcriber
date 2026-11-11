@@ -38,6 +38,9 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// 转录语言（auto / zh / en / ja / ko / de / fr / es / ru）。缺省 zh，
+        /// 与改造前一致；非法值由 `LanguagePreference.normalize` 回落 zh
+        var transcriptionLanguage: String?
         /// Obsidian vault 目录。选过一次就记住，之后「导出到 Obsidian」不再弹选择框
         var obsidianVaultPath: String?
         /// 是否把术语表作为 whisper 的 `initial_prompt` 送进去（P12-1）。
@@ -160,6 +163,11 @@ enum AppConfig {
 
     static var deepSeekAPIKey: String? {
         value(env: "DEEPSEEK_API_KEY", file: store.current.deepSeekAPIKey)
+    }
+
+    /// 转录语言。环境变量 `CLASSROOM_LANGUAGE` 可覆盖（探针要能指定语言跑同一段音频）
+    static var transcriptionLanguage: String {
+        LanguagePreference.normalize(value(env: "CLASSROOM_LANGUAGE", file: store.current.transcriptionLanguage))
     }
 
     static var searchProvider: String {

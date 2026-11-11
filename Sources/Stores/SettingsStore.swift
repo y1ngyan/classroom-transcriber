@@ -32,6 +32,9 @@ final class SettingsStore {
 
     /// 实时转录后端。**默认 APPLE**，见 `TranscriptionBackend`——
     /// 这不是「哪个更准」的取舍，是「默认状态下不许把课录丢」的取舍。
+    /// 转录语言（whisper 的 language / Apple 的 locale，映射只在 LanguagePreference 一处）
+    var language: String = LanguagePreference.defaultCode
+
     var backend: TranscriptionBackend = .apple
 
     /// 段落定稿后是否自动联网核查。默认关闭：核查要联网、要花检索和 LLM
@@ -120,6 +123,7 @@ final class SettingsStore {
         questionSensitivity = QuestionSensitivity.of(config.questionSensitivity)
         autoFactCheck = config.autoFactCheck ?? false
         backend = .of(config.transcriptionBackend)
+        language = LanguagePreference.normalize(config.transcriptionLanguage)
         // 缺省走同一个纯函数，不在这里另写一个 `?? true`——
         // 「界面缺省」和「无头入口缺省」是两处独立的 `?? true` 的话，
         // 改了一处另一处不会跟着动，而两处不一致在界面上看不出来
@@ -155,6 +159,7 @@ final class SettingsStore {
         config.questionSensitivity = questionSensitivity.rawValue
         config.autoFactCheck = autoFactCheck
         config.transcriptionBackend = backend.rawValue
+        config.transcriptionLanguage = language
         config.glossaryPrompt = glossaryPrompt
         config.speechGate = skipSilentWindows
 
@@ -181,6 +186,7 @@ final class SettingsStore {
         return micGain != MicGainMode.of(config.micGain)
             || questionSensitivity != QuestionSensitivity.of(config.questionSensitivity)
             || backend != .of(config.transcriptionBackend)
+            || language != LanguagePreference.normalize(config.transcriptionLanguage)
             || glossaryPrompt != AppConfig.glossaryPromptEnabled(
                 fileValue: config.glossaryPrompt, envValue: nil)
             || skipSilentWindows != AppConfig.speechGateEnabled(

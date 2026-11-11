@@ -269,6 +269,30 @@ struct SettingsView: View {
 
                 Separator()
 
+                // 转录语言。放在后端之后：用户先决定用什么引擎，再决定听什么语言。
+                // 自动检测在 whisper 上由它逐窗判，在 Apple 上退化成「中英两条」——
+                // 说明文案要点明这个差别，否则「选自动却只说中文」会被当成 bug
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.md) {
+                    Text("转录语言")
+                        .textStyle(Theme.Text.body)
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Picker("", selection: $store.language) {
+                        ForEach(LanguagePreference.options, id: \.code) { option in
+                            Text(option.label).tag(option.code)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 160, alignment: .trailing)
+                }
+                Text("「自动检测」在 whisper 后端逐窗判断，在 Apple 后端退化为中英双语；"
+                     + "中英混讲的课选「中文」通常更稳（英文术语会被转成拉丁字母，交给术语表纠）")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textTertiary)
+
+                Separator()
+
                 // 静音窗跳过（P12-3）。**不藏在「后端 = whisper」后面**：这条只看
                 // 转录走没走 whisper，和「录不录」无关；藏起来会让默认的后端用户
                 // 以为设置页里根本没有这个开关。措辞必须写出代价——「关掉」是
