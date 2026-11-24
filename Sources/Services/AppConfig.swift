@@ -38,6 +38,8 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// 强效去幻听：录外部声音时默认开（nil = 跟随音源）；麦克风想开也能手动开
+        var strictHallucinationFilter: Bool?
         /// 悬浮字幕的位置（用户拖动后记住）。缺省 nil = 自动贴屏幕顶部中间
         var subtitleOverlayX: Double?
         var subtitleOverlayTop: Double?
@@ -182,6 +184,12 @@ enum AppConfig {
     }
 
     static var usesSystemAudio: Bool { audioSource == "system" }
+
+    /// 强效去幻听是否生效：录外部声音（系统声音）时**默认开**——
+    /// 外部声音里出现的括号字幕、片尾谢幕词不可能是真话
+    static var strictHallucinationFilter: Bool {
+        store.current.strictHallucinationFilter ?? usesSystemAudio
+    }
 
     /// 悬浮字幕的位置：拖动过才有值
     static var subtitleOverlayOrigin: (x: Double, top: Double)? {

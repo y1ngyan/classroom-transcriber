@@ -632,7 +632,9 @@ struct ClassroomTranscriberApp: App {
                     continue
                 }
                 let label = (path as NSString).lastPathComponent.replacingOccurrences(of: ".log", with: "")
-                for line in HallucinationReplay.report(log: text, label: label) {
+                let strict = CommandLine.arguments.contains("--strict")
+                let mode: WhisperHallucination.Strictness = strict ? .strict : .normal
+                for line in HallucinationReplay.report(log: text, label: label + (strict ? " · 强效档" : ""), strictness: mode) {
                     print(line)
                 }
             }

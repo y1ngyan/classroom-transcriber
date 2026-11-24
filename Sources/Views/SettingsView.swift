@@ -293,6 +293,15 @@ struct SettingsView: View {
 
                 Separator()
 
+                // 强效去幻听：外部声音里冒出来的括号字幕、片尾谢幕词一律屏蔽
+                ToggleRow(
+                    label: "强效去幻听",
+                    isOn: $store.strictHallucination,
+                    description: "录外部声音时**默认开**：括号标注、片尾谢幕词、影视词汇"
+                        + "整段丢弃，同一句出现第二次也丢。外部声音里这些不可能真话，"
+                        + "所以这一档可以放心收紧"
+                )
+
                 // 悬浮字幕：全屏看网课时浮在顶部的一条，说话时两行、停顿后收起
                 ToggleRow(
                     label: "悬浮字幕（灵动岛）",

@@ -48,7 +48,10 @@ enum HallucinationReplay {
 
     /// 对一批行跑判据，返回逐条结果。**这就是 `--hallucination-selftest` 之上的
     /// 真正回归**：自检用的是我编的用例，这里用的是真实录音跑出来的每一段
-    static func analyze(_ rows: [Row]) -> (dropped: [(Row, WhisperHallucination.Verdict)], kept: Int) {
+    static func analyze(
+        _ rows: [Row],
+        strictness: WhisperHallucination.Strictness = .normal
+    ) -> (dropped: [(Row, WhisperHallucination.Verdict)], kept: Int) {
         var dropped: [(Row, WhisperHallucination.Verdict)] = []
         var kept = 0
         for row in rows {
@@ -56,19 +59,21 @@ enum HallucinationReplay {
                 text: row.text,
                 noSpeechProbability: row.noSpeech,
                 audioLevel: row.level,
-                silenceFloor: row.floor
+                silenceFloor: row.floor,
+                strictness: strictness
             )
             if case .keep = verdict { kept += 1 } else { dropped.append((row, verdict)) }
         }
         return (dropped, kept)
     }
 
-    static func report(log: String, label: String) -> [String] {
+    static func report(log: String, label: String,
+                       strictness: WhisperHallucination.Strictness = .normal) -> [String] {
         let rows = parse(log: log)
         guard !rows.isEmpty else {
             return ["❌ \(label)：没解析出任何段——日志里没有 TSV 段（是不是没加 --probe-only？）"]
         }
-        let (dropped, kept) = analyze(rows)
+        let (dropped, kept) = analyze(rows, strictness: strictness)
         var lines = ["─── 离线重算：\(label) ───"]
         let loudTotal = rows.filter { $0.level >= $0.floor }.count
         let droppedLoud = dropped.filter { $0.0.level >= $0.0.floor }.count

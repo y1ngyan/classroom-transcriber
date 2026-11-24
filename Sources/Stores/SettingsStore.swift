@@ -41,6 +41,9 @@ final class SettingsStore {
     /// 悬浮字幕（灵动岛）
     var subtitleOverlay: Bool = false
 
+    /// 强效去幻听（录外部声音时默认开）
+    var strictHallucination: Bool = false
+
     var backend: TranscriptionBackend = .apple
 
     /// 段落定稿后是否自动联网核查。默认关闭：核查要联网、要花检索和 LLM
@@ -132,6 +135,7 @@ final class SettingsStore {
         language = LanguagePreference.normalize(config.transcriptionLanguage)
         audioSource = (config.audioSource == "system") ? "system" : "mic"
         subtitleOverlay = config.subtitleOverlay ?? false
+        strictHallucination = config.strictHallucinationFilter ?? (config.audioSource == "system")
         // 缺省走同一个纯函数，不在这里另写一个 `?? true`——
         // 「界面缺省」和「无头入口缺省」是两处独立的 `?? true` 的话，
         // 改了一处另一处不会跟着动，而两处不一致在界面上看不出来
@@ -170,6 +174,7 @@ final class SettingsStore {
         config.transcriptionLanguage = language
         config.audioSource = audioSource
         config.subtitleOverlay = subtitleOverlay
+        config.strictHallucinationFilter = strictHallucination
         config.glossaryPrompt = glossaryPrompt
         config.speechGate = skipSilentWindows
 
@@ -199,6 +204,8 @@ final class SettingsStore {
             || language != LanguagePreference.normalize(config.transcriptionLanguage)
             || audioSource != ((config.audioSource == "system") ? "system" : "mic")
             || subtitleOverlay != (config.subtitleOverlay ?? false)
+            || strictHallucination != (config.strictHallucinationFilter
+                                       ?? (config.audioSource == "system"))
             || glossaryPrompt != AppConfig.glossaryPromptEnabled(
                 fileValue: config.glossaryPrompt, envValue: nil)
             || skipSilentWindows != AppConfig.speechGateEnabled(

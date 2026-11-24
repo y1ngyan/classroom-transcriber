@@ -43,6 +43,18 @@ import Foundation
 enum WhisperHallucination {
 
     /// 判定结果
+    /// 判据力度。
+    ///
+    /// - `normal`：麦克风录课堂现场。老师可能说「谢谢大家」、可能在括号里引一句
+    ///   板书，所以要保守，宁可漏网不可误杀（原有裁决）
+    /// - `strict`：录**外部声音**（网课/会议）。外部声音里出现括号标注、
+    ///   片尾谢幕词、影视词汇，**不可能**是真话——麦克风才会把真人说话包进括号，
+    ///   系统声音不会。这一档可以放心收紧
+    enum Strictness: Equatable {
+        case normal
+        case strict
+    }
+
     enum Verdict: Equatable {
         case keep
         /// 固定话术。**无条件丢**——这些词在课堂里不会出现
@@ -313,7 +325,8 @@ enum WhisperHallucination {
         text: String,
         noSpeechProbability: Double,
         audioLevel: Double?,
-        silenceFloor: Double
+        silenceFloor: Double,
+        strictness: Strictness = .normal
     ) -> Verdict {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -354,6 +367,22 @@ enum WhisperHallucination {
         if hits.count >= platformTokenThreshold,
            platformOnlyTokens.contains(where: { normalized.contains(normalize($0)) }) {
             return .dropSubtitleTemplate(hits.joined(separator: "+"))
+        }
+
+        // ── 强效档（外部声音）──
+        // 外部声音里 whisper **不会**把真人说的话包进括号：括号只可能是它在
+        // 描片子里的响动/字幕。所以整段被括号包住的，一律丢
+        if strictness == .strict {
+            if parenthesizedContent(trimmed) != nil {
+                return .dropNonSpeechAnnotation(trimmed)
+            }
+            if standalonePhrases.contains(where: { normalize($0) == normalized }) {
+                return .dropSubtitleTemplate(trimmed)
+            }
+            if normalized.count <= 12,
+               let word = televisionVocabulary.first(where: { normalized.contains(normalize($0)) }) {
+                return .dropSubtitleTemplate(word)
+            }
         }
 
         // ② 括号标注
@@ -598,7 +627,15 @@ enum WhisperHallucination {
 
         private var counts: [String: Int] = [:]
 
+        init(threshold: Int = 3, maxLength: Int = 16) {
+            self.threshold = threshold
+            self.maxLength = maxLength
+        }
+
         /// - Returns: true 表示这句该丢（并已计入次数）
+        /// 强效档：外部声音里同一句出现第二次就丢（会议里没人会一字不差重复）
+        static var strict: RepetitionGuard { RepetitionGuard(threshold: 2) }
+
         mutating func shouldDrop(_ text: String) -> Bool {
             let key = WhisperHallucination.normalize(text)
             guard !key.isEmpty else { return false }
@@ -874,6 +911,35 @@ enum WhisperHallucination {
         let expectDrop = cases.filter(\.shouldDrop).count
         lines.append("")
         lines.append("  汇总：\(cases.count) 条用例（必丢 \(expectDrop) / 必留 \(cases.count - expectDrop)）· 不符 \(failures) 条")
+
+        // ── 强效档（外部声音）：括号一律丢、谢幕词一律丢、短句含影视词丢 ──
+        let strictCases: [(text: String, shouldDrop: Bool, note: String)] = [
+            ("(我喜欢听音乐)", true, "外部声音不会把真话包进括号"),
+            ("谢谢大家!", true, "片尾谢幕词，外部声音里出现只能是幻觉"),
+            ("观众朋友们请多多支持", true, "短句 + 影视词汇"),
+            ("(镜头拉近)", true, "片场标注"),
+            ("我们看一下这个公式", false, "正常会议内容"),
+            ("谢谢大家，今天就到这里", false, "整段不等于谢幕词"),
+        ]
+        for item in strictCases {
+            let v = verdict(text: item.text, noSpeechProbability: 0, audioLevel: nil,
+                            silenceFloor: 0, strictness: .strict)
+            let dropped: Bool
+            if case .keep = v { dropped = false } else { dropped = true }
+            if dropped != item.shouldDrop {
+                failures += 1
+                lines.append("  ❌ 强效档：\(item.text) 期望\(item.shouldDrop ? "丢" : "留") 实得\(dropped ? "丢" : "留")（\(item.note)）")
+            }
+        }
+        if failures == 0 { lines.append("  ✅ 强效档 6 条（括号/谢幕词/影视词全丢，正常内容留）") }
+        var strictGuard = RepetitionGuard.strict
+        _ = strictGuard.shouldDrop("好的好的")
+        if !strictGuard.shouldDrop("好的好的") {
+            failures += 1
+            lines.append("  ❌ 强效档：同一句第二次就该丢")
+        } else {
+            lines.append("  ✅ 强效档：同一句第二次起丢（会议里没人一字不差重复）")
+        }
 
         // ── 重复判据（11/24 网课实录的形态：同一句循环）──
         var guardTest = RepetitionGuard()

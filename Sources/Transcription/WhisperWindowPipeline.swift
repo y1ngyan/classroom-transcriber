@@ -126,11 +126,16 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         initialPrompt: String? = nil,
         gatePolicy: SpeechGatePolicy = .fromConfig(),
         mergeStepMillis: Int = WhisperWindowPipeline.stepMillis,
-        language: String = AppConfig.transcriptionLanguage
+        language: String = AppConfig.transcriptionLanguage,
+        strictness: WhisperHallucination.Strictness = AppConfig.strictHallucinationFilter ? .strict : .normal
     ) {
         self.segments = segments
         self.initialPrompt = initialPrompt
         self.language = language
+        self.strictness = strictness
+        self.repetitionGuard = strictness == .strict
+            ? .strict
+            : WhisperHallucination.RepetitionGuard()
         self.gatePolicy = gatePolicy
         self.mergeStepMillis = mergeStepMillis
         self.buffer = WhisperWindowBuffer(capacitySeconds: capacitySeconds, sampleRate: Self.sampleRate)
@@ -255,7 +260,10 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// （今天答这个问题的只有探针，界面还没接——见 `hallucinationLog` 的注释）
     /// 重复判据（有状态）。逻辑在 `WhisperHallucination.RepetitionGuard`，
     /// 这里只持有一个实例——同一窗口函数里能单独自检，不必起整条管线
-    private var repetitionGuard = WhisperHallucination.RepetitionGuard()
+    private var repetitionGuard: WhisperHallucination.RepetitionGuard
+
+    /// 判据力度。外部声音走强效档（见 `WhisperHallucination.Strictness`）
+    private let strictness: WhisperHallucination.Strictness
 
     private func filterHallucinations(
         _ segments: [WhisperSegment],
@@ -276,7 +284,8 @@ final class WhisperWindowPipeline: @unchecked Sendable {
                 audioLevel: WhisperHallucination.level(
                     of: segment, in: windowSamples, sampleRate: Self.sampleRate
                 ),
-                silenceFloor: floor
+                silenceFloor: floor,
+                strictness: strictness
             )
             if case .keep = verdict { return true }
             hallucinationLog.append("丢掉「\(segment.text)」— \(verdict)")
