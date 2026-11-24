@@ -210,6 +210,18 @@ fi
 cp "$MANIFEST" "$APP_BUNDLE/Contents/Resources/model-manifest.json"
 
 echo "▶ 签名（ad-hoc）…"
-codesign --force --sign - --timestamp=none "$APP_BUNDLE" 2>&1 | sed 's/^/  /'
+# 签名身份。**默认 adhoc（`-`）会让每次重编都换一个 CDHash**：macOS 的
+# 「屏幕与系统录音」权限是按代码签名认人的，签名一变，用户刚开的那个开关
+# 就对不上号，于是每次启动都重新弹「想要录制此电脑的屏幕和音频」。
+# 本机若装了固定身份（~/.ct-signing 那套自签证书），就用它签——
+# 身份稳定，权限才能跨重编保留。
+CT_SIGN_IDENTITY="${CT_SIGN_IDENTITY:-ClassroomTranscriber Local Signer}"
+if security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CT_SIGN_IDENTITY"; then
+  codesign --force --deep --sign "$CT_SIGN_IDENTITY" --timestamp=none "$APP_BUNDLE" 2>&1 | sed 's/^/  /'
+  echo "  签名身份：$CT_SIGN_IDENTITY（固定，权限可跨重编保留）"
+else
+  codesign --force --sign - --timestamp=none "$APP_BUNDLE" 2>&1 | sed 's/^/  /'
+  echo "  ⚠️ 没有固定签名身份，用 adhoc：每次重编都要重新授权屏幕录制"
+fi
 
 echo "✅ 构建完成: $APP_BUNDLE"
