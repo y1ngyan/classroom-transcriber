@@ -284,10 +284,23 @@ final class TranscriptionEngine {
 
     // MARK: - 权限
 
+    /// 申请**这条链路真正需要的**权限。
+    ///
+    /// 以前不管音源和后端一律要两样：麦克风 + 系统语音识别。录外部声音时
+    /// 这两样都不需要，而 macOS 每次启动/每次开始录制都把它们当成「还没授权」
+    /// 再弹一次窗——用户看到的就是「每次打开 App 都要重新授权」。
+    /// 现在按需申请：外部声音不要麦克风，whisper 本地不要系统语音识别。
     func requestPermissions() async {
-        let micGranted = await AVCaptureDevice.requestAccess(for: .audio)
-        statusMessage = micGranted ? "麦克风已授权" : "麦克风被拒绝"
+        if AppConfig.usesSystemAudio {
+            statusMessage = "外部声音模式：不需要麦克风权限"
+        } else {
+            let micGranted = await AVCaptureDevice.requestAccess(for: .audio)
+            statusMessage = micGranted ? "麦克风已授权" : "麦克风被拒绝"
+        }
 
+        // 系统语音识别只有 Apple 后端用得上；whisper 走本地模型，
+        // 申请它只会白白多弹一个窗
+        guard backend == .apple else { return }
         let speechStatus = await Self.speechAuthorizationStatus()
         if speechStatus != .authorized {
             statusMessage = "语音识别未授权（\(speechStatus.rawValue)）"
