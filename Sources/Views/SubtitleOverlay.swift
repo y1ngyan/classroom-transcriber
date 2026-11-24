@@ -20,6 +20,11 @@ final class SubtitleOverlayController {
     private var idleTask: Task<Void, Never>?
     /// 用户是否亲手拖过（拖过就不再自动居中）
     private var hasUserPosition = false
+    /// 最近一次「窗口被移动」的时刻。拖动中每秒会来几十条 didMove，
+    /// 原来的实现每条都写一次配置、并且照旧按旧位置 setFrame——
+    /// 结果是拖动时窗口被自己的刷新拽回去，手感「位置不准」
+    private var lastMoveAt: Date = .distantPast
+    private var persistTask: Task<Void, Never>?
     /// 拖动后的左上角位置（y 存的是顶边：窗口高度会随展开变化）
     private var savedOrigin: CGPoint?
     private var hideTask: Task<Void, Never>?
@@ -66,6 +71,8 @@ final class SubtitleOverlayController {
         guard let panel, let hosting = panel.contentView as? NSHostingView<SubtitleIslandView> else {
             return
         }
+        // 拖动中/刚拖完：不要按旧位置重排，否则窗口会被自己的刷新拽回去
+        guard Date().timeIntervalSince(lastMoveAt) > 0.35 else { return }
         hosting.rootView = SubtitleIslandView(model: model)
         let snapshot = SubtitleOverlayLogic.snapshot(recent: model.lines,
                                                      secondsSinceUpdate: model.secondsSinceUpdate)
@@ -75,8 +82,13 @@ final class SubtitleOverlayController {
         if hasUserPosition, let origin = savedOrigin {
             // 拖动过：保持左上角不动，只让高度向下长（否则展开时会盖住上方的字）
             let top = origin.y + panel.frame.height
-            panel.setFrame(NSRect(x: origin.x, y: top - height, width: width, height: height),
-                           display: true)
+            var rect = NSRect(x: origin.x, y: top - height, width: width, height: height)
+            if let screen = NSScreen.main {
+                let visible = screen.visibleFrame
+                rect.origin.x = min(max(rect.minX, visible.minX + 4), visible.maxX - width - 4)
+                rect.origin.y = min(max(rect.minY, visible.minY + 4), visible.maxY - height - 4)
+            }
+            panel.setFrame(rect, display: true)
         } else if let screen = NSScreen.main {
             let x = screen.frame.midX - width / 2
             let top = screen.visibleFrame.maxY - 12
@@ -103,8 +115,23 @@ final class SubtitleOverlayController {
         }
     }
 
-    /// 记下当前位置：只记顶边（窗口会随行数长高，记底边会一跳一跳）
-    private func rememberUserPosition() {
+    /// 窗口被移动。
+    ///
+    /// 拖动过程中每秒会收到几十条通知：这里**只记时间**，等停下来
+    /// （350ms 没有新移动）再记位置、写配置。原来每条都写一次配置，
+    /// 既卡又在拖动中途改窗口尺寸，手感就是「拖不准」
+    private func handleWindowMoved() {
+        lastMoveAt = Date()
+        persistTask?.cancel()
+        persistTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            self?.commitUserPosition()
+        }
+    }
+
+    /// 停稳之后才记：顶边固定（窗口随行数长高时向下长）
+    private func commitUserPosition() {
         guard let panel else { return }
         let frame = panel.frame
         hasUserPosition = true
@@ -133,7 +160,7 @@ final class SubtitleOverlayController {
         NotificationCenter.default.addObserver(
             forName: NSWindow.didMoveNotification, object: panel, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.rememberUserPosition() }
+            Task { @MainActor in self?.handleWindowMoved() }
         }
         return panel
     }

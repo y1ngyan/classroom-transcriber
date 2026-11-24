@@ -43,9 +43,13 @@ enum ModelFile {
     /// - Parameter verifyContents: 是否整份算 sha256。**列表/界面这种「看一眼」
     ///   的场景必须传 false**：large-v3 有 1.1GB，三个模型加起来两个多 GB，
     ///   在主线程上算完就是十几秒的卡顿（设置页卡顿的真凶）
+    /// - Parameter knownSHA256: 调用方**已经算过**的摘要（下载时顺手算的）。
+    ///   给了它就不用再读一遍盘——2GB 文件读第二遍要十几秒，而下载时
+    ///   本来就在逐块写，顺手喂给 hasher 是零成本
     static func validationFailure(at url: URL, minimumBytes: Int64,
                                   pin: ModelPin? = nil,
-                                  verifyContents: Bool = true) -> String? {
+                                  verifyContents: Bool = true,
+                                  knownSHA256: String? = nil) -> String? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         guard let size = attributes?[.size] as? Int64 else {
             return "读不出文件大小（\(url.path)）"
@@ -69,7 +73,7 @@ enum ModelFile {
             let want = magic.map { String(format: "%02x", $0) }.joined()
             return "文件头不是 ggml：读到 \(got.isEmpty ? "（空）" : got)，期望 \(want)"
         }
-        if verifyContents, let pin, let actual = sha256(fileAt: url) {
+        if verifyContents, let pin, let actual = knownSHA256 ?? sha256(fileAt: url) {
             guard actual == pin.sha256 else {
                 return "内容 sha256 不对：读到 \(actual.prefix(16))…，清单里是 \(pin.sha256.prefix(16))…"
             }
@@ -525,7 +529,8 @@ final class ModelDownloader: NSObject, @unchecked Sendable {
 
         // ── 校验：**先校验，通过了才改名** ──
         if let reason = ModelFile.validationFailure(at: partURL, minimumBytes: minimumBytes,
-                                                    pin: pin) {
+                                                    pin: pin,
+                                                    knownSHA256: collector.contentDigest()) {
             throw Failure.validationFailed(reason: reason)
         }
 
@@ -590,6 +595,8 @@ private final class ByteCollector: NSObject, URLSessionDataDelegate, @unchecked 
     private let onProgress: @Sendable (DownloadProgress) -> Void
 
     private var handle: FileHandle?
+    /// 边收边算的 sha256（只在下满整个文件时有效：续传那一段没经过它）
+    private var hasher = SHA256()
     private var written: Int64 = 0
     private var total: Int64?
     private var started = Date()
@@ -611,6 +618,14 @@ private final class ByteCollector: NSObject, URLSessionDataDelegate, @unchecked 
     var expectedTotal: Int64? {
         lock.lock(); defer { lock.unlock() }
         return total
+    }
+
+    /// 本次收到的内容摘要。**续传时返回 nil**：文件前半段不是这次写的，
+    /// 拿它比 sha256 会得出「内容不对」的假结论
+    func contentDigest() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard actualResumedFrom == 0 else { return nil }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     /// 收完之后 `.part` 上实际的字节数（含续传接上的那一段）
@@ -781,6 +796,7 @@ private final class ByteCollector: NSObject, URLSessionDataDelegate, @unchecked 
             finish(with: error)
             return
         }
+        hasher.update(data: data)
         written += Int64(data.count)
         let writtenNow = written
         let totalNow = total
