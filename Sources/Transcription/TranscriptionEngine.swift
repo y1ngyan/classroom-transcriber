@@ -528,8 +528,11 @@ final class TranscriptionEngine {
         // 采集系统声音根本不需要 AVAudioEngine，一行都不该碰。
         if AppConfig.usesSystemAudio {
             let glossaryPrompt = glossaryPromptResolution(engine: whisperEngine)
-            let pipeline = WhisperWindowPipeline(segments: segments,
-                                                 initialPrompt: glossaryPrompt.text)
+            let pipeline = WhisperWindowPipeline(
+                segments: segments,
+                initialPrompt: glossaryPrompt.text,
+                mergeStepMillis: WhisperWindowPipeline.liveStepMillis
+            )
             whisperPipeline = pipeline
             whisperSkippedRounds = 0
             whisperRoundSeconds.removeAll()
@@ -577,7 +580,11 @@ final class TranscriptionEngine {
         // 这里**只构造一次**、交给管线存着：术语表是开录前的先验，
         // 整场不变（见 WhisperWindowPipeline.init 的注释）
         let glossaryPrompt = glossaryPromptResolution(engine: whisperEngine)
-        let pipeline = WhisperWindowPipeline(segments: segments, initialPrompt: glossaryPrompt.text)
+        let pipeline = WhisperWindowPipeline(
+            segments: segments,
+            initialPrompt: glossaryPrompt.text,
+            mergeStepMillis: WhisperWindowPipeline.liveStepMillis
+        )
         whisperPipeline = pipeline
         whisperSkippedRounds = 0
         whisperRoundSeconds.removeAll()
@@ -603,6 +610,8 @@ final class TranscriptionEngine {
         // （P12-2 试过把步长改成 9.6 秒，那一版里上面的「残窗 + 守卫挡掉」
         // 会消失、首句变成 9.6 秒才开始转；那一版没上生产，这里描述的就是
         // 当前行为：步长 3 秒。）
+        // 实时关掉 temperature 重试链：不关的话单窗最坏 21.9 秒，步长只有 5 秒
+        WhisperEngine.liveTemperatureIncrement = 0
         statusMessage = "转录中 · Whisper 本地 · 降噪关 · 增益 \(micGain.shortLabel)"
             + " · 首句约 12 秒后出现（先攒满 10 秒窗口）"
         whisperLoopTask = Task { [weak self] in
@@ -618,7 +627,8 @@ final class TranscriptionEngine {
     /// `whisper.run` 把它放到专属推理队列上，主 actor 在 await 期间是自由的
     /// （电平表、按钮、切页面都不受影响）。
     private func runWhisperLoop(pipeline: WhisperWindowPipeline) async {
-        let step = Duration.milliseconds(WhisperWindowPipeline.stepMillis)
+        // 步长跟管线走：实时是 5 秒（追得上机器），离线重转仍是 3 秒
+        let step = Duration.milliseconds(pipeline.mergeStepMillis)
         var scheduled = ContinuousClock.now.advanced(by: step)
 
         while !Task.isCancelled {
@@ -792,6 +802,7 @@ final class TranscriptionEngine {
         }
 
         isRunning = true
+        WhisperEngine.liveTemperatureIncrement = 0
         statusMessage = "转录中 · 系统声音（网课）· Whisper 本地"
             + " · 首句约 12 秒后出现（先攒满 10 秒窗口）"
         whisperLoopTask = Task { [weak self] in
@@ -1825,6 +1836,8 @@ final class TranscriptionEngine {
         // 先停草稿循环再卸 tap：反过来的话，一条已经排队的草稿推送可能在
         // 收尾落盘**之后**才落地，把一份过期的转录覆盖回去
         stopDraftLoop()
+        // 实时解码的覆盖只在录音期间有效：停录后恢复出厂（离线重转要用重试链）
+        WhisperEngine.liveTemperatureIncrement = nil
         // 系统声音（网课）模式下没有麦克风引擎，停止采集要靠 capture 自己
         systemAudioPump?.cancel()
         systemAudioPump = nil

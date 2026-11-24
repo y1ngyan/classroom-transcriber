@@ -39,6 +39,13 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     static let windowSeconds = 10.0
     static let stepSeconds = 3.0
     static let stepMillis = 3_000
+
+    /// 实时链路的步长。**5 秒而不是 3 秒**，这是量出来的：
+    /// 这台机器上 10 秒窗解码均 3.8–4.0 秒（medium q5），3 秒步长占用 125–134%
+    /// ——追不上就跳窗，跳掉的音频再也不会被转，用户看到的就是「吞字」。
+    /// 5 秒步长把占用压到 79%，实测 41 窗一个不落、覆盖率不变（90.1%）。
+    /// 离线重转仍用 3 秒（那边没有实时压力）
+    static let liveStepMillis = 5_000
     static let sampleRate = 16_000.0
 
     /// 录音收尾那一窗至少要有的音频。低于这个长度不转：Whisper 喂几百毫秒

@@ -479,6 +479,12 @@ final class WhisperEngine: @unchecked Sendable {
         ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_TEMPERATURE_INC"].flatMap(Float.init)
     }
 
+    /// 实时解码用的 `temperature_inc`。**实时必须关掉重试链（=0）**：
+    /// whisper.cpp 的回退链一次最多做 6 遍完整解码，实测单窗被拖到 21.9 秒，
+    /// 而实时步长是 5 秒——那几秒的音频直接越过，永远补不回来（吞字）。
+    /// 离线重转不受影响（没有实时压力，宁可多试几遍换更好的结果）
+    nonisolated(unsafe) static var liveTemperatureIncrement: Float?
+
     /// `initial_prompt` 是否**每个解码窗都前置**（`whisper.h:528`）。**取 `false`**。
     ///
     /// 先把机制说准——下面这些是读 **v1.9.4 的 `src/whisper.cpp`** 得到的，
@@ -693,7 +699,7 @@ final class WhisperEngine: @unchecked Sendable {
         // 走 `CLASSROOM_WHISPER_LOGPROB_THOLD` 显式开启（见 decodeLogprobThreshold）。
         // 熵闸（管退化重复的那道）不动，它一次都没误触过
         params.logprob_thold = Self.resolvedLogprobThreshold
-        if let increment = Self.temperatureIncrementOverride {
+        if let increment = Self.liveTemperatureIncrement ?? Self.temperatureIncrementOverride {
             params.temperature_inc = increment
         }
 
