@@ -2024,16 +2024,31 @@ struct ClassroomTranscriberApp: App {
                 }
                 print("采集已启动，采样 \(seconds) 秒…")
                 let deadline = Date().addingTimeInterval(seconds)
-                var collected: [Float] = []
+                let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                           sampleRate: SystemAudioCapture.sampleRate,
+                                           channels: 1, interleaved: false)
+                let recorder = wavPath.flatMap {
+                    WAVRecorder(url: URL(fileURLWithPath: $0), sampleRate: 16_000, channels: 1)
+                }
                 while Date() < deadline {
                     let chunk = probe.drain()
                     result.frames += chunk.count
                     for sample in chunk { result.peak = max(result.peak, abs(sample)) }
-                    if wavPath != nil { collected.append(contentsOf: chunk) }
+                    if let recorder, let format, !chunk.isEmpty,
+                       let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                     frameCapacity: AVAudioFrameCount(chunk.count)) {
+                        buffer.frameLength = AVAudioFrameCount(chunk.count)
+                        if let destination = buffer.floatChannelData?[0] {
+                            chunk.withUnsafeBufferPointer { source in
+                                destination.update(from: source.baseAddress!, count: chunk.count)
+                            }
+                        }
+                        recorder.append(buffer)
+                    }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
                 await probe.stop()
-                if let wavPath { writeProbeWav(collected, to: wavPath) }
+                if let recorder { print("录音落盘 \(recorder.finish()) 字节") }
                 result.finished = true
             }
             let deadline = Date().addingTimeInterval(seconds + 20)

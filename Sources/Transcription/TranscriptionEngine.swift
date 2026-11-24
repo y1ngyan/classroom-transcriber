@@ -554,6 +554,7 @@ final class TranscriptionEngine {
         // 系统声音（网课）分支：**不碰麦克风**。麦克风那条路会占住输入设备、
         // 触发麦克风权限，而网课场景用户根本不在说话。
         if AppConfig.usesSystemAudio {
+            formatDescription = "系统声音（ScreenCaptureKit）→ 16kHz 单声道 → Whisper 本地"
             await startSystemAudio(pipeline: pipeline)
             return
         }
@@ -719,12 +720,38 @@ final class TranscriptionEngine {
             systemAudioCapture = nil
             return
         }
+        // 录音存档。**必须在系统声音分支里也建一个**：`makeRecorder` 原先只在
+        // 麦克风分支调用，网课录完整场没有 wav——课后重转、播放、导出全都没素材，
+        // 而界面上看不出少了什么，只会觉得「这节课不能重听」
+        let recorder = makeRecorder(sampleRate: SystemAudioCapture.sampleRate)
+        self.recorder = recorder
+        if recordsAudio && recorder == nil {
+            statusMessage = "⚠️ 录音存档创建失败，本次只转录不落盘"
+        }
+        let recordFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                         sampleRate: SystemAudioCapture.sampleRate,
+                                         channels: 1,
+                                         interleaved: false)
+
         // 轮询取走攒下的采样：200ms 一次，既不会让管线吃到碎渣，
         // 也不会让采集队列背上「往管线塞数据」的跨 actor 责任
         systemAudioPump = Task { [weak self] in
             while !Task.isCancelled {
                 let chunk = capture.drain()
-                if !chunk.isEmpty { pipeline.append(chunk) }
+                if !chunk.isEmpty {
+                    pipeline.append(chunk)
+                    if let recorder, let format = recordFormat,
+                       let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                     frameCapacity: AVAudioFrameCount(chunk.count)) {
+                        buffer.frameLength = AVAudioFrameCount(chunk.count)
+                        if let destination = buffer.floatChannelData?[0] {
+                            chunk.withUnsafeBufferPointer { source in
+                                destination.update(from: source.baseAddress!, count: chunk.count)
+                            }
+                        }
+                        recorder.append(buffer)
+                    }
+                }
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if self?.isRunning != true { break }
             }
