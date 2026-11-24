@@ -36,6 +36,13 @@ enum SubtitleOverlayLogic {
         return Snapshot(lines: lines, collapsed: secondsSinceUpdate >= idleSeconds || lines.isEmpty)
     }
 
+    /// 收起时那一行字：**它同时是「一键录音」的入口**，所以四个状态都要说清
+    /// 现在是什么、点一下会怎样
+    static func statusLabel(isRecording: Bool, hasLines: Bool) -> String {
+        if isRecording { return hasLines ? "已暂停说话" : "正在听…" }
+        return hasLines ? "已停止 · 点我再录" : "点我开始录制"
+    }
+
     static func trim(_ text: String) -> String {
         guard text.count > maxCharactersPerLine else { return text }
         let tail = text.suffix(maxCharactersPerLine)

@@ -108,6 +108,7 @@ final class AppState {
             }
         }
 
+
         AppConfig.writeTemplateIfMissing()
 
         transcription.onFinalSegment = { [weak self] segment in

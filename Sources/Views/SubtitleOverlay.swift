@@ -1,8 +1,8 @@
 import SwiftUI
 import AppKit
 
-/// 悬浮字幕窗（「灵动岛」式）：贴在屏幕顶部中间的一条胶囊，
-/// 说话时展开成两行字，停顿几秒后缩成一个小胶囊。
+/// 悬浮字幕窗（「灵动岛」式）：贴在屏幕顶部的一条胶囊，说话时展开两行，
+/// 停顿几秒后缩成小胶囊。**点一下就能开始/停止录音**，按住可以拖到任意位置。
 ///
 /// 为什么是 `NSPanel` 而不是 SwiftUI `WindowGroup`：
 /// - 它不能抢焦点（用户正在看网课，字幕窗一抢焦点网课就暂停了）；
@@ -16,22 +16,43 @@ final class SubtitleOverlayController {
     static let shared = SubtitleOverlayController()
 
     private var panel: NSPanel?
+    /// 界面层。**弱引用**：浮层不该把整个 AppState 拽住，
+    /// 否则 App 关掉后浮层控制器还留着一个活的 AppState
+    private weak var appState: AppState?
     private var model = SubtitleOverlayModel()
+
     private var idleTask: Task<Void, Never>?
     /// 用户是否亲手拖过（拖过就不再自动居中）
     private var hasUserPosition = false
     /// 最近一次「窗口被移动」的时刻。拖动中每秒会来几十条 didMove，
-    /// 原来的实现每条都写一次配置、并且照旧按旧位置 setFrame——
-    /// 结果是拖动时窗口被自己的刷新拽回去，手感「位置不准」
+    /// 每条都写配置、并照旧按旧位置 setFrame 的话，窗口会被自己的刷新拽回去
     private var lastMoveAt: Date = .distantPast
     private var persistTask: Task<Void, Never>?
     /// 拖动后的左上角位置（y 存的是顶边：窗口高度会随展开变化）
     private var savedOrigin: CGPoint?
-    private var hideTask: Task<Void, Never>?
 
     private init() {}
 
     var isVisible: Bool { panel?.isVisible == true }
+
+    /// 由 App 在启动时接上（主线程）
+    func attach(appState: AppState) {
+        self.appState = appState
+    }
+
+    /// 点一下岛：没在录就开始，在录就停。
+    ///
+    /// 和转录页那个按钮走**同一条**路径（`startTranscription` / `stop`），
+    /// 不在浮层里另写一份启动逻辑——两份启动迟早分家，而且是那种最难查的分家
+    func toggleRecording() {
+        guard let appState else { return }
+        if appState.transcription.isRunning {
+            appState.transcription.stop()
+        } else {
+            Task { await appState.startTranscription() }
+        }
+        refresh()
+    }
 
     func show() {
         if panel == nil {
@@ -45,10 +66,10 @@ final class SubtitleOverlayController {
     }
 
     func hide() {
-        hideTask?.cancel()
-        hideTask = nil
         idleTask?.cancel()
         idleTask = nil
+        persistTask?.cancel()
+        persistTask = nil
         panel?.orderOut(nil)
         panel = nil                     // 下次 show 重建，避免残留旧尺寸
     }
@@ -73,12 +94,20 @@ final class SubtitleOverlayController {
         }
         // 拖动中/刚拖完：不要按旧位置重排，否则窗口会被自己的刷新拽回去
         guard Date().timeIntervalSince(lastMoveAt) > 0.35 else { return }
-        hosting.rootView = SubtitleIslandView(model: model)
+
+        let isRecording = appState?.transcription.isRunning ?? false
+        hosting.rootView = SubtitleIslandView(
+            model: model,
+            isRecording: isRecording,
+            onTap: { [weak self] in self?.toggleRecording() }
+        )
+
         let snapshot = SubtitleOverlayLogic.snapshot(recent: model.lines,
                                                      secondsSinceUpdate: model.secondsSinceUpdate)
         let units = SubtitleOverlayLogic.widthUnits(for: snapshot.lines)
         let width = CGFloat(units) * 13 + 48          // 13pt ≈ 一个中文字宽
         let height: CGFloat = snapshot.collapsed ? 34 : 34 + CGFloat(max(0, snapshot.lines.count - 1)) * 22
+
         if hasUserPosition, let origin = savedOrigin {
             // 拖动过：保持左上角不动，只让高度向下长（否则展开时会盖住上方的字）
             let top = origin.y + panel.frame.height
@@ -96,7 +125,7 @@ final class SubtitleOverlayController {
         }
     }
 
-    /// 每秒看一眼「是不是该收起了」。
+    /// 每秒看一眼「是不是该收起了」，顺带把录音状态刷上去。
     ///
     /// 用 Task 循环而不是 `Timer`：Timer 的回调是 `@Sendable`，要跨 actor 调
     /// `invalidate()`/`refresh()`，Swift 6 会判数据竞争；Task 由 `@MainActor`
@@ -108,9 +137,9 @@ final class SubtitleOverlayController {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 guard let self, !Task.isCancelled else { return }
                 self.model.tick()
-                let snapshot = SubtitleOverlayLogic.snapshot(recent: self.model.lines,
-                                                             secondsSinceUpdate: self.model.secondsSinceUpdate)
-                if snapshot.collapsed { self.refresh() }
+                // 每秒重建一次：绿点/「点我开始录制」要跟着引擎状态走，
+                // 不能等下一句话来了才更新（用户点了开始却半天没反应会以为没生效）
+                self.refresh()
             }
         }
     }
@@ -148,13 +177,17 @@ final class SubtitleOverlayController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        // 允许拖动：用户可以把它拖到不挡网课字幕条的地方。
+        // 允许点击（一键录音）、允许拖动（拖到不挡字幕的地方）。
         // `ignoresMouseEvents` 必须为 false，否则鼠标事件根本到不了窗上
         panel.ignoresMouseEvents = false
         panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.hidesOnDeactivate = false
-        panel.contentView = NSHostingView(rootView: SubtitleIslandView(model: model))
+        panel.contentView = NSHostingView(rootView: SubtitleIslandView(
+            model: model,
+            isRecording: appState?.transcription.isRunning ?? false,
+            onTap: { [weak self] in self?.toggleRecording() }
+        ))
         // 用户一拖，就记下位置并停止自动居中——否则下一句一来就被拽回屏幕顶部，
         // 用户会觉得「拖了没用」
         NotificationCenter.default.addObserver(
@@ -195,9 +228,13 @@ final class SubtitleOverlayModel {
     }
 }
 
-/// 岛的样子：说话时两行字，静止只剩一个小胶囊 + 呼吸点
+/// 岛的样子：说话时两行字，静止只剩一个小胶囊 + 状态点
 struct SubtitleIslandView: View {
     var model: SubtitleOverlayModel
+    /// 正在录音吗。点一下岛就能开关，所以这个状态必须一眼看得出，
+    /// 否则用户不知道自己是「点了没反应」还是「没点中」
+    var isRecording: Bool = false
+    var onTap: () -> Void = {}
 
     private var snapshot: SubtitleOverlayLogic.Snapshot {
         SubtitleOverlayLogic.snapshot(recent: model.lines,
@@ -208,13 +245,16 @@ struct SubtitleIslandView: View {
         let snap = snapshot
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
+                // 绿点 = 正在录；灰点 = 没在录。点一下岛就能开关，所以这个点必须
+                // 一眼看得出状态，否则用户不知道自己是「点了没反应」还是「没点中」
                 Circle()
-                    .fill(snap.collapsed ? Color.gray : Color.green)
+                    .fill(isRecording ? Color.green : Color.secondary.opacity(0.5))
                     .frame(width: 7, height: 7)
                 if snap.collapsed {
-                    Text(snap.lines.isEmpty ? "转录待机" : "已暂停说话")
+                    Text(SubtitleOverlayLogic.statusLabel(isRecording: isRecording,
+                                                          hasLines: !snap.lines.isEmpty))
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(isRecording ? .secondary : .primary)
                 } else if let latest = snap.lines.last {
                     Text(latest)
                         .font(.system(size: 14, weight: .semibold))
@@ -244,5 +284,8 @@ struct SubtitleIslandView: View {
                 )
         )
         .padding(1)
+        .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .onTapGesture { onTap() }
+        .help(isRecording ? "点一下停止录音" : "点一下开始录音")
     }
 }

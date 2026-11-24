@@ -44,6 +44,16 @@ enum SubtitleOverlaySelfTest {
                 "超长句截到 46 字 + 省略号", "\(trimmed.count)")
         c.check(trimmed.hasPrefix("…"), "从头部截（句尾结论优先保留）")
 
+        // 收起时的那行字（一键录音的入口文案）
+        c.check(SubtitleOverlayLogic.statusLabel(isRecording: false, hasLines: false) == "点我开始录制",
+                "没录、没字 → 告诉用户点一下开始")
+        c.check(SubtitleOverlayLogic.statusLabel(isRecording: true, hasLines: false) == "正在听…",
+                "在录、还没出字 → 正在听")
+        c.check(SubtitleOverlayLogic.statusLabel(isRecording: true, hasLines: true) == "已暂停说话",
+                "在录、刚停嘴 → 已暂停说话")
+        c.check(SubtitleOverlayLogic.statusLabel(isRecording: false, hasLines: true) == "已停止 · 点我再录",
+                "停了但屏上还有字 → 点我再录")
+
         let narrow = SubtitleOverlayLogic.widthUnits(for: ["好"])
         c.check(narrow == SubtitleOverlayLogic.minWidthUnits, "短句用最小宽度（岛不会缩成一个点）")
         let wide = SubtitleOverlayLogic.widthUnits(for: [String(repeating: "字", count: 200)])

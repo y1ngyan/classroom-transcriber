@@ -2548,6 +2548,17 @@ struct ClassroomTranscriberApp: App {
         WindowGroup("Classroom Transcriber") {
             RootView()
                 .environment(appState)
+                // 悬浮岛要能一键开关录音：把 AppState 交给它。
+                // 放在 onAppear 而不是 AppState.init 里——这里保证在主线程上
+                .onAppear {
+                    // 先把状态接上，再按配置把岛显示出来。
+                    // **不能只靠 AppState 的 didSet**：init 里给存储属性赋值不触发
+                    // didSet，所以「开着重启 App 岛就消失」——用户会以为功能没了
+                    SubtitleOverlayController.shared.attach(appState: appState)
+                    if appState.showsSubtitleOverlay {
+                        SubtitleOverlayController.shared.show()
+                    }
+                }
                 .frame(minWidth: 820, minHeight: 660)
         }
         .windowResizability(.contentMinSize)
