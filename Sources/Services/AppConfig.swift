@@ -188,7 +188,10 @@ enum AppConfig {
     /// 强效去幻听是否生效：录外部声音（系统声音）时**默认开**——
     /// 外部声音里出现的括号字幕、片尾谢幕词不可能是真话
     static var strictHallucinationFilter: Bool {
-        store.current.strictHallucinationFilter ?? usesSystemAudio
+        // 录外部声音时**一律开**：配置里存着 false 也不许关——外部声音里的
+        // 括号字幕/谢幕词不可能是真话，这是音源属性决定的，不是偏好
+        if usesSystemAudio { return true }
+        return store.current.strictHallucinationFilter ?? false
     }
 
     /// 悬浮字幕的位置：拖动过才有值

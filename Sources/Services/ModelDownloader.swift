@@ -40,8 +40,12 @@ enum ModelFile {
     /// **不把整个文件读进内存**：分开读、喂给流式 hasher。539MB 一次性
     /// `Data(contentsOf:)` 会让下载刚成功那一刻内存冲高 500MB 以上——
     /// 而那一刻正好是用户最不该看见 App 卡住的时候。
+    /// - Parameter verifyContents: 是否整份算 sha256。**列表/界面这种「看一眼」
+    ///   的场景必须传 false**：large-v3 有 1.1GB，三个模型加起来两个多 GB，
+    ///   在主线程上算完就是十几秒的卡顿（设置页卡顿的真凶）
     static func validationFailure(at url: URL, minimumBytes: Int64,
-                                  pin: ModelPin? = nil) -> String? {
+                                  pin: ModelPin? = nil,
+                                  verifyContents: Bool = true) -> String? {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         guard let size = attributes?[.size] as? Int64 else {
             return "读不出文件大小（\(url.path)）"
@@ -65,7 +69,7 @@ enum ModelFile {
             let want = magic.map { String(format: "%02x", $0) }.joined()
             return "文件头不是 ggml：读到 \(got.isEmpty ? "（空）" : got)，期望 \(want)"
         }
-        if let pin, let actual = sha256(fileAt: url) {
+        if verifyContents, let pin, let actual = sha256(fileAt: url) {
             guard actual == pin.sha256 else {
                 return "内容 sha256 不对：读到 \(actual.prefix(16))…，清单里是 \(pin.sha256.prefix(16))…"
             }

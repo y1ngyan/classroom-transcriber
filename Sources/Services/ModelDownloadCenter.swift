@@ -64,9 +64,19 @@ final class ModelDownloadCenter {
     static var bundledPin: ModelPin? { ModelManifest.bundledDefaultPin }
 
     /// 重扫模型目录。切换进设置页、下载结束、清理之后各调一次
+    /// 重新扫一遍模型目录。
+    ///
+    /// **必须离开主线程**：目录里是 0.5–1.1GB 的模型文件，即使只 stat 也要
+    /// 扫几百个属性；以前这里还顺手算了整份 sha256，设置页一打开就卡十几秒。
+    /// 现在：后台扫描（不校验内容）→ 回主线程赋值
     func refreshCache() {
-        cache = ModelCacheReport.scan(directory: WhisperEngine.modelDirectory,
-                                      manifest: try? ModelManifest.loadBundled())
+        let directory = WhisperEngine.modelDirectory
+        let manifest = try? ModelManifest.loadBundled()
+        Task.detached(priority: .utility) {
+            let report = ModelCacheReport.scan(directory: directory, manifest: manifest,
+                                               verifyContents: false)
+            await MainActor.run { self.cache = report }
+        }
     }
 
     var freeablePlan: ModelCachePlan? {

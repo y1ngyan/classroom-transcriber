@@ -135,7 +135,10 @@ final class SettingsStore {
         language = LanguagePreference.normalize(config.transcriptionLanguage)
         audioSource = (config.audioSource == "system") ? "system" : "mic"
         subtitleOverlay = config.subtitleOverlay ?? false
-        strictHallucination = config.strictHallucinationFilter ?? (config.audioSource == "system")
+        // 外部声音时这一档是**强制**的，界面显示为开且不可关
+        strictHallucination = config.audioSource == "system"
+            ? true
+            : (config.strictHallucinationFilter ?? false)
         // 缺省走同一个纯函数，不在这里另写一个 `?? true`——
         // 「界面缺省」和「无头入口缺省」是两处独立的 `?? true` 的话，
         // 改了一处另一处不会跟着动，而两处不一致在界面上看不出来

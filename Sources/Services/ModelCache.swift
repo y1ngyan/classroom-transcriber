@@ -113,7 +113,8 @@ struct ModelCacheReport: Equatable, Sendable {
     ///   那一版。**不能拿「默认那一版」去套所有文件**：模型目录里同时躺着
     ///   `ggml-medium` 和 `ggml-large-v3`，用 medium 的大小去判 large-v3，
     ///   会把一个完好的模型报成「残骸，大小不对」
-    static func scan(directory: URL, manifest: ModelManifest? = nil) -> ModelCacheReport {
+    static func scan(directory: URL, manifest: ModelManifest? = nil,
+                     verifyContents: Bool = false) -> ModelCacheReport {
         let fm = FileManager.default
         let names = (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
         var items: [ModelCacheItem] = []
@@ -140,7 +141,9 @@ struct ModelCacheReport: Equatable, Sendable {
                                             modified: modified, meta: meta,
                                             detail: partialDetail(meta: meta, pin: owner)))
             } else if name.hasPrefix("ggml-") && name.hasSuffix(".bin") {
-                let failure = ModelFile.validationFailure(at: url, minimumBytes: 0, pin: pin)
+                let failure = ModelFile.validationFailure(
+                    at: url, minimumBytes: 0, pin: pin, verifyContents: verifyContents
+                )
                 items.append(ModelCacheItem(
                     url: url, kind: failure == nil ? .model : .damagedModel,
                     bytes: bytes, modified: modified, meta: nil,

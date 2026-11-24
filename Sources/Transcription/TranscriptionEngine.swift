@@ -507,6 +507,24 @@ final class TranscriptionEngine {
             return
         }
 
+        // ── 系统声音（网课/会议）分支：必须放在**任何麦克风相关代码之前** ──
+        //
+        // 以前这个分支放在麦克风格式检查之后，结果是：拿不到麦克风（没授权、
+        // 或被别的 App 占着）时直接「❌ 未找到可用麦克风输入」返回——
+        // 用户明明只想录系统声音，却被麦克风卡住，界面上看起来就是「无法录制」。
+        // 采集系统声音根本不需要 AVAudioEngine，一行都不该碰。
+        if AppConfig.usesSystemAudio {
+            let glossaryPrompt = glossaryPromptResolution(engine: whisperEngine)
+            let pipeline = WhisperWindowPipeline(segments: segments,
+                                                 initialPrompt: glossaryPrompt.text)
+            whisperPipeline = pipeline
+            whisperSkippedRounds = 0
+            whisperRoundSeconds.removeAll()
+            formatDescription = "系统声音（ScreenCaptureKit）→ 16kHz 单声道 → Whisper 本地"
+            await startSystemAudio(pipeline: pipeline)
+            return
+        }
+
         let audioEngine = AVAudioEngine()
         self.audioEngine = audioEngine
         // 这一条链路上系统语音处理是关的（默认就是关，这里显式记一笔：
@@ -550,14 +568,6 @@ final class TranscriptionEngine {
         whisperPipeline = pipeline
         whisperSkippedRounds = 0
         whisperRoundSeconds.removeAll()
-
-        // 系统声音（网课）分支：**不碰麦克风**。麦克风那条路会占住输入设备、
-        // 触发麦克风权限，而网课场景用户根本不在说话。
-        if AppConfig.usesSystemAudio {
-            formatDescription = "系统声音（ScreenCaptureKit）→ 16kHz 单声道 → Whisper 本地"
-            await startSystemAudio(pipeline: pipeline)
-            return
-        }
 
         guard startMicrophone(
             engine: audioEngine,
@@ -735,9 +745,12 @@ final class TranscriptionEngine {
 
         // **增益**：系统声音没有麦克风的前置放大，音量取决于用户把播放器/
         // 系统音量开多大——那场网课实录里 522 段有 281 段判「不可信」，
-        // 峰值只有 0.03，whisper 在这么低的电平上基本在编。这里过一遍与
-        // 麦克风同一个 `AudioPreamp`（同一档设置，避免出现「两种音源两套增益」）
-        let preamp = AudioPreamp(mode: micGain)
+        // 峰值只有 0.03，whisper 在这么低的电平上基本在编。
+        //
+        // 这里用 `.auto` 而不是用户的麦克风档：麦克风那档常是 x3/x5 的**固定**
+        // 倍数（给小声说话准备的），套到系统声音上会把正常音量的播放直接削顶，
+        // 削顶比小声更难认
+        let preamp = AudioPreamp(mode: .auto)
 
         // 轮询取走攒下的采样：200ms 一次，既不会让管线吃到碎渣，
         // 也不会让采集队列背上「往管线塞数据」的跨 actor 责任
