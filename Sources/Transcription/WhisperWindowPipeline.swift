@@ -273,8 +273,10 @@ final class WhisperWindowPipeline: @unchecked Sendable {
             samples: windowSamples, sampleRate: Self.sampleRate
         )
         return segments.filter { segment in
-            // 重复判据：整场第 3 次起、且是短句 → 当循环幻听
-            if repetitionGuard.shouldDrop(segment.text) {
+            // 重复判据**只作佐证**：本身形态可疑（括号/影视词/谢幕词）才计入，
+            // 老师反复强调的重点（「梯度下降」说 5 次）不受影响
+            if WhisperHallucination.isSuspiciousShape(segment.text),
+               repetitionGuard.shouldDrop(segment.text) {
                 hallucinationLog.append("丢掉「\(segment.text)」— 短句整场循环")
                 return false
             }

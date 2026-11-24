@@ -608,6 +608,23 @@ enum WhisperHallucination {
     }
 
 
+    /// 这句话**本身就可疑**吗（重复判据的前置条件）。
+    ///
+    /// 为什么要这个前置条件：重复本身不是幻觉的特征——老师反复强调的重点
+    /// （「梯度下降」「这一步很重要」）在整场里会重复很多次，按重复丢会
+    /// 正好删掉最该看的内容。只有**形态已经可疑**的句子（被括号包住、
+    /// 含影视词汇、或整段就是谢幕词），重复次数才有鉴别力：
+    /// 「(拍摄中)」重复 3 次是片子循环，「梯度下降」重复 5 次是重点。
+    static func isSuspiciousShape(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = normalize(trimmed)
+        guard !normalized.isEmpty else { return false }
+        if parenthesizedContent(trimmed) != nil { return true }
+        if standalonePhrases.contains(where: { normalize($0) == normalized }) { return true }
+        if televisionVocabulary.contains(where: { normalized.contains(normalize($0)) }) { return true }
+        return false
+    }
+
     // MARK: - 重复判据（有状态，但与上面的纯函数分开）
 
     /// 整场里同一句短句重复第 3 次起判幻听。
@@ -959,6 +976,16 @@ enum WhisperHallucination {
         } else {
             lines.append("  ✅ 四句正常课堂内容全留下")
         }
+        // 重复判据只作佐证：老师反复强调的重点（不带可疑形态）永远不丢
+        var emphasisGuard = RepetitionGuard.strict
+        let emphasis = ["梯度下降是关键", "梯度下降是关键", "梯度下降是关键", "梯度下降是关键"]
+        if emphasis.contains(where: { WhisperHallucination.isSuspiciousShape($0) && emphasisGuard.shouldDrop($0) }) {
+            failures += 1
+            lines.append("  ❌ 老师反复强调的重点被重复判据误杀")
+        } else {
+            lines.append("  ✅ 老师把同一句重点说 4 次 → 全留（重复只作佐证）")
+        }
+
         var longGuard = RepetitionGuard()
         _ = longGuard.shouldDrop(String(repeating: "长句", count: 20))
         _ = longGuard.shouldDrop(String(repeating: "长句", count: 20))
