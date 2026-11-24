@@ -112,6 +112,29 @@ enum WhisperHallucination {
         "小铃铛", "小鈴鐺",
     ]
 
+    /// 可疑话术名单。**它不单独构成丢弃理由**（自检裁决：老师真说「谢谢大家」
+    /// 时一个字都不能丢），只交给管线里的「重复次数」判据一起看：
+    /// 整场第 3 次以后还说同一句谢幕词的，才是片子里的循环。
+    ///
+    /// 出处：2026-11-24 那场 47 分钟的网课转录里，「谢谢大家」重复 7 次、
+    /// 「谢谢大家的支持」3 次、（观众朋友们,请多多支持）5 次——这些是片子里的
+    /// 谢幕话术，不是老师说的。用「精确相等」而不是子串：老师真说「谢谢大家，
+    /// 今天就到这里」时整段不等于它，不会被误杀。
+    static let standalonePhrases: [String] = [
+        "谢谢大家", "谢谢大家!", "谢谢大家的支持", "谢谢大家的支持!",
+        "谢谢观看", "感谢观看", "谢谢收看", "感谢收看", "谢谢您的观看",
+        "请多多支持", "请大家多多支持", "观众朋友们请多多支持",
+        "拍摄中", "拍摄现场",
+    ]
+
+    /// 电视/影视字幕里常见的词。括号段里出现这些、又没有第一人称 →
+    /// 基本可以断定是片子里的标注，不是课堂里的话
+    static let televisionVocabulary: [String] = [
+        "观众", "觀眾", "拍摄", "拍攝", "镜头", "鏡頭", "节目", "節目",
+        "客厅", "客厅门", "客人", "剧组", "剧組", "播出", "收看", "首播", "频道", "頻道",
+        "时尚高潮", "最新消息", "请搜寻", "請搜尋", "多多支持",
+    ]
+
     // MARK: - ①a 署名模板（「字幕组」留下的那一行）
 
     /// 字幕组留下的署名（「字幕」三字只在署名语境里出现，课堂不会）。
@@ -358,6 +381,11 @@ enum WhisperHallucination {
             if containsPersonalPronoun(key) {
                 return .keep
             }
+            // ②″ 括号里出现影视字幕词汇 → 片子里的标注，不是课堂
+            //（2026-11-24 的实录：（观众朋友们,请多多支持）5 次）
+            if let word = televisionVocabulary.first(where: { key.contains($0) }) {
+                return .dropNonSpeechAnnotation(word)
+            }
             // 整段**就是**某个标注词本身 → 无条件丢，**不受长度门限制**。
             // 长度门是为中文标注定的（实测最长 6 字），可英文标注是下划线连写的：
             // `blank_audio` 有 11 个字符、`sound effect` 有 12 个，会被它整个挡掉。
@@ -550,6 +578,38 @@ enum WhisperHallucination {
         }.map(String.init).joined()
     }
 
+
+    // MARK: - 重复判据（有状态，但与上面的纯函数分开）
+
+    /// 整场里同一句短句重复第 3 次起判幻听。
+    ///
+    /// 为什么不能并进 `verdict`：单看一段「谢谢大家」判不出真假——老师真会说
+    /// （自检里 9/18 那条裁决：一个字都不能丢）。真假要靠**整场说了几遍**：
+    /// 2026-11-24 的 47 分钟网课实录里，「谢谢大家」7 次、
+    /// 「(观众朋友们,请多多支持)」5 次、「(拍摄中)」3 次——那是片子在循环。
+    ///
+    /// 阈值 3 而不是 2：课堂上「然后」「对吧」这种口头禅重复两次很正常。
+    /// 长度上限 16 字：长句重复更像是真在重述，短句循环才像片子。
+    struct RepetitionGuard {
+        /// 第几次起丢（=3 表示第 3 次及以后丢）
+        var threshold: Int = 3
+        /// 只看短句（归一化后字数上限）
+        var maxLength: Int = 16
+
+        private var counts: [String: Int] = [:]
+
+        /// - Returns: true 表示这句该丢（并已计入次数）
+        mutating func shouldDrop(_ text: String) -> Bool {
+            let key = WhisperHallucination.normalize(text)
+            guard !key.isEmpty else { return false }
+            let seen = counts[key, default: 0]
+            counts[key] = seen + 1
+            return seen + 1 >= threshold && key.count <= maxLength
+        }
+
+        mutating func reset() { counts.removeAll() }
+    }
+
     // MARK: - 自检
 
     /// `--hallucination-selftest`。纯函数，不加载模型、不碰麦克风、不联网。
@@ -642,6 +702,29 @@ enum WhisperHallucination {
             .init(text: "♪♪♪", noSpeech: 0.99, level: quiet, floor: floor,
                   shouldDrop: true, note: "音符字形"),
 
+            // ── 必须丢：2026-11-24 网课实录（47 分钟、系统声音）──
+            // 那场里「谢谢大家」7 次、（观众朋友们,请多多支持）5 次、
+            // （拍摄中）3 次——都是片子里的谢幕话术与片场标注
+            // 单次的「谢谢大家」**必须留**（自检里 9/18 那条裁决）；
+            // 11/24 那场里它之所以是幻听，靠的是管线里的「重复次数」判据
+            // （第 3 次起丢），不是这一层
+            .init(text: "谢谢大家!", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: false, note: "单次留着；整场 7 次由重复判据处理"),
+            .init(text: "(观众朋友们,请多多支持)", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: true, note: "同上，5 次；括号 + 影视词汇"),
+            .init(text: "(拍摄中)", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: true, note: "同上，3 次"),
+            .init(text: "(请搜寻「时尚高潮」,才能够看到最新消息)", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: true, note: "同上，2 次；片子里的角标"),
+            .init(text: "(客厅门)", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: true, note: "同上；剧情标注"),
+            // ── 必须留：老师真会说的话（新规则不能顺手把这些杀了）──
+            .init(text: "谢谢大家，今天就到这里", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: false, note: "整段不等于「谢谢大家」，只是开头相同"),
+            .init(text: "观众的注意力是有限的", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: false, note: "影视词汇出现在**正文**里（不是括号标注）"),
+            .init(text: "（我喜欢听音乐）", noSpeech: 0.0, level: quiet, floor: floor,
+                  shouldDrop: false, note: "括号里有人称代词 → 是说话人，留下"),
             // ── 必须留：老师真会说的话 ──
             .init(text: "同学们下次见", noSpeech: 0.10, level: loud, floor: floor,
                   shouldDrop: false, note: "「下次见」刻意不收进词表"),
@@ -791,6 +874,34 @@ enum WhisperHallucination {
         let expectDrop = cases.filter(\.shouldDrop).count
         lines.append("")
         lines.append("  汇总：\(cases.count) 条用例（必丢 \(expectDrop) / 必留 \(cases.count - expectDrop)）· 不符 \(failures) 条")
+
+        // ── 重复判据（11/24 网课实录的形态：同一句循环）──
+        var guardTest = RepetitionGuard()
+        let loopTexts = ["谢谢大家!", "谢谢大家!", "谢谢大家!", "谢谢大家!"]
+        let loopDrops = loopTexts.map { guardTest.shouldDrop($0) }
+        if loopDrops != [false, false, true, true] {
+            failures += 1
+            lines.append("  ❌ 前两次留、第三次起丢 · 实得 \(loopDrops)")
+        } else {
+            lines.append("  ✅ 「谢谢大家!」×4 → 留两次、丢两次（11/24 实录里出现 7 次）")
+        }
+        var lectureGuard = RepetitionGuard()
+        let lecture = ["然后我们看这个梯度", "梯度下降的关键是学习率", "学习率太大会震荡", "太小学不动"]
+        if lecture.contains(where: { lectureGuard.shouldDrop($0) }) {
+            failures += 1
+            lines.append("  ❌ 课堂正文不该被重复判据误杀")
+        } else {
+            lines.append("  ✅ 四句正常课堂内容全留下")
+        }
+        var longGuard = RepetitionGuard()
+        _ = longGuard.shouldDrop(String(repeating: "长句", count: 20))
+        _ = longGuard.shouldDrop(String(repeating: "长句", count: 20))
+        if longGuard.shouldDrop(String(repeating: "长句", count: 20)) {
+            failures += 1
+            lines.append("  ❌ 长句重复不该按循环处理（长度上限 16 字）")
+        } else {
+            lines.append("  ✅ 长句重复不丢（只处理短句循环）")
+        }
         lines.append(failures == 0 ? "✅ 幻觉治理自检通过" : "❌ 幻觉治理自检未通过")
         return lines
     }

@@ -38,6 +38,9 @@ enum AppConfig {
         var autoFactCheck: Bool?
         /// 实时转录的后端（apple / whisper）。**缺省 apple**，见 `TranscriptionBackend`
         var transcriptionBackend: String?
+        /// 悬浮字幕的位置（用户拖动后记住）。缺省 nil = 自动贴屏幕顶部中间
+        var subtitleOverlayX: Double?
+        var subtitleOverlayTop: Double?
         /// 悬浮字幕（灵动岛样式）。缺省关：它是一条浮在全屏视频上的窗，
         /// 用户没要就不该出现
         var subtitleOverlay: Bool?
@@ -179,6 +182,20 @@ enum AppConfig {
     }
 
     static var usesSystemAudio: Bool { audioSource == "system" }
+
+    /// 悬浮字幕的位置：拖动过才有值
+    static var subtitleOverlayOrigin: (x: Double, top: Double)? {
+        guard let x = store.current.subtitleOverlayX,
+              let top = store.current.subtitleOverlayTop else { return nil }
+        return (x, top)
+    }
+
+    static func setSubtitleOverlayOrigin(x: Double, top: Double) {
+        var config = store.current
+        config.subtitleOverlayX = x
+        config.subtitleOverlayTop = top
+        try? store.save(config)
+    }
 
     /// 悬浮字幕开关（`CLASSROOM_SUBTITLE_OVERLAY=1` 可强制打开，探针/演示用）
     static var subtitleOverlayEnabled: Bool {

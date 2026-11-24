@@ -733,24 +733,32 @@ final class TranscriptionEngine {
                                          channels: 1,
                                          interleaved: false)
 
+        // **增益**：系统声音没有麦克风的前置放大，音量取决于用户把播放器/
+        // 系统音量开多大——那场网课实录里 522 段有 281 段判「不可信」，
+        // 峰值只有 0.03，whisper 在这么低的电平上基本在编。这里过一遍与
+        // 麦克风同一个 `AudioPreamp`（同一档设置，避免出现「两种音源两套增益」）
+        let preamp = AudioPreamp(mode: micGain)
+
         // 轮询取走攒下的采样：200ms 一次，既不会让管线吃到碎渣，
         // 也不会让采集队列背上「往管线塞数据」的跨 actor 责任
         systemAudioPump = Task { [weak self] in
             while !Task.isCancelled {
                 let chunk = capture.drain()
-                if !chunk.isEmpty {
-                    pipeline.append(chunk)
-                    if let recorder, let format = recordFormat,
-                       let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                                     frameCapacity: AVAudioFrameCount(chunk.count)) {
-                        buffer.frameLength = AVAudioFrameCount(chunk.count)
-                        if let destination = buffer.floatChannelData?[0] {
-                            chunk.withUnsafeBufferPointer { source in
-                                destination.update(from: source.baseAddress!, count: chunk.count)
-                            }
+                if !chunk.isEmpty, let format = recordFormat,
+                   let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                 frameCapacity: AVAudioFrameCount(chunk.count)) {
+                    buffer.frameLength = AVAudioFrameCount(chunk.count)
+                    if let destination = buffer.floatChannelData?[0] {
+                        chunk.withUnsafeBufferPointer { source in
+                            destination.update(from: source.baseAddress!, count: chunk.count)
                         }
-                        recorder.append(buffer)
                     }
+                    preamp.process(buffer)
+                    if let channel = buffer.floatChannelData?[0] {
+                        pipeline.append(Array(UnsafeBufferPointer(start: channel,
+                                                                  count: Int(buffer.frameLength))))
+                    }
+                    recorder?.append(buffer)
                 }
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 if self?.isRunning != true { break }

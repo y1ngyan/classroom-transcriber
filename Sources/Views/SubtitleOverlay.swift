@@ -18,6 +18,10 @@ final class SubtitleOverlayController {
     private var panel: NSPanel?
     private var model = SubtitleOverlayModel()
     private var idleTask: Task<Void, Never>?
+    /// 用户是否亲手拖过（拖过就不再自动居中）
+    private var hasUserPosition = false
+    /// 拖动后的左上角位置（y 存的是顶边：窗口高度会随展开变化）
+    private var savedOrigin: CGPoint?
     private var hideTask: Task<Void, Never>?
 
     private init() {}
@@ -25,7 +29,12 @@ final class SubtitleOverlayController {
     var isVisible: Bool { panel?.isVisible == true }
 
     func show() {
-        if panel == nil { panel = makePanel() }
+        if panel == nil {
+            let saved = AppConfig.subtitleOverlayOrigin
+            hasUserPosition = saved != nil
+            savedOrigin = saved.map { CGPoint(x: $0.x, y: $0.top) }
+            panel = makePanel()
+        }
         panel?.orderFrontRegardless()
         scheduleIdleCheck()
     }
@@ -63,7 +72,12 @@ final class SubtitleOverlayController {
         let units = SubtitleOverlayLogic.widthUnits(for: snapshot.lines)
         let width = CGFloat(units) * 13 + 48          // 13pt ≈ 一个中文字宽
         let height: CGFloat = snapshot.collapsed ? 34 : 34 + CGFloat(max(0, snapshot.lines.count - 1)) * 22
-        if let screen = NSScreen.main {
+        if hasUserPosition, let origin = savedOrigin {
+            // 拖动过：保持左上角不动，只让高度向下长（否则展开时会盖住上方的字）
+            let top = origin.y + panel.frame.height
+            panel.setFrame(NSRect(x: origin.x, y: top - height, width: width, height: height),
+                           display: true)
+        } else if let screen = NSScreen.main {
             let x = screen.frame.midX - width / 2
             let top = screen.visibleFrame.maxY - 12
             panel.setFrame(NSRect(x: x, y: top - height, width: width, height: height), display: true)
@@ -89,6 +103,15 @@ final class SubtitleOverlayController {
         }
     }
 
+    /// 记下当前位置：只记顶边（窗口会随行数长高，记底边会一跳一跳）
+    private func rememberUserPosition() {
+        guard let panel else { return }
+        let frame = panel.frame
+        hasUserPosition = true
+        savedOrigin = CGPoint(x: frame.minX, y: frame.maxY)
+        AppConfig.setSubtitleOverlayOrigin(x: Double(frame.minX), top: Double(frame.maxY))
+    }
+
     private func makePanel() -> NSPanel {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 420, height: 34),
                             styleMask: [.borderless, .nonactivatingPanel],
@@ -98,10 +121,20 @@ final class SubtitleOverlayController {
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
-        panel.ignoresMouseEvents = true         // 字幕不该拦住鼠标点击
+        // 允许拖动：用户可以把它拖到不挡网课字幕条的地方。
+        // `ignoresMouseEvents` 必须为 false，否则鼠标事件根本到不了窗上
+        panel.ignoresMouseEvents = false
+        panel.isMovableByWindowBackground = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.hidesOnDeactivate = false
         panel.contentView = NSHostingView(rootView: SubtitleIslandView(model: model))
+        // 用户一拖，就记下位置并停止自动居中——否则下一句一来就被拽回屏幕顶部，
+        // 用户会觉得「拖了没用」
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.rememberUserPosition() }
+        }
         return panel
     }
 }

@@ -253,6 +253,10 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 被丢的段**记进 `hallucinationLog`**。理由：删用户的转录内容是可见的删除，
     /// 「这段为什么没了」必须答得上来，不能静默丢。
     /// （今天答这个问题的只有探针，界面还没接——见 `hallucinationLog` 的注释）
+    /// 重复判据（有状态）。逻辑在 `WhisperHallucination.RepetitionGuard`，
+    /// 这里只持有一个实例——同一窗口函数里能单独自检，不必起整条管线
+    private var repetitionGuard = WhisperHallucination.RepetitionGuard()
+
     private func filterHallucinations(
         _ segments: [WhisperSegment],
         windowSamples: [Float]
@@ -261,6 +265,11 @@ final class WhisperWindowPipeline: @unchecked Sendable {
             samples: windowSamples, sampleRate: Self.sampleRate
         )
         return segments.filter { segment in
+            // 重复判据：整场第 3 次起、且是短句 → 当循环幻听
+            if repetitionGuard.shouldDrop(segment.text) {
+                hallucinationLog.append("丢掉「\(segment.text)」— 短句整场循环")
+                return false
+            }
             let verdict = WhisperHallucination.verdict(
                 text: segment.text,
                 noSpeechProbability: segment.noSpeechProbability,
