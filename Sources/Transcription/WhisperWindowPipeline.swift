@@ -129,7 +129,11 @@ final class WhisperWindowPipeline: @unchecked Sendable {
 
     init(
         segments: [TranscriptSegment] = [],
-        capacitySeconds: Double = 15,
+        // 缓冲容量。**必须跟补积压配套**：容量 15 秒时，解码一卡超过 5 秒，
+        // 「上一窗 + 一步」那一格就已经被挤出缓冲，`window(startingAtMillis:)`
+        // 取不到 → 退回「最近 10 秒」→ 中间那段内容被覆盖掉（实测实时 40 段
+        // vs 离线 153 段）。90 秒 = 允许积压 9 个窗
+        capacitySeconds: Double = 90,
         initialPrompt: String? = nil,
         gatePolicy: SpeechGatePolicy = .fromConfig(),
         mergeStepMillis: Int = WhisperWindowPipeline.stepMillis,
