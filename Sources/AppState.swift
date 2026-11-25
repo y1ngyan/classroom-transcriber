@@ -264,6 +264,10 @@ final class AppState {
             .init("增益", settings.micGain.rawValue),
             .init("术语", glossary.contextualTerms.count),
         ])
+        // 模型还在加载：把「按下去会发生什么」说清楚，而不是让按钮看起来没反应
+        if settings.backend == .whisper, transcription.whisper.isPreparing {
+            transcription.noteStatus("模型加载中，就绪后自动开始…")
+        }
         await transcription.requestPermissions()
         await transcription.start()
     }

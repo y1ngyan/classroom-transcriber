@@ -1870,6 +1870,10 @@ final class TranscriptionEngine {
 
     // MARK: - 停止
 
+    /// 编排层要能改状态行（例如「模型加载中，就绪后自动开始…」）。
+    /// `statusMessage` 本身对外只读——状态终究该由引擎写，这里只开一个窄口子
+    func noteStatus(_ text: String) { statusMessage = text }
+
     func stop() {
         // 先停草稿循环再卸 tap：反过来的话，一条已经排队的草稿推送可能在
         // 收尾落盘**之后**才落地，把一份过期的转录覆盖回去

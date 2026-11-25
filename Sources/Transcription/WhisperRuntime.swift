@@ -28,6 +28,11 @@ final class WhisperRuntime {
 
     private(set) var state: State = .idle
 
+    /// 这次加载是什么时候开始的（界面要显示「已经等了多久」）
+    private(set) var preparingStartedAt: Date?
+    /// 就绪那一刻（界面据此把「已就绪」显示 2.5 秒再收起来）
+    private(set) var readyAt: Date?
+
     /// 这次要加载的模型文件。界面直接显示它——「模型放哪儿」只能靠翻文档
     /// 回答的话，模型缺失这条路上用户就只剩「重装一遍」这一个动作
     let modelURL: URL
@@ -77,6 +82,11 @@ final class WhisperRuntime {
     // 主 actor 隔离的 token；而观察者块只弱引用 self，且这个对象活到进程结束
     // （它挂在 AppState 上），没有需要拆的循环
 
+    var isPreparing: Bool {
+        if case .preparing = state { return true }
+        return false
+    }
+
     var isReady: Bool {
         if case .ready = state { return true }
         return false
@@ -112,6 +122,8 @@ final class WhisperRuntime {
         }
 
         state = .preparing
+        preparingStartedAt = Date()
+        readyAt = nil
         let url = modelURL
         let queue = inferenceQueue
         warmupTask = Task { [weak self] in
@@ -144,8 +156,11 @@ final class WhisperRuntime {
                 let seconds = Double(elapsed.components.seconds)
                     + Double(elapsed.components.attoseconds) / 1e18
                 self.state = .ready(seconds: seconds)
+                self.readyAt = Date()
+                self.preparingStartedAt = nil
             case .failure(let error):
                 self.state = .unavailable(reason: error.localizedDescription)
+                self.preparingStartedAt = nil
             }
         }
     }

@@ -336,6 +336,43 @@ struct TranscriptionView: View {
     /// 混成一个的话标签就在撒谎。
     @ViewBuilder
     private var backendIndicator: some View {
+        // 加载模型要**看得见**：以前只有一行「正在准备…」，用户不知道还要等多久，
+        // 也不知道按了开始会不会丢。这里给一条进度条 + 秒数（等宽数字，不跳），
+        // 就绪后「已就绪」只停 2.5 秒就自己收起来（成功提示不该赖着）
+        TimelineView(.periodic(from: .now, by: 0.2)) { context in
+            modelStatus(now: context.date)
+        }
+    }
+
+    @ViewBuilder
+    private func modelStatus(now: Date) -> some View {
+        let runtime = appState.transcription.whisper
+        if engine.isRunning, let active = engine.activeBackend {
+            StatusMark(kind: .live, text: "本次录制：\(active.label)")
+        } else if runtime.isPreparing {
+            ModelLoadingRow(
+                elapsed: runtime.preparingStartedAt.map { now.timeIntervalSince($0) } ?? 0,
+                queued: appState.transcription.statusMessage.contains("就绪后自动开始")
+            )
+        } else if let readyAt = runtime.readyAt,
+                  now.timeIntervalSince(readyAt) < 2.5,
+                  case .ready(let seconds) = runtime.state {
+            HStack(spacing: Theme.Spacing.s6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Theme.success)
+                Text("模型已就绪 · \(String(format: "%.1f", seconds)) 秒")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+            }
+            .transition(.opacity)
+        } else {
+            legacyBackendIndicator
+        }
+    }
+
+    @ViewBuilder
+    private var legacyBackendIndicator: some View {
         if engine.isRunning, let active = engine.activeBackend {
             StatusMark(kind: .live, text: "本次录制：\(active.label)")
         } else {
@@ -351,5 +388,64 @@ struct TranscriptionView: View {
                 StatusMark(kind: .error, text: reason)
             }
         }
+    }
+}
+
+/// 模型加载中那一行。
+///
+/// 设计取舍（按 app-ui-design）：
+/// - **不画边框**：靠一层比页面略亮的底色分层，边界交给 1–3% 明度差
+/// - 数值一律 `monospacedDigit()`：秒数每 0.2 秒跳一次，不等宽会左右抖
+/// - 进度条是**不确定态**（模型加载不报百分比），用一条缓慢移动的高光表示「在动」
+/// - 不加「取消」：加载几秒就完了，多一个按钮只会多一个误点
+private struct ModelLoadingRow: View {
+    var elapsed: Double
+    var queued: Bool
+
+    @State private var phase: CGFloat = -0.4
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.s6) {
+            HStack(spacing: Theme.Spacing.s6) {
+                Circle()
+                    .fill(Theme.accent)
+                    .frame(width: 6, height: 6)
+                Text("正在加载 Whisper 模型")
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textPrimary)
+                Text(String(format: "%.0f 秒", elapsed))
+                    .textStyle(Theme.Text.meta)
+                    .foregroundStyle(Theme.textSecondary)
+                    .monospacedDigit()
+                Spacer(minLength: 0)
+                if queued {
+                    Text("就绪后自动开始")
+                        .textStyle(Theme.Text.meta)
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.textPrimary.opacity(0.06))
+                    Capsule()
+                        .fill(Theme.accent)
+                        .frame(width: geometry.size.width * 0.28)
+                        .offset(x: geometry.size.width * phase)
+                }
+            }
+            .frame(height: 3)
+            .onAppear {
+                withAnimation(.linear(duration: 1.4).repeatForever(autoreverses: false)) {
+                    phase = 1.0
+                }
+            }
+
+            Text("首次加载要几十秒（模型 0.5GB，还要编译推理内核）；之后开 App 会自动预热，不再等")
+                .textStyle(Theme.Text.meta)
+                .foregroundStyle(Theme.textTertiary)
+        }
+        .padding(.vertical, 4)
     }
 }

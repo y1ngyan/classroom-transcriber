@@ -2564,6 +2564,12 @@ struct ClassroomTranscriberApp: App {
                     if appState.showsSubtitleOverlay {
                         SubtitleOverlayController.shared.show()
                     }
+                    // 启动就预热模型：等用户按下「开始录制」才加载的话，
+                    // 第一分钟都在等模型（冷启动还会让前几窗解码慢到丢内容）。
+                    // 后端起点的判断放在这里，是因为设置页也可能把后端切成 whisper
+                    if appState.settings.backend == .whisper {
+                        appState.transcription.whisper.warmUp()
+                    }
                 }
                 .frame(minWidth: 820, minHeight: 660)
         }
