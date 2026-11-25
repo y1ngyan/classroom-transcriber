@@ -650,11 +650,19 @@ final class TranscriptionEngine {
             guard !Task.isCancelled else { return }
 
             let roundStarted = ContinuousClock.now
+            let windowStart = pipeline.lastWindowStartMillis ?? -1
+            var produced = 0
+            var note = "ok"
             do {
                 if let update = try await advanceWhisper(pipeline) {
                     adoptWhisperSegments(update.segments)
+                    produced = update.segments.count
+                    note = update.changes.first.map { String($0.prefix(40)) } ?? "无变化"
+                } else {
+                    note = "本窗没转（没攒够/同窗）"
                 }
             } catch {
+                note = "失败：\(error.localizedDescription)"
                 // 单窗失败不停链路：下一窗还会覆盖同一段音频（滑窗的好处），
                 // 但要说出来——连续失败时用户能看见原因（比如模型被移走了）
                 statusMessage = "⚠️ Whisper 单窗转写失败: \(error.localizedDescription)"
@@ -664,6 +672,17 @@ final class TranscriptionEngine {
                 Double(roundElapsed.components.seconds)
                     + Double(roundElapsed.components.attoseconds) / 1e18
             )
+
+            // 每轮都记一行：吞字到底是「没转」还是「转了但空」，只有这行能回答
+            DiagnosticLog.info(.transcription, "滑窗轮", fields: [
+                .init("窗起点", "\(windowStart)ms"),
+                .init(seconds: "解码", Double(roundElapsed.components.seconds)),
+                .init("段数", produced),
+                .init("积压", "\(pipeline.backlogMillis)ms"),
+                .init("结果", note),
+            ])
+            statusMessage = "转录中 · 轮 \(whisperRoundSeconds.count) · 跳过 \(whisperSkippedRounds)"
+                + " · 解码均 \(String(format: "%.1f", averageRoundSeconds))s · 段 \(segments.count)"
 
             scheduled = scheduled.advanced(by: step)
             // 有积压就立刻补，不睡：吞字的根因就是「卡住之后只取最近 10 秒」
