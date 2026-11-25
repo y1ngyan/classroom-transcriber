@@ -129,6 +129,15 @@ final class WhisperRuntime {
             switch result {
             case .success(let engine):
                 self.engine = engine
+                // **预热解码**，不只是加载模型。
+                //
+                // 实测（2026-11-25）：录第一分钟时单窗解码 5→34 秒，后面同样
+                // 的窗只要 3 秒——差的是 Metal kernel 的首次编译与首帧分配。
+                // 冷着开录，前几窗就把积压堆到缓冲上限，用户看到的是「中间丢了
+                // 两分钟」。这里空跑一小段（1 秒静音）把 kernel 编好，
+                // 代价在后台，不在录音里
+                _ = try? engine.transcribe([Float](repeating: 0, count: 16_000),
+                                           audio: "预热解码（1 秒静音）")
                 let elapsed = ContinuousClock.now - started
                 let seconds = Double(elapsed.components.seconds)
                     + Double(elapsed.components.attoseconds) / 1e18

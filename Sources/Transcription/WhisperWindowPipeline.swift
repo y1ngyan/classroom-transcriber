@@ -133,7 +133,7 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         // 「上一窗 + 一步」那一格就已经被挤出缓冲，`window(startingAtMillis:)`
         // 取不到 → 退回「最近 10 秒」→ 中间那段内容被覆盖掉（实测实时 40 段
         // vs 离线 153 段）。90 秒 = 允许积压 9 个窗
-        capacitySeconds: Double = 90,
+        capacitySeconds: Double = 300,
         initialPrompt: String? = nil,
         gatePolicy: SpeechGatePolicy = .fromConfig(),
         mergeStepMillis: Int = WhisperWindowPipeline.stepMillis,
@@ -202,8 +202,16 @@ final class WhisperWindowPipeline: @unchecked Sendable {
                                        sampleRate: Self.sampleRate) {
             return (catchUp.samples, catchUp.startMillis)
         }
-        // ② 追不上（积压超过缓冲区）就退回「最近 10 秒」——宁可丢一段，
-        //    也不让延迟无界增长
+        // ② 积压超过缓冲区：从**缓冲里最老的那一格**接着取。
+        //    直接跳「最近 10 秒」会把积压整段扔掉（实测丢过 86 秒）；
+        //    从最老取，损失只限「被挤出去的那部分」，而且延迟有界
+        if buffer.oldestStartMillis > 0,
+           let oldest = buffer.window(startingAtMillis: buffer.oldestStartMillis,
+                                      durationSeconds: Self.windowSeconds,
+                                      sampleRate: Self.sampleRate) {
+            return (oldest.samples, oldest.startMillis)
+        }
+        // ③ 实在没法补（缓冲空/不足一窗）才退回「最近 10 秒」
         guard let window = buffer.windowWithOrigin(
             durationSeconds: Self.windowSeconds,
             sampleRate: Self.sampleRate,

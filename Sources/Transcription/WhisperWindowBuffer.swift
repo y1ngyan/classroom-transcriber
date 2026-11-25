@@ -29,7 +29,7 @@ final class WhisperWindowBuffer: @unchecked Sendable {
     ///     （P12-2 试过 9.6 秒），照那个式子推会觉得 15 秒不够，但窗口是
     ///     从当前时刻往回取的，与步长无关（步长只决定取多勤）
     ///   - sampleRate: 固定 16kHz（Whisper 的输入格式）。
-    init(capacitySeconds: Double = 90, sampleRate: Double = 16_000) {
+    init(capacitySeconds: Double = 300, sampleRate: Double = 16_000) {
         self.capacity = Int(capacitySeconds * sampleRate)
         self.buffer = []
         self.buffer.reserveCapacity(self.capacity)
@@ -71,6 +71,14 @@ final class WhisperWindowBuffer: @unchecked Sendable {
         guard startSample >= oldest, startSample + wanted <= totalAppended else { return nil }
         let offset = startSample - oldest
         return (Array(buffer[offset..<(offset + wanted)]), startingAtMillis)
+    }
+
+    /// 缓冲里最老的样本对应的时间（毫秒）。补积压取不到时，从这儿取，
+    /// 损失被限制在「超出容量的那一小段」，而不是直接跳到最新、扔掉全部积压
+    var oldestStartMillis: Int {
+        lock.lock(); defer { lock.unlock() }
+        let oldest = totalAppended - buffer.count
+        return Int(Double(max(0, oldest)) / 16_000 * 1000)
     }
 
     /// 从启动至今累计追加的样本数（包含已经被挤出 ring buffer 的）。
