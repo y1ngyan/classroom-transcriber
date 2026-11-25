@@ -80,6 +80,11 @@ enum RetranscribeRun {
     /// 要跑一节课的时间，攒到最后的话中途超时/被打断就一个字都看不到
     @discardableResult
     static func run(arguments: [String], emit: @escaping @Sendable (String) -> Void) async -> Int32 {
+        // 关掉 temperature 回退链：实测离线重转里有窗口被拖到 98–129 秒
+        // （6 遍完整解码 × 长窗），一条 5 分钟的录音跑不完。离线要的是「跑得完」
+        // 加上「结果稳」，不是把每条退路都试一遍
+        WhisperEngine.liveTemperatureIncrement = 0
+        defer { WhisperEngine.liveTemperatureIncrement = nil }
         let options: Options
         switch parse(arguments) {
         case .failure(let usageError):

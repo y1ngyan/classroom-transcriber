@@ -2067,6 +2067,12 @@ struct ClassroomTranscriberApp: App {
             exitReleasingGgml(result.frames > 0 ? 0 : 1)
         }
 
+        if CommandLine.arguments.contains("--system-gain-selftest") {
+            let result = SystemAudioGainSelfTest.run()
+            for line in result.lines { print(line) }
+            exitReleasingGgml(result.failed == 0 ? 0 : 1)
+        }
+
         if CommandLine.arguments.contains("--subtitle-overlay-selftest") {
             let result = SubtitleOverlaySelfTest.run()
             for line in result.lines { print(line) }

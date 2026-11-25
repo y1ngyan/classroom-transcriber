@@ -800,14 +800,10 @@ final class TranscriptionEngine {
                                          channels: 1,
                                          interleaved: false)
 
-        // **增益**：系统声音没有麦克风的前置放大，音量取决于用户把播放器/
-        // 系统音量开多大——那场网课实录里 522 段有 281 段判「不可信」，
-        // 峰值只有 0.03，whisper 在这么低的电平上基本在编。
-        //
-        // 这里用 `.auto` 而不是用户的麦克风档：麦克风那档常是 x3/x5 的**固定**
-        // 倍数（给小声说话准备的），套到系统声音上会把正常音量的播放直接削顶，
-        // 削顶比小声更难认
-        let preamp = AudioPreamp(mode: .auto)
+        // **电平补偿**：只在明显偏小时补一个固定倍数（见 SystemAudioGain）。
+        // 不用 AGC：系统声音是数字信号，电平只由播放器音量决定，连续变增益
+        // 只会给已经清楚的声音添抽吸感，识别上是「字被拉糊」——这也是准确率
+        // 一直上不去的一个来源。课堂实录 RMS 0.10–0.15，正常播放根本不该动它
 
         // 轮询取走攒下的采样：200ms 一次，既不会让管线吃到碎渣，
         // 也不会让采集队列背上「往管线塞数据」的跨 actor 责任
@@ -823,7 +819,15 @@ final class TranscriptionEngine {
                             destination.update(from: source.baseAddress!, count: chunk.count)
                         }
                     }
-                    preamp.process(buffer)
+                    // 按块算一次增益，整块同一个倍数（不随样本跳变）
+                    if let channel = buffer.floatChannelData?[0] {
+                        let frames = Int(buffer.frameLength)
+                        let samples = UnsafeBufferPointer(start: channel, count: frames)
+                        let gain = SystemAudioGain.gain(forRMS: SystemAudioGain.rms(of: Array(samples)))
+                        if gain != 1 {
+                            for index in 0..<frames { channel[index] = max(-1, min(1, channel[index] * gain)) }
+                        }
+                    }
                     if let channel = buffer.floatChannelData?[0] {
                         pipeline.append(Array(UnsafeBufferPointer(start: channel,
                                                                   count: Int(buffer.frameLength))))

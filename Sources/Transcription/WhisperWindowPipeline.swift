@@ -45,7 +45,7 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// ——追不上就跳窗，跳掉的音频再也不会被转，用户看到的就是「吞字」。
     /// 5 秒步长把占用压到 79%，实测 41 窗一个不落、覆盖率不变（90.1%）。
     /// 离线重转仍用 3 秒（那边没有实时压力）
-    static let liveStepMillis = 5_000
+    static let liveStepMillis = 7_000
     static let sampleRate = 16_000.0
 
     /// 录音收尾那一窗至少要有的音频。低于这个长度不转：Whisper 喂几百毫秒

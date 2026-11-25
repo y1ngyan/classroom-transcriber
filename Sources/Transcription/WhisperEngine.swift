@@ -314,6 +314,12 @@ final class WhisperEngine: @unchecked Sendable {
 
     /// 模型的下载地址。用 hf-mirror 是因为国内直连 huggingface 不稳
     static let modelFileName = "ggml-medium-q5_0.bin"
+
+    /// 实时链路优先用的模型。**turbo 而不是 medium**：同一段 338 秒课堂实录，
+    /// medium 出 153 段/1353 字、不可信 40 段；turbo 出 182 段/1499 字、
+    /// 不可信 21 段、覆盖率 100%。代价是单窗解码 4.0 → 6.0 秒，
+    /// 所以实时步长跟着放到 7 秒（见 `WhisperWindowPipeline.liveStepMillis`）
+    static let liveModelFileName = "ggml-large-v3-turbo-q5_0.bin"
     static let modelURL = "https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin"
     /// 514MB，带余量做校验
     static let expectedModelBytes: Int64 = 500_000_000
@@ -359,6 +365,15 @@ final class WhisperEngine: @unchecked Sendable {
             return URL(fileURLWithPath: (raw as NSString).expandingTildeInPath)
         }
         return modelPath
+    }
+
+    /// 实时链路实际要加载的模型：turbo 在位就用 turbo，否则回落 medium
+    static var liveModelURL: URL {
+        if ProcessInfo.processInfo.environment["CLASSROOM_WHISPER_MODEL"] != nil {
+            return resolvedModelURL
+        }
+        let turbo = modelDirectory.appendingPathComponent(liveModelFileName)
+        return FileManager.default.fileExists(atPath: turbo.path) ? turbo : resolvedModelURL
     }
 
     static var isModelReady: Bool {

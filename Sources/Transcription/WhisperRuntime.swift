@@ -48,7 +48,9 @@ final class WhisperRuntime {
         qos: .userInitiated
     )
 
-    init(modelURL: URL = WhisperEngine.resolvedModelURL) {
+    /// - Parameter modelURL: 缺省用**实时那档**（turbo 在位就 turbo）。
+    ///   离线重转自己会显式传 large，不走这个默认值
+    init(modelURL: URL = WhisperEngine.liveModelURL) {
         self.modelURL = modelURL
 
         // 正常退出（Cmd+Q）时把引擎放掉。理由见 `unload()`——不放的话进程
