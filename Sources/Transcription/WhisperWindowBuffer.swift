@@ -17,7 +17,11 @@ final class WhisperWindowBuffer: @unchecked Sendable {
     private let capacity: Int
 
     /// - Parameters:
-    ///   - capacitySeconds: ring buffer 最大保留时长。默认 15 秒。
+    ///   - capacitySeconds: ring buffer 最大保留时长。默认 **90 秒**。
+    ///     原来是 15 秒，2026-11-25 实测出问题：解码偶尔卡 20 秒以上，
+    ///     那段时间的音频被挤出缓冲区，而取窗只取「最近 10 秒」——
+    ///     被挤掉的音频**永远不会再被转**，用户看到的就是一段段空洞。
+    ///     90 秒 = 允许积压 9 个窗，追得上就不丢（配合 `window(startingAtMillis:)`）
     ///     要够长：窗口是「当前时刻往回 10 秒」（`windowWithOrigin` 取的是
     ///     后缀），而取窗时刻比窗口末尾晚——留出的余量就是「取窗前还能再晚
     ///     多少」。15 秒 = 10 秒窗口 + 5 秒余量。
@@ -25,7 +29,7 @@ final class WhisperWindowBuffer: @unchecked Sendable {
     ///     （P12-2 试过 9.6 秒），照那个式子推会觉得 15 秒不够，但窗口是
     ///     从当前时刻往回取的，与步长无关（步长只决定取多勤）
     ///   - sampleRate: 固定 16kHz（Whisper 的输入格式）。
-    init(capacitySeconds: Double = 15, sampleRate: Double = 16_000) {
+    init(capacitySeconds: Double = 90, sampleRate: Double = 16_000) {
         self.capacity = Int(capacitySeconds * sampleRate)
         self.buffer = []
         self.buffer.reserveCapacity(self.capacity)
@@ -49,6 +53,24 @@ final class WhisperWindowBuffer: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard buffer.count >= needed else { return nil }
         return Array(buffer.suffix(needed))
+    }
+
+    /// 取**指定起点**的窗（补齐积压用）。
+    ///
+    /// 和 `windowWithOrigin` 的区别：那个永远取「最新 10 秒」，这个从
+    /// `startMillis` 开始取。实时链路解码卡顿后，下一窗要从上次的下一格继续，
+    /// 否则中间那段音频谁也看不见——这就是「吞字」的结构性来源。
+    ///
+    /// - Returns: nil = 起点比缓冲区还老（已经追不回来了），或者这一窗还没攒满
+    func window(startingAtMillis: Int, durationSeconds: Double,
+                sampleRate: Double = 16_000) -> (samples: [Float], startMillis: Int)? {
+        lock.lock(); defer { lock.unlock() }
+        let wanted = Int(durationSeconds * sampleRate)
+        let startSample = Int(Double(startingAtMillis) / 1000 * sampleRate)
+        let oldest = totalAppended - buffer.count
+        guard startSample >= oldest, startSample + wanted <= totalAppended else { return nil }
+        let offset = startSample - oldest
+        return (Array(buffer[offset..<(offset + wanted)]), startingAtMillis)
     }
 
     /// 从启动至今累计追加的样本数（包含已经被挤出 ring buffer 的）。

@@ -265,6 +265,16 @@ final class TranscriptionEngine {
     /// 因为上一轮超步长而跳过的轮数。不丢音频（下一窗整段覆盖），但界面上
     /// 出句子的间隔会变长，所以要能报出来
     private var whisperSkippedRounds = 0
+
+    /// 已跑过的滑窗轮数（诊断用）
+    var roundCount: Int { whisperRoundSeconds.count }
+    /// 平均单窗解码秒数（诊断用）
+    var averageRoundSeconds: Double {
+        guard !whisperRoundSeconds.isEmpty else { return 0 }
+        return whisperRoundSeconds.reduce(0, +) / Double(whisperRoundSeconds.count)
+    }
+    /// 因超步长被跳过的轮数（诊断用）
+    var skippedRounds: Int { whisperSkippedRounds }
     /// 每轮的墙钟耗时（含等在队列后面的时间）。纯转写耗时在 pipeline 里
     private var whisperRoundSeconds: [Double] = []
 
@@ -656,6 +666,11 @@ final class TranscriptionEngine {
             )
 
             scheduled = scheduled.advanced(by: step)
+            // 有积压就立刻补，不睡：吞字的根因就是「卡住之后只取最近 10 秒」
+            if pipeline.backlogMillis > 0 {
+                scheduled = ContinuousClock.now
+                continue
+            }
             // **超步长就跳过下一轮，不排队。**
             // 排队看着更「不丢内容」，但滑窗取的是「最近 10 秒」，补跑一个已经
             // 过期的窗口收益是零——那 10 秒会被下一窗完整覆盖。而代价是延迟随

@@ -169,6 +169,16 @@ final class WhisperWindowPipeline: @unchecked Sendable {
         return try merge(windowSamples: window.samples, windowStartMillis: window.startMillis, engine: engine)
     }
 
+    /// 还没转完的音频有多少毫秒（积压）。
+    ///
+    /// 有积压时驱动循环不该再睡一个步长——立刻接着补，否则 90 秒的缓冲
+    /// 也追不回来（每睡 5 秒就多积 5 秒）
+    var backlogMillis: Int {
+        let bufferedEnd = Int(Double(buffer.totalSampleCount) / Self.sampleRate * 1000)
+        let nextStart = (lastWindowStartMillis ?? 0) + mergeStepMillis
+        return max(0, bufferedEnd - (nextStart + Int(Self.windowSeconds * 1000)))
+    }
+
     /// 取窗（**不解码、不判定、不动任何状态**）。
     ///
     /// `advance` / `finish` / 分布扫描（`--whisper-window-file … --gate-scan`，
@@ -177,6 +187,19 @@ final class WhisperWindowPipeline: @unchecked Sendable {
     /// 就不描述生产实际取的窗（这个坑 `WhisperWindowBuffer.windowWithOrigin`
     /// 的注释里已经踩过一次）
     func peekWindow(minimumSeconds: Double = 0) -> (samples: [Float], startMillis: Int)? {
+        // ① 先补积压：如果上一窗之后还有一整格没转，从那儿接着取。
+        //
+        // 不加这一步的话，解码一卡（实测最坏 20 秒以上），下一窗只取「最近 10 秒」，
+        // 中间那段音频就再也没人转——这就是「吞字 / 有些根本没识别出来」的结构性原因。
+        // 缓冲区现在留 90 秒，足够把积压的几格补完
+        if let last = lastWindowStartMillis, last > 0,
+           let catchUp = buffer.window(startingAtMillis: last + mergeStepMillis,
+                                       durationSeconds: Self.windowSeconds,
+                                       sampleRate: Self.sampleRate) {
+            return (catchUp.samples, catchUp.startMillis)
+        }
+        // ② 追不上（积压超过缓冲区）就退回「最近 10 秒」——宁可丢一段，
+        //    也不让延迟无界增长
         guard let window = buffer.windowWithOrigin(
             durationSeconds: Self.windowSeconds,
             sampleRate: Self.sampleRate,

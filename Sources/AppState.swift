@@ -137,6 +137,10 @@ final class AppState {
                 .init("本次段数", draft.segments.count),
                 .init("累计段数", session.segmentCount),
                 .init(seconds: "本次时长", Double(draft.durationMillis) / 1000),
+                // 滑窗健康度：吞字排查要靠这三个数（轮数少、跳过多 = 追不上）
+                .init("滑窗轮次", transcription.roundCount),
+                .init(seconds: "平均解码", transcription.averageRoundSeconds),
+                .init("超步长跳过", transcription.skippedRounds),
             ])
             DiagnosticLog.info(.recording, "录音落盘", fields: [
                 .init("sessionId", session.id),
